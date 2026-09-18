@@ -46,7 +46,7 @@ function fixture({ conflict = false, failure = '' } = {}) {
   writeFileSync(join(bin, 'npm'), `#!/bin/sh
 printf 'npm %s\n' "$*" >> "$TEST_LOG"
 if [ "$TEST_FAILURE" = "$*" ]; then exit 7; fi
-if [ "$*" = 'run build' ]; then mkdir -p dist; printf 'built' > dist/cli.js; fi
+if [ "$*" = 'run build' ]; then mkdir -p dist; printf 'built' > dist/cli.js; printf 'built %s\\n' "$PWD" >> "$TEST_LOG"; fi
 `);
   writeFileSync(join(bin, 'node'), `#!/bin/sh
 if [ "$1" = '--no-experimental-webstorage' ]; then exit 0; fi
@@ -55,37 +55,40 @@ test -f dist/cli.js || exit 8
 printf 'installed %s\n' "$PWD" >> "$TEST_LOG"
 `);
   for (const file of ['node', 'npm']) chmodSync(join(bin, file), 0o755);
-  const run = (script = 'install.sh') => spawnSync('sh', [join(source, script), ...(script === 'install.sh' ? ['--port', '8510'] : [])], {
+  const run = (script = 'install.sh', args = []) => spawnSync('sh', [join(source, script), ...args], {
     cwd: root, encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, PI_WEB_UPSTREAM_URL: upstream, PI_WEB_INSTALL_ROOT: releases, TEST_LOG: log, TEST_FAILURE: failure },
   });
   return { source, upstream, origin, log, releases, run };
 }
 
-test('syncs pure main locally and remotely, applies patches, then validates and installs', () => {
+function prepareLocalMain(f) {
+  git(f.source, 'fetch', f.upstream, 'main:main');
+}
+
+test('installs from local main without updating Agent, Git remotes or services', () => {
   const f = fixture();
+  prepareLocalMain(f);
+  git(f.source, 'remote', 'set-url', 'origin', '/nonexistent-origin');
   const patchHead = git(f.source, 'rev-parse', 'HEAD');
   const result = f.run();
   assert.equal(result.status, 0, result.stderr);
   const calls = readFileSync(f.log, 'utf8').trim().split('\n');
-  assert.deepEqual(calls.slice(0, 5), [
-    'npm install -g @earendil-works/pi-coding-agent@latest',
-    'npm ci --include=dev', 'npm test', 'npm run build',
-    'node dist/cli.js install --port 8510',
-  ]);
-  const installed = calls[5].slice('installed '.length);
+  assert.deepEqual(calls.slice(0, 3), ['npm ci --include=dev', 'npm test', 'npm run build']);
+  assert.equal(calls.length, 4);
+  const installed = calls[3].slice('built '.length);
   assert.ok(installed.startsWith(f.releases));
   assert.match(readFileSync(join(installed, '.npmrc'), 'utf8'), /allow-scripts=node-pty,esbuild/);
   const app = readFileSync(join(installed, 'app.txt'), 'utf8');
   assert.ok(app.includes('custom layout') && app.includes('new upstream'));
   const upstreamHead = git(f.upstream, 'rev-parse', 'HEAD');
   assert.equal(git(f.source, 'rev-parse', 'main'), upstreamHead);
-  assert.equal(git(f.origin, 'rev-parse', 'main'), upstreamHead);
+  assert.equal(git(f.origin, 'for-each-ref', '--format=%(refname)', 'refs/heads/main'), '');
   assert.equal(git(f.source, 'rev-parse', 'HEAD'), patchHead);
   assert.equal(git(f.source, 'status', '--porcelain'), '');
   assert.equal(git(f.source, 'rev-list', '--count', 'terminal-patch'), '1');
   assert.ok(!git(f.source, 'ls-tree', '--name-only', 'terminal-patch').includes('app.txt'));
   assert.equal(f.run().status, 0);
-  const installs = readFileSync(f.log, 'utf8').split('\n').filter(line => line.startsWith('installed '));
+  const installs = readFileSync(f.log, 'utf8').split('\n').filter(line => line.startsWith('built '));
   assert.equal(new Set(installs).size, 2);
   assert.equal(readFileSync(join(installed, 'app.txt'), 'utf8'), app);
 });
@@ -100,17 +103,19 @@ test('sync-only prepares a patch release without updating Agent or installing se
 
 test('conflicts stop installation while main stays pure upstream', () => {
   const f = fixture({ conflict: true });
+  prepareLocalMain(f);
   const result = f.run();
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /Patch conflict/);
   assert.match(result.stderr, /retained directory/);
-  assert.equal(readFileSync(f.log, 'utf8').trim(), 'npm install -g @earendil-works/pi-coding-agent@latest');
+  assert.equal(readFileSync(f.log, 'utf8'), '');
   assert.equal(git(f.source, 'rev-parse', 'main'), git(f.upstream, 'rev-parse', 'HEAD'));
 });
 
-for (const failure of ['install -g @earendil-works/pi-coding-agent@latest', 'ci --include=dev', 'test', 'run build']) {
+for (const failure of ['ci --include=dev', 'test', 'run build']) {
   test(`does not install services after ${failure} fails`, () => {
     const f = fixture({ failure });
+    prepareLocalMain(f);
     const result = f.run();
     assert.notEqual(result.status, 0);
     const calls = readFileSync(f.log, 'utf8');
@@ -196,4 +201,34 @@ test('preserves an untracked file that would be overwritten by upstream', () => 
   assert.notEqual(f.run('sync.sh').status, 0);
   assert.equal(git(mainWorktree, 'rev-parse', 'HEAD'), oldHead);
   assert.equal(readFileSync(join(mainWorktree, 'new.txt'), 'utf8'), 'local file');
+});
+
+
+test('installation uses the existing main even when upstream has newer commits', () => {
+  const f = fixture();
+  prepareLocalMain(f);
+  const installedBase = git(f.source, 'rev-parse', 'main');
+  writeFileSync(join(f.upstream, 'later.txt'), 'new upstream');
+  git(f.upstream, 'add', '.');
+  git(f.upstream, 'commit', '-m', 'later upstream');
+  const result = f.run();
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(git(f.source, 'rev-parse', 'main'), installedBase);
+});
+
+test('installation with missing local main asks for synchronization without remote writes', () => {
+  const f = fixture();
+  const result = f.run();
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Local main is missing/);
+  assert.equal(readFileSync(f.log, 'utf8'), '');
+  assert.equal(git(f.origin, 'for-each-ref', '--format=%(refname)'), '');
+});
+
+test('installation rejects former service options before doing any work', () => {
+  const f = fixture();
+  const result = f.run('install.sh', ['--port', '8510']);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /service options are no longer accepted/);
+  assert.equal(readFileSync(f.log, 'utf8'), '');
 });

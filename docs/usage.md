@@ -6,31 +6,30 @@
 
 `patches/0001-swap-chat-workspace.patch` 包含面板交换功能及其测试。`patches/base-commit` 记录补丁制作时的上游基线，仅供更新补丁时参考，不固定安装版本。
 
-## 安装或更新运行版本
+## 本地安装（不启动服务）
 
 在 `terminal-patch` 工作区执行：
 
 ```bash
+# 首次安装前初始化 main；需要更新上游时也单独执行此命令
+sh sync.sh
+# 使用现有本地 main 安装
 sh install.sh
-# 将参数传给最终的服务安装命令
-sh install.sh --port 8504
 ```
 
-执行顺序：
+`install.sh` 的执行顺序：
 
-1. 全局更新 `@earendil-works/pi-coding-agent@latest`。
-2. 从官方上游拉取最新 `main`，fast-forward 本地 `main`，再推送到 `origin/main`。
-3. 从纯上游 `main` 克隆独立安装目录，按文件名顺序应用当前工作区 `patches/*.patch`，使用 Git 三方合并。
-4. 在生成目录的 `.npmrc` 中配置 node-pty/esbuild 的安装脚本权限，安装依赖，运行测试并构建。
-5. 调用构建产物的 `node dist/cli.js install` 安装用户服务。
+1. 从现有本地 `main` 克隆独立安装目录，按文件名顺序应用当前工作区 `patches/*.patch`，使用 Git 三方合并。
+2. 在生成目录的 `.npmrc` 中配置 node-pty/esbuild 的安装脚本权限，安装依赖。
+3. 运行测试并构建，打印包含 `dist/` 构建产物的安装目录。
 
-首次安装还需自行完成 Pi 的模型提供商认证。服务默认监听 `127.0.0.1:8504`。远程访问可在本机运行 `ssh -L 8504:127.0.0.1:8504 用户@服务器`，再打开本机的 http://127.0.0.1:8504。
+安装脚本不更新 Pi Agent、不拉取或推送 Git 远端，不注册、启动或重启服务，也不会调用 `node dist/cli.js install`。若本地 `main` 不存在，会提示先运行 `sh sync.sh`；上游同步与安装分开执行。旧的 `--port` 等服务安装参数不再接受。
 
-服务安装可能重启 session daemon，更新前先结束需要保留的运行中任务。脚本测试与构建失败时不会执行服务安装，但 Pi Agent 和 `main` 可能已经更新；脚本不自动回滚这两步。
+每次创建的安装目录位于 `~/.local/share/pi-web-opt/release.*`，可设置 `PI_WEB_INSTALL_ROOT` 改变位置。测试或构建失败会停止并保留现场，已安装或运行的版本不变。旧目录不会自动清理。
 
-每次创建的安装目录位于 `~/.local/share/pi-web-opt/release.*`。正在使用的目录不能删除，服务直接运行其中的构建产物；旧目录不会自动清理。
+这里的“安装”是将依赖和构建产物准备在独立目录，不是全局 npm 安装。后续如需运行程序，请用自己的启动脚本或进程管理方式，指向输出的目录；Pi Agent 安装、模型提供商认证和启动配置由使用者单独管理。
 
-可设置 `PI_WEB_INSTALL_ROOT` 改变安装目录，或设置 `PI_WEB_UPSTREAM_URL` 改变上游仓库地址。`origin` 使用当前仓库配置。脚本不会自动提交或推送 `terminal-patch` 的修改；安装前应审查补丁工作区并提交要共享的修改。
+`sync.sh` 才负责获取官方上游并推送 `origin/main`。它使用当前仓库的 `origin` 配置，可通过 `PI_WEB_UPSTREAM_URL` 改变上游仓库地址。两种脚本都不会自动提交或推送 `terminal-patch` 的修改，安装前应审查补丁工作区并提交要共享的修改。
 
 ## 只同步代码并准备补丁版本
 
@@ -96,4 +95,4 @@ git push origin terminal-patch
 sh install.sh
 ```
 
-安装脚本每次都会重新获取最新上游，并执行测试和构建。`main` 更新采用 fast-forward，`terminal-patch` 的维护通常增加新提交，两者正常同步都不需要强制推送。
+需要更新上游时先运行 `sync.sh`；安装脚本始终使用已有本地 `main`，应用补丁后执行测试和构建。`main` 更新采用 fast-forward，`terminal-patch` 的维护通常增加新提交，两者正常同步都不需要强制推送。

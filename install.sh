@@ -3,16 +3,19 @@ set -eu
 
 if [ "${1:-}" = "--help" ]; then
   cat <<'HELP'
-Usage: sh install.sh [pi-web install options]
+Usage: sh install.sh
 
-Update Pi Agent, synchronize/push pure upstream main, apply terminal-patch
-patches in a separate release, test/build it, then install user services.
-Requires Git push access to origin. Run from a terminal-patch checkout.
+Apply patches to existing local main in a separate release directory,
+install dependencies, test and build. Does not update Pi Agent, synchronize
+Git remotes, register services or start application services. Run sync.sh first to update main.
 
-PI_WEB_UPSTREAM_URL  Official upstream URL override
 PI_WEB_INSTALL_ROOT  Release parent (default: ~/.local/share/pi-web-opt)
 HELP
   exit 0
+fi
+if [ "$#" -ne 0 ]; then
+  printf 'Usage: sh install.sh (service options are no longer accepted)\n' >&2
+  exit 1
 fi
 
 for command_name in git npm node; do
@@ -23,15 +26,12 @@ for command_name in git npm node; do
 done
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
-printf '\n[1/4] Updating Pi Coding Agent\n'
-npm install -g @earendil-works/pi-coding-agent@latest
-
-printf '\n[2/4] Synchronizing main and applying patches\n'
-release_dir=$(sh "$script_dir/sync.sh")
+printf '\n[1/2] Applying patches to local main\n'
+release_dir=$(sh "$script_dir/sync.sh" --local)
 trap 'result=$?; if [ "$result" -ne 0 ]; then printf "Installation failed; retained directory: %s\n" "$release_dir" >&2; fi' 0
 cd "$release_dir"
 
-printf '\n[3/4] Installing dependencies, testing and building\n'
+printf '\n[2/2] Installing dependencies, testing and building\n'
 # Configure build-script permissions only in this generated release directory.
 printf '\nallow-scripts=node-pty,esbuild\n' >> .npmrc
 npm ci --include=dev
@@ -42,6 +42,4 @@ else
 fi
 npm run build
 
-printf '\n[4/4] Installing user services\n'
-node dist/cli.js install "$@"
-printf '\nInstalled from %s\nKeep this directory: services run its built files.\n' "$release_dir"
+printf '\nInstalled and built in %s\nNo services were registered or started.\n' "$release_dir"
