@@ -14,7 +14,7 @@ sh scripts/sync.sh  # 首次初始化 main，或同步最新上游
 sh scripts/install.sh
 ```
 
-安装脚本使用本地 `main`，在独立目录应用补丁、安装依赖并测试构建，成功后将全局 `pi-web`、`pi-web-server` 和 `pi-web-sessiond` 命令链接到新版本，最后打印安装目录。它不更新 Pi Agent、不同步远端、不注册或启动后台服务。已运行的服务需要手动重启才能使用新版本。程序启动后，在命令面板中选择 **Swap Chat / Workspace Panel** 切换布局。此操作仅在 Main 和右侧 Panel 并排的宽屏布局（>1180px）可用；窄屏继续使用工具标签切换，Swap 禁用且不会改变桌面布局偏好。
+安装脚本使用本地 `main`，在独立目录应用补丁、安装依赖并测试构建，成功后将全局 `pi-web`、`pi-web-server` 和 `pi-web-sessiond` 命令链接到新版本，最后打印安装目录。若 PATH 中没有 `pi` 命令，会自动全局安装 Pi Agent（默认 `latest`，可用 `PI_VERSION` 指定）；已有 Agent 保留当前版本。它不同步远端、不注册或启动后台服务。已运行的服务需要手动重启才能使用新版本。程序启动后，在命令面板中选择 **Swap Chat / Workspace Panel** 切换布局。此操作仅在 Main 和右侧 Panel 并排的宽屏布局（>1180px）可用；窄屏继续使用工具标签切换，Swap 禁用且不会改变桌面布局偏好。
 
 详细的同步、冲突处理和补丁维护方法见 [使用文档](docs/usage.md)。
 

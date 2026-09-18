@@ -15,7 +15,7 @@ afterEach(() => {
 function git(cwd, ...args) {
   return execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', ...args], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 }
-function fixture({ conflict = false, failure = '' } = {}) {
+function fixture({ conflict = false, failure = '', agent = true, agentVersion = 'latest' } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'pi-web patch test '));
   roots.push(root);
   const upstream = join(root, 'upstream');
@@ -55,7 +55,12 @@ function fixture({ conflict = false, failure = '' } = {}) {
 printf 'npm %s\n' "$*" >> "$TEST_LOG"
 if [ "$TEST_FAILURE" = "$*" ]; then exit 7; fi
 if [ "$1" = ls ]; then exit 1; fi
-if [ "$*" = "install -g --ignore-scripts @earendil-works/pi-coding-agent@latest" ]; then exit 0; fi
+case "$*" in
+  'install -g --ignore-scripts @earendil-works/pi-coding-agent@'*)
+    printf '#!/bin/sh\\necho 0.85.1\\n' > "$TEST_BIN/pi"
+    chmod +x "$TEST_BIN/pi"
+    exit 0 ;;
+esac
 if [ "$*" = 'run build' ]; then
   mkdir -p dist/server
   for entry in dist/cli.js dist/server/index.js dist/server/sessiond.js; do
@@ -76,10 +81,10 @@ printf 'node %s\n' "$*" >> "$TEST_LOG"
 test -f dist/cli.js || exit 8
 printf 'installed %s\n' "$PWD" >> "$TEST_LOG"
 `);
-  writeFileSync(join(bin, 'pi'), '#!/bin/sh\necho 0.85.1\n');
-  for (const file of ['node', 'npm', 'pi']) chmodSync(join(bin, file), 0o755);
+  if (agent) writeFileSync(join(bin, 'pi'), '#!/bin/sh\necho 0.85.1\n');
+  for (const file of ['node', 'npm', ...(agent ? ['pi'] : [])]) chmodSync(join(bin, file), 0o755);
   const run = (script = 'install.sh', args = [], runFailure = failure) => spawnSync('sh', [join(source, 'scripts', script), ...args], {
-    cwd: root, encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, PI_WEB_UPSTREAM_URL: upstream, PI_WEB_INSTALL_ROOT: releases, TEST_LOG: log, TEST_FAILURE: runFailure, TEST_PREFIX: prefix, REAL_NODE: process.execPath, REAL_NPM: realpathSync(npm) },
+    cwd: root, encoding: 'utf8', env: { ...process.env, PATH: `${bin}:/usr/bin:/bin`, TEST_BIN: bin, PI_VERSION: agentVersion, PI_WEB_UPSTREAM_URL: upstream, PI_WEB_INSTALL_ROOT: releases, TEST_LOG: log, TEST_FAILURE: runFailure, TEST_PREFIX: prefix, REAL_NODE: process.execPath, REAL_NPM: realpathSync(npm) },
   });
   return { source, upstream, origin, log, releases, prefix, run };
 }
@@ -357,3 +362,37 @@ test(`update ${options.join(' ')} synchronizes upstream and installs patched glo
 });
 
 }
+
+for (const agentVersion of ['latest', '0.85.1']) {
+  test(`install bootstraps missing Agent at ${agentVersion} only once`, () => {
+    const f = fixture({ agent: false, agentVersion });
+    prepareLocalMain(f);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = f.run();
+      assert.equal(result.status, 0, result.stderr);
+    }
+    const calls = readFileSync(f.log, 'utf8').split('\n');
+    const agentInstall = `npm install -g --ignore-scripts @earendil-works/pi-coding-agent@${agentVersion}`;
+    assert.equal(calls.filter(line => line === agentInstall).length, 1);
+    assert.ok(calls.indexOf(agentInstall) > calls.indexOf('npm run build'));
+    assert.ok(calls.indexOf(agentInstall) < calls.findIndex(line => line.startsWith('npm install --global')));
+  });
+}
+
+test('Agent install failure stops before replacing pi-web', () => {
+  const failure = 'install -g --ignore-scripts @earendil-works/pi-coding-agent@latest';
+  const f = fixture({ agent: false, failure });
+  prepareLocalMain(f);
+  const result = f.run();
+  assert.notEqual(result.status, 0);
+  const calls = readFileSync(f.log, 'utf8');
+  assert.ok(calls.includes(`npm ${failure}`));
+  assert.ok(!calls.includes('npm install --global'));
+});
+
+test('update --web-only does not bootstrap a missing Agent', () => {
+  const f = fixture({ agent: false });
+  const result = f.run('install.sh', ['update', '--web-only', '--no-restart']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(!readFileSync(f.log, 'utf8').includes('npm install -g --ignore-scripts @earendil-works/pi-coding-agent@'));
+});

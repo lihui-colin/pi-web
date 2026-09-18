@@ -11,7 +11,8 @@ Usage: bash scripts/install.sh [install|update] [options]
 
 install (default): Apply local patches to existing main, test, build and
   link global pi-web commands. Run sh scripts/sync.sh first to update main.
-  Does not update Pi Agent or manage services. No options accepted.
+  Installs Pi Agent if missing; preserves an existing Agent.
+  Does not manage services. No options accepted.
 update: Update Pi Agent, sync upstream main, apply patches, test, build and
   link global pi-web commands. Synchronization also pushes origin/main.
   --pi-only       Update only Pi Agent
@@ -56,6 +57,16 @@ install_local() (
       npm test
     fi
     npm run build
+
+    # Only the install action bootstraps Agent; update --web-only must stay web-only.
+    if [[ "${1:-local}" == local ]]; then
+        if command -v pi >/dev/null 2>&1; then
+            printf '\nPi Agent already available; keeping the installed version.\n'
+        else
+            printf '\nInstalling Pi Agent (%s)...\n' "${PI_VERSION:-latest}"
+            npm install -g --ignore-scripts "@earendil-works/pi-coding-agent@${PI_VERSION:-latest}"
+        fi
+    fi
 
     printf '\n[3/3] Replacing global pi-web commands\n'
     # Link the tested release, retaining its installed dependencies and native builds.
