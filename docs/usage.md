@@ -56,7 +56,9 @@ git fetch upstream main:refs/heads/main
 git push origin main
 ```
 
-如果 `main` 在另一个 worktree 中检出，Git 会拒绝通过 fetch 更新它。先在那个干净的 worktree 中切换到 detached HEAD，或在那里显式执行 `git fetch upstream` 和 `git merge --ff-only upstream/main`，再重新同步。不要丢弃未提交的工作。
+`sync.sh` 支持 `main` 在另一个 worktree 中检出的情况：它先获取上游提交，确认 `main` 没有超出上游的提交，再在该工作区执行 `git merge --ff-only`。若有已跟踪文件的未提交改动，脚本会停止，提示先提交或暂存；不会自动 stash、reset 或切换分支。无冲突的未跟踪文件会保留。
+
+上面的手动 fetch 命令仅适用于 `main` 没有被检出的情况。若 `main` 正在另一个 worktree 使用，可直接运行 `sh sync.sh`，或在那个干净的工作区执行 `git fetch upstream`、`git merge --ff-only upstream/main`，再推送 `main`。
 
 如果本地或 origin 的 `main` 存在不属于上游的提交，fast-forward 或 push 会失败。审查差异并保存有用改动后再处理，不要用无条件强制推送覆盖远端。
 

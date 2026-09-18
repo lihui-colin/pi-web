@@ -146,3 +146,54 @@ test('refuses to overwrite divergent origin/main', () => {
   assert.notEqual(f.run('sync.sh').status, 0);
   assert.equal(git(f.origin, 'rev-parse', 'main'), oldMain);
 });
+
+function checkoutMain(f) {
+  const mainWorktree = join(f.source, '..', 'main checkout');
+  git(f.source, 'fetch', f.upstream, 'main');
+  git(f.source, 'worktree', 'add', '-b', 'main', mainWorktree, 'FETCH_HEAD^');
+  return mainWorktree;
+}
+
+test('fast-forwards a checked-out main and preserves unrelated untracked files', () => {
+  const f = fixture();
+  const mainWorktree = checkoutMain(f);
+  writeFileSync(join(mainWorktree, 'notes.txt'), 'local notes');
+  const result = f.run('sync.sh');
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(git(mainWorktree, 'rev-parse', 'HEAD'), git(f.upstream, 'rev-parse', 'HEAD'));
+  assert.equal(git(mainWorktree, 'branch', '--show-current'), 'main');
+  assert.equal(readFileSync(join(mainWorktree, 'app.txt'), 'utf8'), readFileSync(join(f.upstream, 'app.txt'), 'utf8'));
+  assert.equal(readFileSync(join(mainWorktree, 'notes.txt'), 'utf8'), 'local notes');
+  assert.ok(readFileSync(join(result.stdout.trim(), 'app.txt'), 'utf8').includes('custom layout'));
+});
+
+for (const staged of [false, true]) {
+  test(`preserves dirty main and stops before pushing (staged=${staged})`, () => {
+    const f = fixture();
+    const mainWorktree = checkoutMain(f);
+    const oldHead = git(mainWorktree, 'rev-parse', 'HEAD');
+    writeFileSync(join(mainWorktree, 'app.txt'), 'unfinished work');
+    if (staged) git(mainWorktree, 'add', 'app.txt');
+    const oldStatus = git(mainWorktree, 'status', '--porcelain');
+    const result = f.run('sync.sh');
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /main has uncommitted changes/);
+    assert.equal(git(mainWorktree, 'rev-parse', 'HEAD'), oldHead);
+    assert.equal(git(mainWorktree, 'status', '--porcelain'), oldStatus);
+    assert.equal(readFileSync(join(mainWorktree, 'app.txt'), 'utf8'), 'unfinished work');
+    assert.equal(git(f.origin, 'for-each-ref', '--format=%(refname)', 'refs/heads/main'), '');
+  });
+}
+
+test('preserves an untracked file that would be overwritten by upstream', () => {
+  const f = fixture();
+  const mainWorktree = checkoutMain(f);
+  const oldHead = git(mainWorktree, 'rev-parse', 'HEAD');
+  writeFileSync(join(mainWorktree, 'new.txt'), 'local file');
+  writeFileSync(join(f.upstream, 'new.txt'), 'upstream file');
+  git(f.upstream, 'add', '.');
+  git(f.upstream, 'commit', '-m', 'new upstream file');
+  assert.notEqual(f.run('sync.sh').status, 0);
+  assert.equal(git(mainWorktree, 'rev-parse', 'HEAD'), oldHead);
+  assert.equal(readFileSync(join(mainWorktree, 'new.txt'), 'utf8'), 'local file');
+});

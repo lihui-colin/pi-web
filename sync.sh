@@ -25,10 +25,28 @@ if [ ! -f "$1" ]; then
   exit 1
 fi
 
-# Fetch refuses non-fast-forward changes and branches checked out in a worktree.
-# Never reset or apply customizations to main itself.
+# Fetch into FETCH_HEAD so an existing main checkout can be updated safely.
 printf 'Synchronizing main with upstream, then origin...\n' >&2
-git -C "$source_repo" fetch --no-tags "$upstream_url" main:refs/heads/main >&2
+git -C "$source_repo" fetch --no-tags "$upstream_url" main >&2
+upstream_commit=$(git -C "$source_repo" rev-parse FETCH_HEAD)
+if main_commit=$(git -C "$source_repo" rev-parse --verify refs/heads/main 2>/dev/null); then
+  if ! git -C "$source_repo" merge-base --is-ancestor "$main_commit" "$upstream_commit"; then
+    printf 'Local main contains commits outside upstream; review them before synchronizing.\n' >&2
+    exit 1
+  fi
+  main_worktree=$(git -C "$source_repo" for-each-ref --format='%(worktreepath)' refs/heads/main)
+  if [ -n "$main_worktree" ]; then
+    if [ -n "$(git -C "$main_worktree" status --porcelain --untracked-files=no)" ]; then
+      printf 'main has uncommitted changes in %s; commit or stash them before synchronizing.\n' "$main_worktree" >&2
+      exit 1
+    fi
+    git -C "$main_worktree" merge --ff-only "$upstream_commit" >&2
+  else
+    git -C "$source_repo" update-ref refs/heads/main "$upstream_commit" "$main_commit"
+  fi
+else
+  git -C "$source_repo" branch main "$upstream_commit"
+fi
 git -C "$source_repo" push origin refs/heads/main:refs/heads/main >&2
 
 mkdir -p "$install_root"
