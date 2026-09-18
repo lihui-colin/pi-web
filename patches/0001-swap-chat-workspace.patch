@@ -1,0 +1,278 @@
+diff --git a/src/client/src/components/PiWebApp.panelLayout.test.ts b/src/client/src/components/PiWebApp.panelLayout.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..66610ea758c77392c9dbeeade29f1e1c19b119d9
+--- /dev/null
++++ b/src/client/src/components/PiWebApp.panelLayout.test.ts
+@@ -0,0 +1,87 @@
++// @vitest-environment happy-dom
++
++import { render } from "lit";
++import { afterEach, describe, expect, it, vi } from "vitest";
++import { readPanelLayoutPreference, writePanelLayoutPreference } from "../panelLayoutPreference";
++import { createCoreActions } from "../plugins/core/actions";
++import type { PluginRuntimeContext } from "../plugins/types";
++import { PiWebApp } from "./PiWebApp";
++import { AppPanelEdgeControl } from "./appShell/AppPanelEdgeControl";
++
++afterEach(() => {
++  document.body.replaceChildren();
++  localStorage.clear();
++  sessionStorage.clear();
++  vi.restoreAllMocks();
++});
++
++describe("panel layout action", () => {
++  it("swaps and persists the shell layout without replacing its surfaces", async () => {
++    const app = new PiWebApp();
++    // Render the shell without starting the application's network lifecycle.
++    const container = document.createElement("div");
++    document.body.append(container);
++    Object.defineProperty(app, "renderRoot", { value: container });
++    render(app.render(), container);
++    const main = container.querySelector("main");
++    const workspace = container.querySelector("workspace-panel");
++    expect(main).not.toBeNull();
++    expect(workspace).not.toBeNull();
++    expect(container.querySelector(".shell.panels-swapped")).toBeNull();
++
++    const createContext: unknown = Reflect.get(app, "createPluginRuntimeContext");
++    if (!isContextFactory(createContext)) throw new Error("Missing plugin context factory");
++    const context = createContext.call(app);
++    const action = createCoreActions().find((entry) => entry.id === "layout.swap-chat-workspace");
++    if (action === undefined) throw new Error("Missing layout action");
++    await action.run(context);
++    render(app.render(), container);
++    expect(container.querySelector(".shell.panels-swapped")).not.toBeNull();
++    expect(readPanelLayoutPreference()).toBe("workspace-main");
++    expect(container.querySelector("main")).toBe(main);
++    expect(container.querySelector("workspace-panel")).toBe(workspace);
++
++    await action.run(context);
++    render(app.render(), container);
++    expect(container.querySelector(".shell.panels-swapped")).toBeNull();
++    expect(readPanelLayoutPreference()).toBe("chat-main");
++    expect(container.querySelector("main")).toBe(main);
++    expect(container.querySelector("workspace-panel")).toBe(workspace);
++  });
++
++  it("restores the saved layout in a new app", () => {
++    writePanelLayoutPreference("workspace-main");
++    const app = new PiWebApp();
++    const container = document.createElement("div");
++    document.body.append(container);
++    Object.defineProperty(app, "renderRoot", { value: container });
++    render(app.render(), container);
++    expect(container.querySelector(".shell.panels-swapped")).not.toBeNull();
++  });
++
++  it.each([true, false])("starts resizing from the physical right surface (desktop=%s)", (desktop) => {
++    writePanelLayoutPreference("workspace-main");
++    const matchMedia = window.matchMedia.bind(window);
++    vi.spyOn(window, "matchMedia").mockImplementation((query) => {
++      const result = matchMedia(query);
++      Object.defineProperty(result, "matches", { value: desktop });
++      return result;
++    });
++    const app = new PiWebApp();
++    const container = document.createElement("div");
++    document.body.append(container);
++    Object.defineProperty(app, "renderRoot", { value: container });
++    render(app.render(), container);
++    const main = container.querySelector("main");
++    const workspace = container.querySelector("workspace-panel");
++    const edge = container.querySelector('app-panel-edge-control[side="workspace"]');
++    if (!main || !workspace || !(edge instanceof AppPanelEdgeControl)) throw new Error("Missing shell surfaces");
++    vi.spyOn(main, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 480, 900));
++    vi.spyOn(workspace, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 720, 900));
++    expect(edge.onResizeStart?.()).toBe(desktop ? 480 : 720);
++  });
++});
++
++function isContextFactory(value: unknown): value is () => PluginRuntimeContext {
++  return typeof value === "function";
++}
+diff --git a/src/client/src/components/PiWebApp.ts b/src/client/src/components/PiWebApp.ts
+index dcb0bc933904edfdcd2c018d7f67b00d8363d7c9..69271ee939e02b05e2dbe1d9b097b5909dd53d79 100644
+--- a/src/client/src/components/PiWebApp.ts
++++ b/src/client/src/components/PiWebApp.ts
+@@ -2,6 +2,7 @@ import { LitElement, html, type TemplateResult } from "lit";
+ import { customElement, query, state } from "lit/decorators.js";
+ import { configApi, effectiveWorkspaceAttachmentsFolder, effectiveWorkspaceUploadFolder, sessionsApi, workspacesApi, workspaceEffectiveAttachmentsFolder, workspaceEffectiveUploadFolder, type AskUserSubmission, type CommandOption, type ExtensionDialogAnswer, type Machine, type MachineHealth, type PiWebConfigValues, type PiWebShortcutConfig, type Project, type SessionCleanupExecuteResponse, type SessionCleanupPreviewResponse, type SessionCleanupRequest, type SessionInfo, type SessionModel, type SessionModelCatalogEntry, type SessionModelScopeMode, type SessionTreeForkResult, type SessionTreeNavigateResult, type SessionTreeSummaryChoice, type TerminalCommandRun, type Workspace } from "../api";
+ import type { AppAction } from "../actions";
++import { readPanelLayoutPreference, writePanelLayoutPreference } from "../panelLayoutPreference";
+ import { initialAppState, type AppState, type ModelDialogOrigin } from "../appState";
+ import { browserErrorContext, browserErrorScopeKey, BrowserErrorReporter, clearBrowserError, machineBrowserErrorScope, visibleBrowserErrors, workspaceBrowserErrorScope, type BrowserError, type BrowserErrorScope } from "../browserErrors";
+ import { isSessionActive } from "../../../shared/activity";
+@@ -138,6 +139,7 @@ interface SessionCleanupDialogState {
+ @customElement("pi-web-app")
+ export class PiWebApp extends LitElement {
+   @state() private state: AppState = initialAppState();
++  @state() private panelLayout = readPanelLayoutPreference();
+   private readonly browserErrors = new BrowserErrorReporter(() => this.state, (patch) => { this.setState(patch); });
+   @query("chat-view") private chatView?: ChatView;
+   @query("prompt-editor") private promptEditor?: PromptEditor;
+@@ -1636,7 +1638,9 @@ export class PiWebApp extends LitElement {
+   }
+ 
+   private measuredPanelWidth(side: ResizablePanelSide): number | undefined {
+-    const element = side === "navigation" ? this.navigationPanelFrame : this.workspacePanelFrame;
++    const element = side === "navigation" ? this.navigationPanelFrame
++      : this.panelLayout === "workspace-main" && this.isDesktopSideBySideLayout()
++        ? this.renderRoot.querySelector("main") : this.workspacePanelFrame;
+     const width = element?.getBoundingClientRect().width;
+     return width === undefined || width <= 0 ? undefined : width;
+   }
+@@ -2444,12 +2448,18 @@ export class PiWebApp extends LitElement {
+     };
+   }
+ 
++  private toggleChatWorkspaceLayout(): void {
++    this.panelLayout = this.panelLayout === "chat-main" ? "workspace-main" : "chat-main";
++    writePanelLayoutPreference(this.panelLayout);
++  }
++
+   private createPluginRuntimeContext(): PluginRuntimeContext {
+     const createContext = (): PluginRuntimeContext => installPluginRuntimeScope({
+       state: this.state,
+       prompt: this.createPromptEditor(),
+       piWebUnstable: {
+         openSettings: (section) => { this.openSettings(section); },
++        toggleChatWorkspaceLayout: () => { this.toggleChatWorkspaceLayout(); },
+       },
+       openActionPalette: () => { this.setState({ actionPaletteOpen: true }); },
+       focusPrompt: () => { void this.focusChatComposer(); },
+@@ -3194,7 +3204,7 @@ export class PiWebApp extends LitElement {
+     const state = this.state;
+     const mainView = this.effectiveMainView();
+     return html`
+-      <div class=${this.panelCollapse.shellClass(mainView)} style=${this.panelResize.shellStyle({ navigation: this.resizablePanelConstraints("navigation"), workspace: this.resizablePanelConstraints("workspace") })}>
++      <div class=${`${this.panelCollapse.shellClass(mainView)}${this.panelLayout === "workspace-main" ? " panels-swapped" : ""}`} style=${this.panelResize.shellStyle({ navigation: this.resizablePanelConstraints("navigation"), workspace: this.resizablePanelConstraints("workspace") })}>
+         <aside id="navigation-panel">${this.appShell.isMobileNavigationLayout ? null : this.renderNavigationPanel()}</aside>
+         ${this.renderNavigationPanelEdgeControl()}
+         <main class=${mainViewClass(mainView)}>
+diff --git a/src/client/src/components/shared.ts b/src/client/src/components/shared.ts
+index e0d5f9b2860bf75b576533cb6206f43892ad6828..d8b2a7270121b483542e7146c848822eadb5f205 100644
+--- a/src/client/src/components/shared.ts
++++ b/src/client/src/components/shared.ts
+@@ -148,6 +148,13 @@ export const appStyles = css`
+     .shell.workspace-panel-collapsed { --workspace-panel-width: 0px; }
+     .shell.workspace-panel-collapsed > workspace-panel { display: none; }
+   }
++  @media (min-width: 1181px) {
++    /* Keep the existing width and collapse state attached to the physical right column. */
++    .shell.panels-swapped > main { grid-column: 5; grid-row: 1; }
++    .shell.panels-swapped > workspace-panel { grid-column: 3; grid-row: 1; }
++    .shell.panels-swapped.workspace-panel-collapsed > main { display: none; }
++    .shell.panels-swapped.workspace-panel-collapsed > workspace-panel { display: flex; }
++  }
+   @media (max-width: 1180px) {
+     .shell { grid-template-columns: var(--navigation-panel-width) 1px minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+     .shell.navigation-panel-collapsed { --navigation-panel-width: 0px; }
+diff --git a/src/client/src/panelLayoutPreference.test.ts b/src/client/src/panelLayoutPreference.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..810bd9dd3b352faa18a06baf59ff891d43e172a2
+--- /dev/null
++++ b/src/client/src/panelLayoutPreference.test.ts
+@@ -0,0 +1,39 @@
++// @vitest-environment happy-dom
++
++import { afterEach, describe, expect, it, vi } from "vitest";
++import { readPanelLayoutPreference, writePanelLayoutPreference } from "./panelLayoutPreference";
++
++afterEach(() => {
++  localStorage.clear();
++  vi.restoreAllMocks();
++  vi.unstubAllGlobals();
++});
++
++describe("panel layout preference", () => {
++  it("defaults to chat-main for missing or invalid preferences", () => {
++    expect(readPanelLayoutPreference()).toBe("chat-main");
++    localStorage.setItem("pi-web:panel-layout", "invalid");
++    expect(readPanelLayoutPreference()).toBe("chat-main");
++  });
++
++  it("persists both layouts across reads", () => {
++    writePanelLayoutPreference("workspace-main");
++    expect(readPanelLayoutPreference()).toBe("workspace-main");
++    writePanelLayoutPreference("chat-main");
++    expect(readPanelLayoutPreference()).toBe("chat-main");
++  });
++
++  it("tolerates unavailable browser storage", () => {
++    vi.stubGlobal("localStorage", undefined);
++    expect(readPanelLayoutPreference()).toBe("chat-main");
++    expect(() => { writePanelLayoutPreference("workspace-main"); }).not.toThrow();
++    vi.unstubAllGlobals();
++  });
++
++  it("tolerates blocked reads and quota failures", () => {
++    vi.spyOn(localStorage, "getItem").mockImplementation(() => { throw new Error("blocked"); });
++    vi.spyOn(localStorage, "setItem").mockImplementation(() => { throw new Error("quota"); });
++    expect(readPanelLayoutPreference()).toBe("chat-main");
++    expect(() => { writePanelLayoutPreference("workspace-main"); }).not.toThrow();
++  });
++});
+diff --git a/src/client/src/panelLayoutPreference.ts b/src/client/src/panelLayoutPreference.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..30c1b02d316761e0a5ef4feba44cbb2c3d0d7f72
+--- /dev/null
++++ b/src/client/src/panelLayoutPreference.ts
+@@ -0,0 +1,27 @@
++export type PanelLayout = "chat-main" | "workspace-main";
++
++const storageKey = "pi-web:panel-layout";
++
++function browserStorage(): Storage | undefined {
++  try {
++    return typeof localStorage === "undefined" ? undefined : localStorage;
++  } catch {
++    return undefined;
++  }
++}
++
++export function readPanelLayoutPreference(storage = browserStorage()): PanelLayout {
++  try {
++    return storage?.getItem(storageKey) === "workspace-main" ? "workspace-main" : "chat-main";
++  } catch {
++    return "chat-main";
++  }
++}
++
++export function writePanelLayoutPreference(layout: PanelLayout, storage = browserStorage()): void {
++  try {
++    storage?.setItem(storageKey, layout);
++  } catch {
++    // The layout still works for this page when browser storage is unavailable.
++  }
++}
+diff --git a/src/client/src/plugins/core/actions.ts b/src/client/src/plugins/core/actions.ts
+index dffdc69f69388eb239ea19300e81887073ea9a30..0f776f064da6ec8d47300ffc14e1d6aff3e26828 100644
+--- a/src/client/src/plugins/core/actions.ts
++++ b/src/client/src/plugins/core/actions.ts
+@@ -79,6 +79,13 @@ export function createCoreActions(): PluginAction[] {
+       group: "Preferences",
+       run: (context) => { context.openThemePicker(); },
+     },
++    {
++      id: "layout.swap-chat-workspace",
++      title: "Swap Chat / Workspace Panel",
++      description: "Swap the center and right panels in the desktop split layout",
++      group: "Preferences",
++      run: (context) => { context.piWebUnstable?.toggleChatWorkspaceLayout?.(); },
++    },
+     {
+       id: "settings.open",
+       title: "Open Settings",
+diff --git a/src/client/src/plugins/types.ts b/src/client/src/plugins/types.ts
+index 137803471d59351712b416d036ca623acb1d3913..eb6a51c70c5aeded0bbcbe01c4d906ab42e756a1 100644
+--- a/src/client/src/plugins/types.ts
++++ b/src/client/src/plugins/types.ts
+@@ -199,6 +199,7 @@ export interface WorkspacePanelTerminal {
+ 
+ export interface PiWebUnstableRuntimeContext {
+   openSettings?: (section?: SettingsSection) => void;
++  toggleChatWorkspaceLayout?: () => void;
+ }
+ 
+ export interface PluginPromptEditor {
