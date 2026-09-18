@@ -3,7 +3,7 @@ set -eu
 
 if [ "${1:-}" = "--help" ]; then
   cat <<'HELP'
-Usage: sh sync.sh [--local]
+Usage: sh scripts/sync.sh [--local]
 
 Fast-forward local main to upstream/main, push origin/main, then apply
 patches/*.patch in a new release directory. Print that directory on stdout.
@@ -17,7 +17,7 @@ fi
 case "${1:-}" in
   '') sync_remote=true ;;
   --local) sync_remote=false ;;
-  *) printf 'Usage: sh sync.sh [--local]\n' >&2; exit 1 ;;
+  *) printf 'Usage: sh scripts/sync.sh [--local]\n' >&2; exit 1 ;;
 esac
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -25,9 +25,9 @@ source_repo=$(git -C "$script_dir" rev-parse --show-toplevel)
 upstream_url=${PI_WEB_UPSTREAM_URL:-https://github.com/jmfederico/pi-web.git}
 install_root=${PI_WEB_INSTALL_ROOT:-${HOME}/.local/share/pi-web-opt}
 
-set -- "$script_dir"/patches/*.patch
+set -- "$source_repo"/patches/*.patch
 if [ ! -f "$1" ]; then
-  printf 'No patches found in %s/patches\n' "$script_dir" >&2
+  printf 'No patches found in %s/patches\n' "$source_repo" >&2
   exit 1
 fi
 
@@ -56,7 +56,7 @@ if [ "$sync_remote" = true ]; then
   fi
   git -C "$source_repo" push origin refs/heads/main:refs/heads/main >&2
 elif ! git -C "$source_repo" rev-parse --verify refs/heads/main >/dev/null 2>&1; then
-  printf 'Local main is missing. Run sh sync.sh first to initialize it.\n' >&2
+  printf 'Local main is missing. Run sh scripts/sync.sh first to initialize it.\n' >&2
   exit 1
 fi
 

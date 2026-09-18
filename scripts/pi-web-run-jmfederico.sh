@@ -100,7 +100,7 @@ server_log="$log_dir/server.log"
 sessiond_log="$log_dir/sessiond.log"
 server_pid="$log_dir/server.pid"
 sessiond_pid="$log_dir/sessiond.pid"
-update_script="$project_root/scripts/update-pi-web-jmfederico.sh"
+update_script="$project_root/scripts/install.sh"
 
 require_bins() {
     command -v pi-web-server   >/dev/null 2>&1 || { echo "错误：未找到 pi-web-server" >&2; exit 1; }
@@ -204,7 +204,7 @@ update() {
         exit 1
     fi
     PI_WEB_HOST="$PI_WEB_HOST" PI_WEB_PORT="$PI_WEB_PORT" PI_WEB_PASSWORD="$PI_WEB_PASSWORD" \
-        "$update_script" "${ACTION_ARGS[@]}"
+        "$update_script" update "${ACTION_ARGS[@]}"
 }
 
 case "$ACTION" in

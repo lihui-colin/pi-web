@@ -1,26 +1,88 @@
 #!/usr/bin/env bash
-#
-# 更新 jmfederico/pi-web 与 Pi Coding Agent（@earendil-works/pi-coding-agent）
-#
-# 本机当前部署是全局 npm 包 + 无 systemd 的 manual run（sessiond + server）。
-# 升级会替换全局包；若服务正在运行，默认先停再装，装完再拉起。
-#
-# 用法:
-#   ./scripts/update-pi-web-jmfederico.sh                 # 更新 pi + pi-web，必要时重启
-#   ./scripts/update-pi-web-jmfederico.sh --pi-only       # 只更新 pi agent
-#   ./scripts/update-pi-web-jmfederico.sh --web-only      # 只更新 @jmfederico/pi-web
-#   ./scripts/update-pi-web-jmfederico.sh --no-restart    # 更新后不重启服务
-#   ./scripts/update-pi-web-jmfederico.sh --restart       # 即使原先未运行也启动
-#   ./scripts/update-pi-web-jmfederico.sh --update-relay  # 同步更新全局 relay skill
-#   ./scripts/update-pi-web-jmfederico.sh --dry-run       # 只打印将要执行的操作
-#   PI_VERSION=0.85.1 PI_WEB_VERSION=1.202609.0 ./scripts/update-pi-web-jmfederico.sh
-#
-# 环境变量:
-#   PI_VERSION       pi agent 目标版本，默认 latest
-#   PI_WEB_VERSION   @jmfederico/pi-web 目标版本，默认 latest
-#   PI_WEB_HOST / PI_WEB_PORT / PI_WEB_PASSWORD  传给运行脚本（重启时）
-
+# Support the existing `sh scripts/install.sh` invocation as well.
+if [ -z "${BASH_VERSION:-}" ]; then
+    exec bash "$0" "$@"
+fi
 set -euo pipefail
+
+usage() {
+    cat <<'HELP'
+Usage: bash scripts/install.sh [install|update] [options]
+
+install (default): Apply local patches to existing main, test, build and
+  link global pi-web commands. Run sh scripts/sync.sh first to update main.
+  Does not update Pi Agent or manage services. No options accepted.
+update: Update Pi Agent, sync upstream main, apply patches, test, build and
+  link global pi-web commands. Synchronization also pushes origin/main.
+  --pi-only       Update only Pi Agent
+  --web-only      Sync, patch and rebuild only pi-web
+  --update-relay  Also update the global relay skill
+  --no-restart    Leave running services untouched; do not start services
+  --restart       Start services even if previously stopped
+  --dry-run       Print changes without installing or restarting
+
+PI_WEB_INSTALL_ROOT  Local release parent (default: ~/.local/share/pi-web-opt)
+PI_VERSION          Pi Agent npm target (default: latest)
+PI_WEB_UPSTREAM_URL  Official upstream Git URL override
+PI_WEB_HOST / PI_WEB_PORT / PI_WEB_PASSWORD  Service restart configuration
+HELP
+}
+
+install_local() (
+    for command_name in git npm node; do
+      command -v "$command_name" >/dev/null 2>&1 || {
+        printf 'Required command not found: %s\n' "$command_name" >&2
+        exit 1
+      }
+    done
+    script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+    printf '\n[1/3] Preparing patched release\n'
+    if [[ "${1:-local}" == remote ]]; then
+        release_dir=$(sh "$script_dir/sync.sh")
+    else
+        release_dir=$(sh "$script_dir/sync.sh" --local)
+    fi
+    trap 'result=$?; if [ "$result" -ne 0 ]; then printf "Installation failed; retained directory: %s\n" "$release_dir" >&2; fi' 0
+    cd "$release_dir"
+
+    printf '\n[2/3] Installing dependencies, testing and building\n'
+    # Configure build-script permissions only in this generated release directory.
+    printf '\nallow-scripts=node-pty,esbuild\n' >> .npmrc
+    npm ci --include=dev
+    if node --no-experimental-webstorage -e '' >/dev/null 2>&1; then
+      NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--no-experimental-webstorage" npm test
+    else
+      npm test
+    fi
+    npm run build
+
+    printf '\n[3/3] Replacing global pi-web commands\n'
+    # Link the tested release, retaining its installed dependencies and native builds.
+    # Skip lifecycle scripts and automatic peer installation (including Pi Agent).
+    npm install --global --ignore-scripts --install-links=false --legacy-peer-deps "$release_dir"
+
+    printf '\nInstalled and linked from %s\nGlobal commands: %s/bin/pi-web (also pi-web-server and pi-web-sessiond)\n' "$release_dir" "$(npm prefix --global)"
+
+)
+
+action="${1:-install}"
+if [[ $# -gt 0 ]]; then shift; fi
+case "$action" in
+    -h|--help) usage; exit 0 ;;
+    install)
+        if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then usage; exit 0; fi
+        if [[ $# -ne 0 ]]; then
+            echo "install accepts no options (service options are no longer accepted)" >&2
+            exit 2
+        fi
+        install_local
+        echo "No services were registered or restarted. Restart existing services manually to use the new build."
+        exit 0
+        ;;
+    update) ;;
+    *) echo "Unknown command: $action (service options are no longer accepted)" >&2; usage >&2; exit 2 ;;
+esac
 
 script_file="$(readlink -f "${BASH_SOURCE[0]}")"
 project_root="$(cd "$(dirname "$script_file")/.." && pwd)"
@@ -28,9 +90,7 @@ run_script="$project_root/scripts/pi-web-run-jmfederico.sh"
 pid_dir="$project_root/data/pi-web"
 
 PI_PKG="@earendil-works/pi-coding-agent"
-WEB_PKG="@jmfederico/pi-web"
 PI_VERSION="${PI_VERSION:-latest}"
-PI_WEB_VERSION="${PI_WEB_VERSION:-latest}"
 
 UPDATE_PI=1
 UPDATE_WEB=1
@@ -44,9 +104,6 @@ err()  { printf '\033[1;31m[update-jmf]\033[0m %s\n' "$*" >&2; }
 
 ver_ge() { [[ "$(printf '%s\n' "$1" "$2" | sort -V | tail -n1)" == "$1" ]]; }
 
-usage() {
-    awk 'NR==1 { next } /^#($| )/ { sub(/^# ?/, ""); print; next } { exit }' "$0"
-}
 
 run() {
     if [[ $DRY_RUN -eq 1 ]]; then
@@ -58,7 +115,7 @@ run() {
 
 pkg_version() {
     local pkg="$1"
-    npm ls -g --depth=0 --json "$pkg" 2>/dev/null \
+    { npm ls -g --depth=0 --json "$pkg" 2>/dev/null || true; } \
     | node -e '
             let s = "";
             process.stdin.on("data", d => s += d);
@@ -178,16 +235,14 @@ update_pi() {
 }
 
 update_web() {
-    local before after
-    before="$(pkg_version "$WEB_PKG")"
-    [[ -n "$before" ]] || before="$(cli_version pi-web)"
-    [[ -n "$before" ]] || before="(未安装)"
-    log "更新 $WEB_PKG@$PI_WEB_VERSION （当前 $before）..."
-    run npm install -g "${WEB_PKG}@${PI_WEB_VERSION}" --allow-scripts=node-pty
+    log "同步官方 pi-web、应用补丁、测试构建并替换全局命令..."
+    if [[ $DRY_RUN -eq 1 ]]; then
+        log "[dry-run] sh $project_root/scripts/sync.sh (同步 upstream/main 与 origin/main 并应用补丁)"
+        log "[dry-run] npm ci --include=dev; npm test; npm run build; 链接补丁版全局命令"
+        return 0
+    fi
+    install_local remote
     hash -r 2>/dev/null || true
-    after="$(pkg_version "$WEB_PKG")"
-    [[ -n "$after" ]] || after="$(cli_version pi-web)"
-    log "pi-web: $before -> ${after:-未知}"
 }
 
 update_relay() {
@@ -226,7 +281,10 @@ doctor() {
 log "开始更新 jmfederico/pi-web 与 pi agent"
 [[ $DRY_RUN -eq 1 ]] && log "dry-run 模式：不会真正安装或重启"
 check_node
-check_conflict
+if [[ $UPDATE_WEB -eq 1 ]]; then
+    command -v git >/dev/null 2>&1 || { err "未找到 git"; exit 1; }
+    check_conflict
+fi
 
 was_running=0
 if service_running; then
@@ -265,7 +323,7 @@ fi
 if [[ $should_start -eq 1 ]]; then
     start_services
     elif [[ $was_running -eq 1 && "$DO_RESTART" == "never" ]]; then
-    warn "服务已停止且指定 --no-restart，请稍后执行: $run_script start"
+    warn "服务仍在运行旧版本，指定 --no-restart 未重启，请稍后执行: $run_script restart"
 fi
 
 doctor

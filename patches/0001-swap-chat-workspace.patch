@@ -1,18 +1,22 @@
 diff --git a/src/client/src/components/PiWebApp.panelLayout.test.ts b/src/client/src/components/PiWebApp.panelLayout.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..66610ea758c77392c9dbeeade29f1e1c19b119d9
+index 0000000000000000000000000000000000000000..caf0b3bfdb3007a1eefcd49fb4860c38f2736d91
 --- /dev/null
 +++ b/src/client/src/components/PiWebApp.panelLayout.test.ts
-@@ -0,0 +1,87 @@
+@@ -0,0 +1,116 @@
 +// @vitest-environment happy-dom
 +
 +import { render } from "lit";
-+import { afterEach, describe, expect, it, vi } from "vitest";
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 +import { readPanelLayoutPreference, writePanelLayoutPreference } from "../panelLayoutPreference";
 +import { createCoreActions } from "../plugins/core/actions";
 +import type { PluginRuntimeContext } from "../plugins/types";
 +import { PiWebApp } from "./PiWebApp";
 +import { AppPanelEdgeControl } from "./appShell/AppPanelEdgeControl";
++
++beforeEach(() => {
++  mockDesktopLayout(true);
++});
 +
 +afterEach(() => {
 +  document.body.replaceChildren();
@@ -55,6 +59,30 @@ index 0000000000000000000000000000000000000000..66610ea758c77392c9dbeeade29f1e1c
 +    expect(container.querySelector("workspace-panel")).toBe(workspace);
 +  });
 +
++  it("disables swapping in tab layouts and preserves the desktop preference", async () => {
++    writePanelLayoutPreference("workspace-main");
++    const app = new PiWebApp();
++    const createContext: unknown = Reflect.get(app, "createPluginRuntimeContext");
++    if (!isContextFactory(createContext)) throw new Error("Missing plugin context factory");
++    const context = createContext.call(app);
++    const action = createCoreActions().find((entry) => entry.id === "layout.swap-chat-workspace");
++    if (action === undefined) throw new Error("Missing layout action");
++    expect(action.enabled?.(context)).toBe(true);
++
++    mockDesktopLayout(false);
++    expect(action.enabled?.(context)).toBe(false);
++    expect(action.disabledReason?.(context)).toContain("tool tabs");
++    // A stale action/context must also be safe after resizing into a tab layout.
++    await action.run(context);
++    expect(readPanelLayoutPreference()).toBe("workspace-main");
++    expect(Reflect.get(app, "panelLayout")).toBe("workspace-main");
++
++    mockDesktopLayout(true);
++    expect(action.enabled?.(context)).toBe(true);
++    await action.run(context);
++    expect(readPanelLayoutPreference()).toBe("chat-main");
++  });
++
 +  it("restores the saved layout in a new app", () => {
 +    writePanelLayoutPreference("workspace-main");
 +    const app = new PiWebApp();
@@ -67,12 +95,7 @@ index 0000000000000000000000000000000000000000..66610ea758c77392c9dbeeade29f1e1c
 +
 +  it.each([true, false])("starts resizing from the physical right surface (desktop=%s)", (desktop) => {
 +    writePanelLayoutPreference("workspace-main");
-+    const matchMedia = window.matchMedia.bind(window);
-+    vi.spyOn(window, "matchMedia").mockImplementation((query) => {
-+      const result = matchMedia(query);
-+      Object.defineProperty(result, "matches", { value: desktop });
-+      return result;
-+    });
++    mockDesktopLayout(desktop);
 +    const app = new PiWebApp();
 +    const container = document.createElement("div");
 +    document.body.append(container);
@@ -91,8 +114,14 @@ index 0000000000000000000000000000000000000000..66610ea758c77392c9dbeeade29f1e1c
 +function isContextFactory(value: unknown): value is () => PluginRuntimeContext {
 +  return typeof value === "function";
 +}
++
++function mockDesktopLayout(desktop: boolean): void {
++  const result = window.matchMedia("(min-width: 1181px)");
++  Object.defineProperty(result, "matches", { configurable: true, value: desktop });
++  vi.spyOn(window, "matchMedia").mockReturnValue(result);
++}
 diff --git a/src/client/src/components/PiWebApp.ts b/src/client/src/components/PiWebApp.ts
-index dcb0bc933904edfdcd2c018d7f67b00d8363d7c9..69271ee939e02b05e2dbe1d9b097b5909dd53d79 100644
+index dcb0bc933904edfdcd2c018d7f67b00d8363d7c9..86f462322cd0ad74e316c3bb74e62b8278870d96 100644
 --- a/src/client/src/components/PiWebApp.ts
 +++ b/src/client/src/components/PiWebApp.ts
 @@ -2,6 +2,7 @@ import { LitElement, html, type TemplateResult } from "lit";
@@ -122,11 +151,12 @@ index dcb0bc933904edfdcd2c018d7f67b00d8363d7c9..69271ee939e02b05e2dbe1d9b097b590
      const width = element?.getBoundingClientRect().width;
      return width === undefined || width <= 0 ? undefined : width;
    }
-@@ -2444,12 +2448,18 @@ export class PiWebApp extends LitElement {
+@@ -2444,12 +2448,20 @@ export class PiWebApp extends LitElement {
      };
    }
  
 +  private toggleChatWorkspaceLayout(): void {
++    if (!this.isDesktopSideBySideLayout()) return;
 +    this.panelLayout = this.panelLayout === "chat-main" ? "workspace-main" : "chat-main";
 +    writePanelLayoutPreference(this.panelLayout);
 +  }
@@ -137,11 +167,12 @@ index dcb0bc933904edfdcd2c018d7f67b00d8363d7c9..69271ee939e02b05e2dbe1d9b097b590
        prompt: this.createPromptEditor(),
        piWebUnstable: {
          openSettings: (section) => { this.openSettings(section); },
++        canSwapChatWorkspaceLayout: () => this.isDesktopSideBySideLayout(),
 +        toggleChatWorkspaceLayout: () => { this.toggleChatWorkspaceLayout(); },
        },
        openActionPalette: () => { this.setState({ actionPaletteOpen: true }); },
        focusPrompt: () => { void this.focusChatComposer(); },
-@@ -3194,7 +3204,7 @@ export class PiWebApp extends LitElement {
+@@ -3194,7 +3206,7 @@ export class PiWebApp extends LitElement {
      const state = this.state;
      const mainView = this.effectiveMainView();
      return html`
@@ -247,10 +278,10 @@ index 0000000000000000000000000000000000000000..30c1b02d316761e0a5ef4feba44cbb2c
 +  }
 +}
 diff --git a/src/client/src/plugins/core/actions.ts b/src/client/src/plugins/core/actions.ts
-index dffdc69f69388eb239ea19300e81887073ea9a30..0f776f064da6ec8d47300ffc14e1d6aff3e26828 100644
+index dffdc69f69388eb239ea19300e81887073ea9a30..4f5d300e31c7a69f2f10bc2411a827f41f900e26 100644
 --- a/src/client/src/plugins/core/actions.ts
 +++ b/src/client/src/plugins/core/actions.ts
-@@ -79,6 +79,13 @@ export function createCoreActions(): PluginAction[] {
+@@ -79,6 +79,15 @@ export function createCoreActions(): PluginAction[] {
        group: "Preferences",
        run: (context) => { context.openThemePicker(); },
      },
@@ -259,19 +290,22 @@ index dffdc69f69388eb239ea19300e81887073ea9a30..0f776f064da6ec8d47300ffc14e1d6af
 +      title: "Swap Chat / Workspace Panel",
 +      description: "Swap the center and right panels in the desktop split layout",
 +      group: "Preferences",
++      enabled: (context) => context.piWebUnstable?.canSwapChatWorkspaceLayout?.() ?? false,
++      disabledReason: () => "Available when Chat and Workspace panels are side by side; use tool tabs in narrow layouts",
 +      run: (context) => { context.piWebUnstable?.toggleChatWorkspaceLayout?.(); },
 +    },
      {
        id: "settings.open",
        title: "Open Settings",
 diff --git a/src/client/src/plugins/types.ts b/src/client/src/plugins/types.ts
-index 137803471d59351712b416d036ca623acb1d3913..eb6a51c70c5aeded0bbcbe01c4d906ab42e756a1 100644
+index 137803471d59351712b416d036ca623acb1d3913..fe192474212a31f2632cbb048a6a8fffa7069830 100644
 --- a/src/client/src/plugins/types.ts
 +++ b/src/client/src/plugins/types.ts
-@@ -199,6 +199,7 @@ export interface WorkspacePanelTerminal {
+@@ -199,6 +199,8 @@ export interface WorkspacePanelTerminal {
  
  export interface PiWebUnstableRuntimeContext {
    openSettings?: (section?: SettingsSection) => void;
++  canSwapChatWorkspaceLayout?: () => boolean;
 +  toggleChatWorkspaceLayout?: () => void;
  }
  

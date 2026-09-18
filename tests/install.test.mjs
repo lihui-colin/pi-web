@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,6 +8,7 @@ import assert from 'node:assert/strict';
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const roots = [];
+const npm = execFileSync('sh', ['-c', 'command -v npm'], { encoding: 'utf8' }).trim();
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
@@ -23,11 +24,17 @@ function fixture({ conflict = false, failure = '' } = {}) {
   const bin = join(root, 'bin');
   const releases = join(root, 'releases');
   const log = join(root, 'calls.log');
+  const prefix = join(root, 'global');
   for (const dir of [upstream, source, bin]) mkdirSync(dir);
   writeFileSync(log, '');
   git(upstream, 'init', '-b', 'main');
   const original = Array.from({ length: 20 }, (_, i) => `line ${i}`).join('\n') + '\n';
   writeFileSync(join(upstream, 'app.txt'), original);
+  writeFileSync(join(upstream, 'package.json'), JSON.stringify({
+    name: '@jmfederico/pi-web', version: '1.0.0',
+    bin: { 'pi-web': 'dist/cli.js', 'pi-web-server': 'dist/server/index.js', 'pi-web-sessiond': 'dist/server/sessiond.js' },
+    scripts: { prepare: 'exit 99', prepack: 'exit 99', postinstall: 'exit 99' },
+  }));
   git(upstream, 'add', '.');
   git(upstream, 'commit', '-m', 'upstream base');
   writeFileSync(join(upstream, 'app.txt'), original.replace('line 0\n', 'custom layout\n'));
@@ -39,26 +46,42 @@ function fixture({ conflict = false, failure = '' } = {}) {
   git(source, 'init', '-b', 'terminal-patch');
   mkdirSync(join(source, 'patches'));
   writeFileSync(join(source, 'patches', '0001-layout.patch'), patch);
-  for (const file of ['install.sh', 'sync.sh']) copyFileSync(join(repo, file), join(source, file));
+  mkdirSync(join(source, 'scripts'));
+  for (const file of ['install.sh', 'sync.sh']) copyFileSync(join(repo, 'scripts', file), join(source, 'scripts', file));
   git(source, 'add', '.');
   git(source, 'commit', '-m', 'patch-only root');
   git(source, 'remote', 'add', 'origin', origin);
   writeFileSync(join(bin, 'npm'), `#!/bin/sh
 printf 'npm %s\n' "$*" >> "$TEST_LOG"
 if [ "$TEST_FAILURE" = "$*" ]; then exit 7; fi
-if [ "$*" = 'run build' ]; then mkdir -p dist; printf 'built' > dist/cli.js; printf 'built %s\\n' "$PWD" >> "$TEST_LOG"; fi
+if [ "$1" = ls ]; then exit 1; fi
+if [ "$*" = "install -g --ignore-scripts @earendil-works/pi-coding-agent@latest" ]; then exit 0; fi
+if [ "$*" = 'run build' ]; then
+  mkdir -p dist/server
+  for entry in dist/cli.js dist/server/index.js dist/server/sessiond.js; do
+    printf '#!/usr/bin/env node\\nconsole.log("patched");\\n' > "$entry"
+    chmod +x "$entry"
+  done
+  printf 'built %s\\n' "$PWD" >> "$TEST_LOG"
+fi
+if [ "$1" = install ] || [ "$1" = prefix ]; then
+  exec "$REAL_NODE" "$REAL_NPM" "$@" --prefix "$TEST_PREFIX" --offline
+fi
 `);
   writeFileSync(join(bin, 'node'), `#!/bin/sh
+if [ "$1" = '-e' ]; then exec "$REAL_NODE" "$@"; fi
+if [ "$1" = '--version' ]; then echo v22.19.0; exit 0; fi
 if [ "$1" = '--no-experimental-webstorage' ]; then exit 0; fi
 printf 'node %s\n' "$*" >> "$TEST_LOG"
 test -f dist/cli.js || exit 8
 printf 'installed %s\n' "$PWD" >> "$TEST_LOG"
 `);
-  for (const file of ['node', 'npm']) chmodSync(join(bin, file), 0o755);
-  const run = (script = 'install.sh', args = []) => spawnSync('sh', [join(source, script), ...args], {
-    cwd: root, encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, PI_WEB_UPSTREAM_URL: upstream, PI_WEB_INSTALL_ROOT: releases, TEST_LOG: log, TEST_FAILURE: failure },
+  writeFileSync(join(bin, 'pi'), '#!/bin/sh\necho 0.85.1\n');
+  for (const file of ['node', 'npm', 'pi']) chmodSync(join(bin, file), 0o755);
+  const run = (script = 'install.sh', args = [], runFailure = failure) => spawnSync('sh', [join(source, 'scripts', script), ...args], {
+    cwd: root, encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, PI_WEB_UPSTREAM_URL: upstream, PI_WEB_INSTALL_ROOT: releases, TEST_LOG: log, TEST_FAILURE: runFailure, TEST_PREFIX: prefix, REAL_NODE: process.execPath, REAL_NPM: realpathSync(npm) },
   });
-  return { source, upstream, origin, log, releases, run };
+  return { source, upstream, origin, log, releases, prefix, run };
 }
 
 function prepareLocalMain(f) {
@@ -74,9 +97,15 @@ test('installs from local main without updating Agent, Git remotes or services',
   assert.equal(result.status, 0, result.stderr);
   const calls = readFileSync(f.log, 'utf8').trim().split('\n');
   assert.deepEqual(calls.slice(0, 3), ['npm ci --include=dev', 'npm test', 'npm run build']);
-  assert.equal(calls.length, 4);
+  assert.equal(calls.length, 6);
   const installed = calls[3].slice('built '.length);
   assert.ok(installed.startsWith(f.releases));
+  assert.equal(calls[4], `npm install --global --ignore-scripts --install-links=false --legacy-peer-deps ${installed}`);
+  for (const [bin, entry] of [['pi-web', 'cli.js'], ['pi-web-server', 'server/index.js'], ['pi-web-sessiond', 'server/sessiond.js']]) {
+    const command = join(f.prefix, 'bin', bin);
+    assert.equal(realpathSync(command), join(installed, 'dist', entry));
+    assert.equal(execFileSync(process.execPath, [command], { encoding: 'utf8' }).trim(), 'patched');
+  }
   assert.match(readFileSync(join(installed, '.npmrc'), 'utf8'), /allow-scripts=node-pty,esbuild/);
   const app = readFileSync(join(installed, 'app.txt'), 'utf8');
   assert.ok(app.includes('custom layout') && app.includes('new upstream'));
@@ -90,6 +119,7 @@ test('installs from local main without updating Agent, Git remotes or services',
   assert.equal(f.run().status, 0);
   const installs = readFileSync(f.log, 'utf8').split('\n').filter(line => line.startsWith('built '));
   assert.equal(new Set(installs).size, 2);
+  assert.equal(realpathSync(join(f.prefix, 'bin', 'pi-web')), join(installs[1].slice('built '.length), 'dist/cli.js'));
   assert.equal(readFileSync(join(installed, 'app.txt'), 'utf8'), app);
 });
 
@@ -121,6 +151,7 @@ for (const failure of ['ci --include=dev', 'test', 'run build']) {
     const calls = readFileSync(f.log, 'utf8');
     assert.equal(calls.trim().split('\n').at(-1), `npm ${failure}`);
     assert.ok(!calls.includes('node dist/cli.js install'));
+    assert.ok(!calls.includes('npm install --global'));
   });
 }
 
@@ -232,3 +263,97 @@ test('installation rejects former service options before doing any work', () => 
   assert.match(result.stderr, /service options are no longer accepted/);
   assert.equal(readFileSync(f.log, 'utf8'), '');
 });
+
+
+test('failed rebuild preserves the previously installed global command', () => {
+  const f = fixture();
+  prepareLocalMain(f);
+  const installed = f.run();
+  assert.equal(installed.status, 0, installed.stderr);
+  const command = join(f.prefix, 'bin', 'pi-web');
+  const oldTarget = realpathSync(command);
+  const failed = f.run('install.sh', [], 'run build');
+  assert.notEqual(failed.status, 0);
+  assert.equal(realpathSync(command), oldTarget);
+  assert.equal(execFileSync(process.execPath, [command], { encoding: 'utf8' }).trim(), 'patched');
+});
+
+function updateFixture() {
+  const root = mkdtempSync(join(tmpdir(), 'pi-web update test '));
+  roots.push(root);
+  const bin = join(root, 'bin');
+  const log = join(root, 'calls.log');
+  mkdirSync(bin);
+  writeFileSync(log, '');
+  writeFileSync(join(bin, 'npm'), `#!/bin/sh
+printf 'npm %s\\n' "$*" >> "$TEST_LOG"
+case "$*" in
+  'ls -g --depth=0 --json '*) printf '{}'; exit 1 ;;
+  'ls -g --depth=0 @agegr/pi-web') exit 1 ;;
+esac
+`);
+  writeFileSync(join(bin, 'node'), `#!/bin/sh
+if [ "$1" = --version ]; then echo v22.19.0; exit 0; fi
+exec "$REAL_NODE" "$@"
+`);
+  writeFileSync(join(bin, 'pi'), '#!/bin/sh\necho 0.85.1\n');
+  for (const file of ['node', 'npm', 'pi']) chmodSync(join(bin, file), 0o755);
+  const run = (...args) => spawnSync('sh', [join(repo, 'scripts/install.sh'), ...args], {
+    encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, TEST_LOG: log, REAL_NODE: process.execPath },
+  });
+  return { run, log };
+}
+
+for (const [option, pkg, excluded] of [
+  ['--pi-only', '@earendil-works/pi-coding-agent', '@jmfederico/pi-web'],
+]) {
+  test(`update ${option} installs only the selected package even when not installed`, () => {
+    const f = updateFixture();
+    const result = f.run('update', option, '--no-restart');
+    assert.equal(result.status, 0, result.stderr);
+    const installs = readFileSync(f.log, 'utf8').split('\n').filter(line => line.startsWith('npm install'));
+    assert.equal(installs.length, 1);
+    assert.ok(installs[0].includes(pkg + '@'));
+    assert.ok(!installs[0].includes(excluded + '@'));
+  });
+}
+
+test('update dry-run prints both updates without installing', () => {
+  const f = updateFixture();
+  const result = f.run('update', '--dry-run', '--no-restart');
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /\[dry-run\] npm install -g --ignore-scripts @earendil-works\/pi-coding-agent@/);
+  assert.match(result.stdout, /\[dry-run\] sh .*scripts\/sync.sh/);
+  assert.match(result.stdout, /\[dry-run\] npm ci --include=dev/);
+  assert.ok(!readFileSync(f.log, 'utf8').includes('npm install'));
+});
+
+test('unified entry rejects invalid arguments before executing npm', () => {
+  const f = updateFixture();
+  for (const args of [['invalid'], ['install', '--dry-run'], ['update', '--pi-only', '--web-only'], ['update', '--invalid']]) {
+    assert.notEqual(f.run(...args).status, 0);
+  }
+  assert.equal(readFileSync(f.log, 'utf8'), '');
+  for (const args of [['--help'], ['install', '--help'], ['update', '--help']]) {
+    const result = f.run(...args);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /install\|update/);
+  }
+});
+
+
+for (const options of [[], ['--web-only']]) {
+test(`update ${options.join(' ')} synchronizes upstream and installs patched global commands`, () => {
+  const f = fixture();
+  const result = f.run('install.sh', ['update', ...options, '--no-restart']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(git(f.origin, 'rev-parse', 'main'), git(f.upstream, 'rev-parse', 'HEAD'));
+  const calls = readFileSync(f.log, 'utf8');
+  assert.equal(calls.includes('npm install -g --ignore-scripts @earendil-works/pi-coding-agent@'), options.length === 0);
+  const installed = calls.split('\n').find(line => line.startsWith('built ')).slice(6);
+  const app = readFileSync(join(installed, 'app.txt'), 'utf8');
+  assert.ok(app.includes('custom layout') && app.includes('new upstream'));
+  assert.equal(realpathSync(join(f.prefix, 'bin', 'pi-web')), join(installed, 'dist/cli.js'));
+});
+
+}
