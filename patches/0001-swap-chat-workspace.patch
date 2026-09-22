@@ -1,5 +1,5 @@
 diff --git a/pi-web-plugins/terminal/TerminalPanel.test.ts b/pi-web-plugins/terminal/TerminalPanel.test.ts
-index 877e2b47cf4f9fd66dbb630975c4430bd6d753bb..317ffcbd5f66644f2180bb576f317da71c81f435 100644
+index b235b51895dc713bc91be3c852ab5fc1a9e439f6..71935bd291f8303b09cfd40b4522086f2dc728a3 100644
 --- a/pi-web-plugins/terminal/TerminalPanel.test.ts
 +++ b/pi-web-plugins/terminal/TerminalPanel.test.ts
 @@ -642,6 +642,91 @@ describe("Terminal panel lifecycle", () => {
@@ -11,7 +11,7 @@ index 877e2b47cf4f9fd66dbb630975c4430bd6d753bb..317ffcbd5f66644f2180bb576f317da7
 +    const panel = createTerminalPanel();
 +    const channel = { closed: new Promise<never>(() => undefined), send: vi.fn(), close: vi.fn() };
 +    const openChannel = vi.fn(() => Promise.resolve(channel));
-+    const context = terminalContext({ pairedBackend: terminalBackend(vi.fn(() => Promise.resolve([])), openChannel) });
++    const context = terminalContext({ peer: terminalPeer(vi.fn(() => Promise.resolve([])), openChannel) });
 +    const terminal = { dispose: vi.fn(), resize: vi.fn() };
 +    const fit = vi.fn();
 +    Reflect.set(panel, "selectedId", "terminal-1");
@@ -46,11 +46,11 @@ index 877e2b47cf4f9fd66dbb630975c4430bd6d753bb..317ffcbd5f66644f2180bb576f317da7
 +      dispose: vi.fn(), resize: vi.fn(),
 +      write: vi.fn((_data: string, complete?: () => void) => { if (complete) completions.push(complete); }),
 +    };
-+    const openChannel = vi.fn((_operation: string, _params: JsonValue, options: PairedWorkspaceBackendChannelOptions) => {
++    const openChannel = vi.fn((_operation: string, _params: JsonValue, options: PluginPeerChannelOptions) => {
 +      options.onData({ type: "output", data: "history", replay: true, replayComplete: true });
 +      return Promise.resolve(channel);
 +    });
-+    const context = terminalContext({ pairedBackend: terminalBackend(vi.fn(() => Promise.resolve([])), openChannel) });
++    const context = terminalContext({ peer: terminalPeer(vi.fn(() => Promise.resolve([])), openChannel) });
 +    let dimensions = { cols: 80, rows: 24 };
 +    Reflect.set(panel, "selectedId", "terminal-1");
 +    Reflect.set(panel, "terminal", terminal);
@@ -75,7 +75,7 @@ index 877e2b47cf4f9fd66dbb630975c4430bd6d753bb..317ffcbd5f66644f2180bb576f317da7
 +    const channel = { closed: new Promise<never>(() => undefined), send: vi.fn(), close: vi.fn() };
 +    const opening = deferred<typeof channel>();
 +    const openChannel = vi.fn(() => opening.promise);
-+    const context = terminalContext({ pairedBackend: terminalBackend(vi.fn(() => Promise.resolve([])), openChannel) });
++    const context = terminalContext({ peer: terminalPeer(vi.fn(() => Promise.resolve([])), openChannel) });
 +    const terminal = { dispose: vi.fn() };
 +    Reflect.set(panel, "selectedId", "terminal-1");
 +    Reflect.set(panel, "terminal", terminal);
@@ -95,7 +95,7 @@ index 877e2b47cf4f9fd66dbb630975c4430bd6d753bb..317ffcbd5f66644f2180bb576f317da7
      const panel = createTerminalPanel();
      const channel = { closed: new Promise<never>(() => undefined), send: vi.fn(), close: vi.fn() };
 diff --git a/pi-web-plugins/terminal/TerminalPanel.ts b/pi-web-plugins/terminal/TerminalPanel.ts
-index 961f25397b4a42cdc58c1f375e84719d961b2013..4d2d96a523a1cedcae73cc02090da7a95b1d1def 100644
+index fd374b67d45e988c74c6b41e769913007145abc4..45a3ea64c268478a76202ab5326ea607fa692234 100644
 --- a/pi-web-plugins/terminal/TerminalPanel.ts
 +++ b/pi-web-plugins/terminal/TerminalPanel.ts
 @@ -23,6 +23,8 @@ const TERMINAL_OPTIONS_BASE: ITerminalOptions = {
@@ -295,18 +295,18 @@ index 0000000000000000000000000000000000000000..caf0b3bfdb3007a1eefcd49fb4860c38
 +  vi.spyOn(window, "matchMedia").mockReturnValue(result);
 +}
 diff --git a/src/client/src/components/PiWebApp.ts b/src/client/src/components/PiWebApp.ts
-index dcb0bc933904edfdcd2c018d7f67b00d8363d7c9..86f462322cd0ad74e316c3bb74e62b8278870d96 100644
+index 29aa621d1d16ac6d6a2b6c75027a91905e44e503..6127b1b62bd1b2b492bc32ed864b7d2ac6ba7b03 100644
 --- a/src/client/src/components/PiWebApp.ts
 +++ b/src/client/src/components/PiWebApp.ts
-@@ -2,6 +2,7 @@ import { LitElement, html, type TemplateResult } from "lit";
- import { customElement, query, state } from "lit/decorators.js";
+@@ -3,6 +3,7 @@ import { customElement, query, state } from "lit/decorators.js";
+ import { guard } from "lit/directives/guard.js";
  import { configApi, effectiveWorkspaceAttachmentsFolder, effectiveWorkspaceUploadFolder, sessionsApi, workspacesApi, workspaceEffectiveAttachmentsFolder, workspaceEffectiveUploadFolder, type AskUserSubmission, type CommandOption, type ExtensionDialogAnswer, type Machine, type MachineHealth, type PiWebConfigValues, type PiWebShortcutConfig, type Project, type SessionCleanupExecuteResponse, type SessionCleanupPreviewResponse, type SessionCleanupRequest, type SessionInfo, type SessionModel, type SessionModelCatalogEntry, type SessionModelScopeMode, type SessionTreeForkResult, type SessionTreeNavigateResult, type SessionTreeSummaryChoice, type TerminalCommandRun, type Workspace } from "../api";
  import type { AppAction } from "../actions";
 +import { readPanelLayoutPreference, writePanelLayoutPreference } from "../panelLayoutPreference";
  import { initialAppState, type AppState, type ModelDialogOrigin } from "../appState";
  import { browserErrorContext, browserErrorScopeKey, BrowserErrorReporter, clearBrowserError, machineBrowserErrorScope, visibleBrowserErrors, workspaceBrowserErrorScope, type BrowserError, type BrowserErrorScope } from "../browserErrors";
  import { isSessionActive } from "../../../shared/activity";
-@@ -138,6 +139,7 @@ interface SessionCleanupDialogState {
+@@ -139,6 +140,7 @@ interface SessionCleanupDialogState {
  @customElement("pi-web-app")
  export class PiWebApp extends LitElement {
    @state() private state: AppState = initialAppState();
@@ -314,7 +314,7 @@ index dcb0bc933904edfdcd2c018d7f67b00d8363d7c9..86f462322cd0ad74e316c3bb74e62b82
    private readonly browserErrors = new BrowserErrorReporter(() => this.state, (patch) => { this.setState(patch); });
    @query("chat-view") private chatView?: ChatView;
    @query("prompt-editor") private promptEditor?: PromptEditor;
-@@ -1636,7 +1638,9 @@ export class PiWebApp extends LitElement {
+@@ -1696,7 +1698,9 @@ export class PiWebApp extends LitElement {
    }
  
    private measuredPanelWidth(side: ResizablePanelSide): number | undefined {
@@ -325,7 +325,7 @@ index dcb0bc933904edfdcd2c018d7f67b00d8363d7c9..86f462322cd0ad74e316c3bb74e62b82
      const width = element?.getBoundingClientRect().width;
      return width === undefined || width <= 0 ? undefined : width;
    }
-@@ -2444,12 +2448,20 @@ export class PiWebApp extends LitElement {
+@@ -2565,12 +2569,20 @@ export class PiWebApp extends LitElement {
      };
    }
  
@@ -346,7 +346,7 @@ index dcb0bc933904edfdcd2c018d7f67b00d8363d7c9..86f462322cd0ad74e316c3bb74e62b82
        },
        openActionPalette: () => { this.setState({ actionPaletteOpen: true }); },
        focusPrompt: () => { void this.focusChatComposer(); },
-@@ -3194,7 +3206,7 @@ export class PiWebApp extends LitElement {
+@@ -3328,7 +3340,7 @@ export class PiWebApp extends LitElement {
      const state = this.state;
      const mainView = this.effectiveMainView();
      return html`
@@ -472,10 +472,10 @@ index dffdc69f69388eb239ea19300e81887073ea9a30..4f5d300e31c7a69f2f10bc2411a827f4
        id: "settings.open",
        title: "Open Settings",
 diff --git a/src/client/src/plugins/types.ts b/src/client/src/plugins/types.ts
-index 137803471d59351712b416d036ca623acb1d3913..fe192474212a31f2632cbb048a6a8fffa7069830 100644
+index a5366ae8bc3280b02dc98b328d0a1f28cee49169..fc66e7286b122f4cb13b06b2358da1b12b424f7e 100644
 --- a/src/client/src/plugins/types.ts
 +++ b/src/client/src/plugins/types.ts
-@@ -199,6 +199,8 @@ export interface WorkspacePanelTerminal {
+@@ -201,6 +201,8 @@ export interface WorkspacePanelTerminal {
  
  export interface PiWebUnstableRuntimeContext {
    openSettings?: (section?: SettingsSection) => void;
