@@ -25,6 +25,8 @@ update: Update Pi Agent, sync upstream main, apply patches, test, build and
 PI_WEB_INSTALL_ROOT  Local release parent (default: ~/.local/share/pi-web-opt)
 PI_VERSION          Pi Agent npm target (default: latest)
 PI_WEB_UPSTREAM_URL  Official upstream Git URL override
+PI_WEB_TEST_MAX_WORKERS  Maximum parallel test workers (default: 4)
+PI_WEB_TEST_TIMEOUT_MS   Per-test timeout in milliseconds (default: 30000)
 PI_WEB_HOST / PI_WEB_PORT / PI_WEB_PASSWORD  Service restart configuration
 HELP
 }
@@ -51,10 +53,13 @@ install_local() (
     # Configure build-script permissions only in this generated release directory.
     printf '\nallow-scripts=node-pty,esbuild\n' >> .npmrc
     npm ci --include=dev
+    # Bound resource contention when the host exposes many CPUs. Package-build
+    # tests spawn compilers and can exceed Vitest's default five-second timeout.
+    test_args=(-- "--maxWorkers=${PI_WEB_TEST_MAX_WORKERS:-4}" "--testTimeout=${PI_WEB_TEST_TIMEOUT_MS:-30000}")
     if node --no-experimental-webstorage -e '' >/dev/null 2>&1; then
-      NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--no-experimental-webstorage" npm test
+      NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--no-experimental-webstorage" npm test "${test_args[@]}"
     else
-      npm test
+      npm test "${test_args[@]}"
     fi
     npm run build
 
@@ -249,7 +254,7 @@ update_web() {
     log "同步官方 pi-web、应用补丁、测试构建并替换全局命令..."
     if [[ $DRY_RUN -eq 1 ]]; then
         log "[dry-run] sh $project_root/scripts/sync.sh (同步 upstream/main 与 origin/main 并应用补丁)"
-        log "[dry-run] npm ci --include=dev; npm test; npm run build; 链接补丁版全局命令"
+        log "[dry-run] npm ci --include=dev; npm test -- --maxWorkers=${PI_WEB_TEST_MAX_WORKERS:-4} --testTimeout=${PI_WEB_TEST_TIMEOUT_MS:-30000}; npm run build; 链接补丁版全局命令"
         return 0
     fi
     install_local remote

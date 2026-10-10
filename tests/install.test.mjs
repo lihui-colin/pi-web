@@ -15,7 +15,7 @@ afterEach(() => {
 function git(cwd, ...args) {
   return execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', ...args], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 }
-function fixture({ conflict = false, failure = '', agent = true, agentVersion = 'latest' } = {}) {
+function fixture({ conflict = false, failure = '', agent = true, agentVersion = 'latest', maxWorkers = '4', testTimeout = '30000' } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'pi-web patch test '));
   roots.push(root);
   const upstream = join(root, 'upstream');
@@ -84,7 +84,7 @@ printf 'installed %s\n' "$PWD" >> "$TEST_LOG"
   if (agent) writeFileSync(join(bin, 'pi'), '#!/bin/sh\necho 0.85.1\n');
   for (const file of ['node', 'npm', ...(agent ? ['pi'] : [])]) chmodSync(join(bin, file), 0o755);
   const run = (script = 'install.sh', args = [], runFailure = failure) => spawnSync('sh', [join(source, 'scripts', script), ...args], {
-    cwd: root, encoding: 'utf8', env: { ...process.env, PATH: `${bin}:/usr/bin:/bin`, TEST_BIN: bin, PI_VERSION: agentVersion, PI_WEB_UPSTREAM_URL: upstream, PI_WEB_INSTALL_ROOT: releases, TEST_LOG: log, TEST_FAILURE: runFailure, TEST_PREFIX: prefix, REAL_NODE: process.execPath, REAL_NPM: realpathSync(npm) },
+    cwd: root, encoding: 'utf8', env: { ...process.env, PATH: `${bin}:/usr/bin:/bin`, TEST_BIN: bin, PI_VERSION: agentVersion, PI_WEB_UPSTREAM_URL: upstream, PI_WEB_INSTALL_ROOT: releases, PI_WEB_TEST_MAX_WORKERS: maxWorkers, PI_WEB_TEST_TIMEOUT_MS: testTimeout, TEST_LOG: log, TEST_FAILURE: runFailure, TEST_PREFIX: prefix, REAL_NODE: process.execPath, REAL_NPM: realpathSync(npm) },
   });
   return { source, upstream, origin, log, releases, prefix, run };
 }
@@ -101,7 +101,7 @@ test('installs from local main without updating Agent, Git remotes or services',
   const result = f.run();
   assert.equal(result.status, 0, result.stderr);
   const calls = readFileSync(f.log, 'utf8').trim().split('\n');
-  assert.deepEqual(calls.slice(0, 3), ['npm ci --include=dev', 'npm test', 'npm run build']);
+  assert.deepEqual(calls.slice(0, 3), ['npm ci --include=dev', 'npm test -- --maxWorkers=4 --testTimeout=30000', 'npm run build']);
   assert.equal(calls.length, 6);
   const installed = calls[3].slice('built '.length);
   assert.ok(installed.startsWith(f.releases));
@@ -147,7 +147,15 @@ test('conflicts stop installation while main stays pure upstream', () => {
   assert.equal(git(f.source, 'rev-parse', 'main'), git(f.upstream, 'rev-parse', 'HEAD'));
 });
 
-for (const failure of ['ci --include=dev', 'test', 'run build']) {
+test('installation respects test worker and timeout overrides', () => {
+  const f = fixture({ maxWorkers: '2', testTimeout: '60000' });
+  prepareLocalMain(f);
+  const result = f.run();
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(readFileSync(f.log, 'utf8').includes('npm test -- --maxWorkers=2 --testTimeout=60000'));
+});
+
+for (const failure of ['ci --include=dev', 'test -- --maxWorkers=4 --testTimeout=30000', 'run build']) {
   test(`does not install services after ${failure} fails`, () => {
     const f = fixture({ failure });
     prepareLocalMain(f);

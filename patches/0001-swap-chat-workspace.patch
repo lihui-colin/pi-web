@@ -174,23 +174,20 @@ index fd374b67d45e988c74c6b41e769913007145abc4..45a3ea64c268478a76202ab5326ea607
      this.channelReconnectTimer = undefined;
 diff --git a/src/client/src/components/PiWebApp.panelLayout.test.ts b/src/client/src/components/PiWebApp.panelLayout.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..caf0b3bfdb3007a1eefcd49fb4860c38f2736d91
+index 0000000000000000000000000000000000000000..12614567b9c20531f12237d5363ec445d2dda17e
 --- /dev/null
 +++ b/src/client/src/components/PiWebApp.panelLayout.test.ts
 @@ -0,0 +1,116 @@
 +// @vitest-environment happy-dom
 +
 +import { render } from "lit";
-+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
++import { afterEach, describe, expect, it, vi } from "vitest";
 +import { readPanelLayoutPreference, writePanelLayoutPreference } from "../panelLayoutPreference";
 +import { createCoreActions } from "../plugins/core/actions";
 +import type { PluginRuntimeContext } from "../plugins/types";
 +import { PiWebApp } from "./PiWebApp";
++import { AppShellController } from "../appShell/appShellController";
 +import { AppPanelEdgeControl } from "./appShell/AppPanelEdgeControl";
-+
-+beforeEach(() => {
-+  mockDesktopLayout(true);
-+});
 +
 +afterEach(() => {
 +  document.body.replaceChildren();
@@ -202,6 +199,7 @@ index 0000000000000000000000000000000000000000..caf0b3bfdb3007a1eefcd49fb4860c38
 +describe("panel layout action", () => {
 +  it("swaps and persists the shell layout without replacing its surfaces", async () => {
 +    const app = new PiWebApp();
++    mockDesktopLayout(app, true);
 +    // Render the shell without starting the application's network lifecycle.
 +    const container = document.createElement("div");
 +    document.body.append(container);
@@ -236,6 +234,7 @@ index 0000000000000000000000000000000000000000..caf0b3bfdb3007a1eefcd49fb4860c38
 +  it("disables swapping in tab layouts and preserves the desktop preference", async () => {
 +    writePanelLayoutPreference("workspace-main");
 +    const app = new PiWebApp();
++    mockDesktopLayout(app, true);
 +    const createContext: unknown = Reflect.get(app, "createPluginRuntimeContext");
 +    if (!isContextFactory(createContext)) throw new Error("Missing plugin context factory");
 +    const context = createContext.call(app);
@@ -243,7 +242,7 @@ index 0000000000000000000000000000000000000000..caf0b3bfdb3007a1eefcd49fb4860c38
 +    if (action === undefined) throw new Error("Missing layout action");
 +    expect(action.enabled?.(context)).toBe(true);
 +
-+    mockDesktopLayout(false);
++    mockDesktopLayout(app, false);
 +    expect(action.enabled?.(context)).toBe(false);
 +    expect(action.disabledReason?.(context)).toContain("tool tabs");
 +    // A stale action/context must also be safe after resizing into a tab layout.
@@ -251,7 +250,7 @@ index 0000000000000000000000000000000000000000..caf0b3bfdb3007a1eefcd49fb4860c38
 +    expect(readPanelLayoutPreference()).toBe("workspace-main");
 +    expect(Reflect.get(app, "panelLayout")).toBe("workspace-main");
 +
-+    mockDesktopLayout(true);
++    mockDesktopLayout(app, true);
 +    expect(action.enabled?.(context)).toBe(true);
 +    await action.run(context);
 +    expect(readPanelLayoutPreference()).toBe("chat-main");
@@ -260,6 +259,7 @@ index 0000000000000000000000000000000000000000..caf0b3bfdb3007a1eefcd49fb4860c38
 +  it("restores the saved layout in a new app", () => {
 +    writePanelLayoutPreference("workspace-main");
 +    const app = new PiWebApp();
++    mockDesktopLayout(app, true);
 +    const container = document.createElement("div");
 +    document.body.append(container);
 +    Object.defineProperty(app, "renderRoot", { value: container });
@@ -269,8 +269,8 @@ index 0000000000000000000000000000000000000000..caf0b3bfdb3007a1eefcd49fb4860c38
 +
 +  it.each([true, false])("starts resizing from the physical right surface (desktop=%s)", (desktop) => {
 +    writePanelLayoutPreference("workspace-main");
-+    mockDesktopLayout(desktop);
 +    const app = new PiWebApp();
++    mockDesktopLayout(app, desktop);
 +    const container = document.createElement("div");
 +    document.body.append(container);
 +    Object.defineProperty(app, "renderRoot", { value: container });
@@ -289,10 +289,10 @@ index 0000000000000000000000000000000000000000..caf0b3bfdb3007a1eefcd49fb4860c38
 +  return typeof value === "function";
 +}
 +
-+function mockDesktopLayout(desktop: boolean): void {
-+  const result = window.matchMedia("(min-width: 1181px)");
-+  Object.defineProperty(result, "matches", { configurable: true, value: desktop });
-+  vi.spyOn(window, "matchMedia").mockReturnValue(result);
++function mockDesktopLayout(app: PiWebApp, desktop: boolean): void {
++  const shell: unknown = Reflect.get(app, "appShell");
++  if (!(shell instanceof AppShellController)) throw new Error("Expected shell controller");
++  shell.isDesktopSideBySideLayout = desktop;
 +}
 diff --git a/src/client/src/components/PiWebApp.ts b/src/client/src/components/PiWebApp.ts
 index 29aa621d1d16ac6d6a2b6c75027a91905e44e503..6127b1b62bd1b2b492bc32ed864b7d2ac6ba7b03 100644

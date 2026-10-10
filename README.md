@@ -18,6 +18,8 @@ sh scripts/install.sh
 
 详细的同步、冲突处理和补丁维护方法见 [使用文档](docs/usage.md)。
 
+安装时默认最多并行运行 4 个测试工作进程，单个测试时限为 30 秒，避免大量并发构建引发超时。可用 `PI_WEB_TEST_MAX_WORKERS` 和 `PI_WEB_TEST_TIMEOUT_MS` 覆盖，例如 `PI_WEB_TEST_MAX_WORKERS=2 PI_WEB_TEST_TIMEOUT_MS=60000 bash scripts/install.sh`。测试失败仍会中止安装，保留原有全局版本。
+
 统一入口支持 `bash scripts/install.sh update`：更新 Pi Agent、同步官方 pi-web 源码、应用补丁并测试构建安装，按选项重启服务。只更新 Agent 可加 `--pi-only`，只更新补丁版 pi-web 可加 `--web-only`，预览可加 `--dry-run`。
 
 ## 手动启动与管理服务
