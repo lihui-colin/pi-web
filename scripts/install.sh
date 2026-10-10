@@ -9,12 +9,13 @@ usage() {
     cat <<'HELP'
 Usage: bash scripts/install.sh [install|update] [options]
 
-install (default): Apply local patches to existing main, test, build and
-  link global pi-web commands. Run sh scripts/sync.sh first to update main.
+install (default): Apply local patches to the cached patches/base-commit,
+  test, build and link global pi-web commands. Run sh scripts/sync.sh first
+  to fetch that commit if missing.
   Installs Pi Agent if missing; preserves an existing Agent.
   Does not manage services. No options accepted.
-update: Update Pi Agent, sync upstream main, apply patches, test, build and
-  link global pi-web commands. Synchronization also pushes origin/main.
+update: Update Pi Agent, fetch patches/base-commit, apply patches, test,
+  build and link global pi-web commands. No Git branches are updated or pushed.
   --pi-only       Update only Pi Agent
   --web-only      Sync, patch and rebuild only pi-web
   --update-relay  Also update the global relay skill
@@ -251,9 +252,9 @@ update_pi() {
 }
 
 update_web() {
-    log "同步官方 pi-web、应用补丁、测试构建并替换全局命令..."
+    log "获取 patches/base-commit 指定的 pi-web、应用补丁、测试构建并替换全局命令..."
     if [[ $DRY_RUN -eq 1 ]]; then
-        log "[dry-run] sh $project_root/scripts/sync.sh (同步 upstream/main 与 origin/main 并应用补丁)"
+        log "[dry-run] sh $project_root/scripts/sync.sh (获取 patches/base-commit 指定的提交并应用补丁)"
         log "[dry-run] npm ci --include=dev; npm test -- --maxWorkers=${PI_WEB_TEST_MAX_WORKERS:-4} --testTimeout=${PI_WEB_TEST_TIMEOUT_MS:-30000}; npm run build; 链接补丁版全局命令"
         return 0
     fi

@@ -37,6 +37,7 @@ function fixture({ conflict = false, failure = '', agent = true, agentVersion = 
   }));
   git(upstream, 'add', '.');
   git(upstream, 'commit', '-m', 'upstream base');
+  const baseCommit = git(upstream, 'rev-parse', 'HEAD');
   writeFileSync(join(upstream, 'app.txt'), original.replace('line 0\n', 'custom layout\n'));
   const patch = git(upstream, 'diff', '--binary', '--full-index', 'HEAD') + '\n';
   git(upstream, 'restore', 'app.txt');
@@ -46,6 +47,7 @@ function fixture({ conflict = false, failure = '', agent = true, agentVersion = 
   git(source, 'init', '-b', 'terminal-patch');
   mkdirSync(join(source, 'patches'));
   writeFileSync(join(source, 'patches', '0001-layout.patch'), patch);
+  writeFileSync(join(source, 'patches', 'base-commit'), (conflict ? git(upstream, 'rev-parse', 'HEAD') : baseCommit) + '\n');
   mkdirSync(join(source, 'scripts'));
   for (const file of ['install.sh', 'sync.sh']) copyFileSync(join(repo, 'scripts', file), join(source, 'scripts', file));
   git(source, 'add', '.');
@@ -86,14 +88,14 @@ printf 'installed %s\n' "$PWD" >> "$TEST_LOG"
   const run = (script = 'install.sh', args = [], runFailure = failure) => spawnSync('sh', [join(source, 'scripts', script), ...args], {
     cwd: root, encoding: 'utf8', env: { ...process.env, PATH: `${bin}:/usr/bin:/bin`, TEST_BIN: bin, PI_VERSION: agentVersion, PI_WEB_UPSTREAM_URL: upstream, PI_WEB_INSTALL_ROOT: releases, PI_WEB_TEST_MAX_WORKERS: maxWorkers, PI_WEB_TEST_TIMEOUT_MS: testTimeout, TEST_LOG: log, TEST_FAILURE: runFailure, TEST_PREFIX: prefix, REAL_NODE: process.execPath, REAL_NPM: realpathSync(npm) },
   });
-  return { source, upstream, origin, log, releases, prefix, run };
+  return { source, upstream, origin, log, releases, prefix, run, baseCommit };
 }
 
 function prepareLocalMain(f) {
   git(f.source, 'fetch', f.upstream, 'main:main');
 }
 
-test('installs from local main without updating Agent, Git remotes or services', () => {
+test('installs the cached pinned commit even when local main is newer', () => {
   const f = fixture();
   prepareLocalMain(f);
   git(f.source, 'remote', 'set-url', 'origin', '/nonexistent-origin');
@@ -112,8 +114,9 @@ test('installs from local main without updating Agent, Git remotes or services',
     assert.equal(execFileSync(process.execPath, [command], { encoding: 'utf8' }).trim(), 'patched');
   }
   assert.match(readFileSync(join(installed, '.npmrc'), 'utf8'), /allow-scripts=node-pty,esbuild/);
+  assert.equal(git(installed, 'rev-parse', 'HEAD'), f.baseCommit);
   const app = readFileSync(join(installed, 'app.txt'), 'utf8');
-  assert.ok(app.includes('custom layout') && app.includes('new upstream'));
+  assert.ok(app.includes('custom layout') && !app.includes('new upstream'));
   const upstreamHead = git(f.upstream, 'rev-parse', 'HEAD');
   assert.equal(git(f.source, 'rev-parse', 'main'), upstreamHead);
   assert.equal(git(f.origin, 'for-each-ref', '--format=%(refname)', 'refs/heads/main'), '');
@@ -168,105 +171,98 @@ for (const failure of ['ci --include=dev', 'test -- --maxWorkers=4 --testTimeout
   });
 }
 
-test('refuses to overwrite divergent local main', () => {
+test('sync fetches the pinned commit without requiring main or origin', () => {
   const f = fixture();
-  git(f.source, 'fetch', f.upstream, 'main:main');
-  git(f.source, 'switch', 'main');
-  writeFileSync(join(f.source, 'local.txt'), 'keep me');
-  git(f.source, 'add', 'local.txt');
-  git(f.source, 'commit', '-m', 'local work');
-  const oldMain = git(f.source, 'rev-parse', 'main');
-  git(f.source, 'switch', 'terminal-patch');
-  assert.notEqual(f.run('sync.sh').status, 0);
-  assert.equal(git(f.source, 'rev-parse', 'main'), oldMain);
-  assert.equal(readFileSync(f.log, 'utf8'), '');
-});
-
-test('refuses to overwrite divergent origin/main', () => {
-  const f = fixture();
-  assert.equal(f.run('sync.sh').status, 0);
-  const remoteWork = join(f.source, '..', 'other-user');
-  git(f.source, 'clone', '--branch', 'main', f.origin, remoteWork);
-  writeFileSync(join(remoteWork, 'remote.txt'), 'keep remote work');
-  git(remoteWork, 'add', '.');
-  git(remoteWork, 'commit', '-m', 'remote work');
-  git(remoteWork, 'push', 'origin', 'main');
-  const oldMain = git(f.origin, 'rev-parse', 'main');
-  assert.notEqual(f.run('sync.sh').status, 0);
-  assert.equal(git(f.origin, 'rev-parse', 'main'), oldMain);
-});
-
-function checkoutMain(f) {
-  const mainWorktree = join(f.source, '..', 'main checkout');
-  git(f.source, 'fetch', f.upstream, 'main');
-  git(f.source, 'worktree', 'add', '-b', 'main', mainWorktree, 'FETCH_HEAD^');
-  return mainWorktree;
-}
-
-test('fast-forwards a checked-out main and preserves unrelated untracked files', () => {
-  const f = fixture();
-  const mainWorktree = checkoutMain(f);
-  writeFileSync(join(mainWorktree, 'notes.txt'), 'local notes');
+  git(f.source, 'remote', 'remove', 'origin');
   const result = f.run('sync.sh');
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(git(mainWorktree, 'rev-parse', 'HEAD'), git(f.upstream, 'rev-parse', 'HEAD'));
-  assert.equal(git(mainWorktree, 'branch', '--show-current'), 'main');
-  assert.equal(readFileSync(join(mainWorktree, 'app.txt'), 'utf8'), readFileSync(join(f.upstream, 'app.txt'), 'utf8'));
-  assert.equal(readFileSync(join(mainWorktree, 'notes.txt'), 'utf8'), 'local notes');
-  assert.ok(readFileSync(join(result.stdout.trim(), 'app.txt'), 'utf8').includes('custom layout'));
+  assert.equal(git(result.stdout.trim(), 'rev-parse', 'HEAD'), f.baseCommit);
+  assert.equal(git(f.source, 'for-each-ref', '--format=%(refname)', 'refs/heads/main'), '');
+  assert.equal(git(f.origin, 'for-each-ref', '--format=%(refname)'), '');
+  // --local must also work when the baseline is only cached, with no local main.
+  rmSync(f.upstream, { recursive: true });
+  const local = f.run('sync.sh', ['--local']);
+  assert.equal(local.status, 0, local.stderr);
+  assert.equal(git(local.stdout.trim(), 'rev-parse', 'HEAD'), f.baseCommit);
 });
 
-for (const staged of [false, true]) {
-  test(`preserves dirty main and stops before pushing (staged=${staged})`, () => {
-    const f = fixture();
-    const mainWorktree = checkoutMain(f);
-    const oldHead = git(mainWorktree, 'rev-parse', 'HEAD');
-    writeFileSync(join(mainWorktree, 'app.txt'), 'unfinished work');
-    if (staged) git(mainWorktree, 'add', 'app.txt');
-    const oldStatus = git(mainWorktree, 'status', '--porcelain');
-    const result = f.run('sync.sh');
-    assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /main has uncommitted changes/);
-    assert.equal(git(mainWorktree, 'rev-parse', 'HEAD'), oldHead);
-    assert.equal(git(mainWorktree, 'status', '--porcelain'), oldStatus);
-    assert.equal(readFileSync(join(mainWorktree, 'app.txt'), 'utf8'), 'unfinished work');
-    assert.equal(git(f.origin, 'for-each-ref', '--format=%(refname)', 'refs/heads/main'), '');
-  });
-}
-
-test('preserves an untracked file that would be overwritten by upstream', () => {
-  const f = fixture();
-  const mainWorktree = checkoutMain(f);
-  const oldHead = git(mainWorktree, 'rev-parse', 'HEAD');
-  writeFileSync(join(mainWorktree, 'new.txt'), 'local file');
-  writeFileSync(join(f.upstream, 'new.txt'), 'upstream file');
-  git(f.upstream, 'add', '.');
-  git(f.upstream, 'commit', '-m', 'new upstream file');
-  assert.notEqual(f.run('sync.sh').status, 0);
-  assert.equal(git(mainWorktree, 'rev-parse', 'HEAD'), oldHead);
-  assert.equal(readFileSync(join(mainWorktree, 'new.txt'), 'utf8'), 'local file');
-});
-
-
-test('installation uses the existing main even when upstream has newer commits', () => {
+test('sync preserves divergent local and origin main and a dirty main worktree', () => {
   const f = fixture();
   prepareLocalMain(f);
-  const installedBase = git(f.source, 'rev-parse', 'main');
-  writeFileSync(join(f.upstream, 'later.txt'), 'new upstream');
-  git(f.upstream, 'add', '.');
-  git(f.upstream, 'commit', '-m', 'later upstream');
-  const result = f.run();
+  const mainWorktree = join(f.source, '..', 'main checkout');
+  git(f.source, 'worktree', 'add', mainWorktree, 'main');
+  writeFileSync(join(mainWorktree, 'local.txt'), 'keep me');
+  git(mainWorktree, 'add', 'local.txt');
+  git(mainWorktree, 'commit', '-m', 'local work');
+  git(mainWorktree, 'push', 'origin', 'main');
+  const oldHead = git(mainWorktree, 'rev-parse', 'HEAD');
+  writeFileSync(join(mainWorktree, 'app.txt'), 'unfinished work');
+  git(mainWorktree, 'add', 'app.txt');
+  writeFileSync(join(mainWorktree, 'notes.txt'), 'local notes');
+  const oldStatus = git(mainWorktree, 'status', '--porcelain');
+  const result = f.run('sync.sh');
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(git(f.source, 'rev-parse', 'main'), installedBase);
+  assert.equal(git(result.stdout.trim(), 'rev-parse', 'HEAD'), f.baseCommit);
+  assert.equal(git(mainWorktree, 'rev-parse', 'HEAD'), oldHead);
+  assert.equal(git(f.origin, 'rev-parse', 'main'), oldHead);
+  assert.equal(git(mainWorktree, 'status', '--porcelain'), oldStatus);
+  assert.equal(readFileSync(join(mainWorktree, 'app.txt'), 'utf8'), 'unfinished work');
+  assert.equal(readFileSync(join(mainWorktree, 'notes.txt'), 'utf8'), 'local notes');
 });
 
-test('installation with missing local main asks for synchronization without remote writes', () => {
+test('only changing base-commit advances the release to a newer upstream commit', () => {
+  const f = fixture();
+  const first = f.run('sync.sh');
+  assert.equal(first.status, 0, first.stderr);
+  const latest = git(f.upstream, 'rev-parse', 'HEAD');
+  writeFileSync(join(f.source, 'patches/base-commit'), latest + '\n');
+  const next = f.run('sync.sh');
+  assert.equal(next.status, 0, next.stderr);
+  assert.equal(git(next.stdout.trim(), 'rev-parse', 'HEAD'), latest);
+  assert.equal(git(first.stdout.trim(), 'rev-parse', 'HEAD'), f.baseCommit);
+  assert.match(readFileSync(join(next.stdout.trim(), 'app.txt'), 'utf8'), /new upstream/);
+});
+
+test('missing local pinned commit asks for synchronization without remote writes', () => {
   const f = fixture();
   const result = f.run();
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /Local main is missing/);
+  assert.match(result.stderr, /Pinned commit .* is missing locally/);
   assert.equal(readFileSync(f.log, 'utf8'), '');
   assert.equal(git(f.origin, 'for-each-ref', '--format=%(refname)'), '');
+});
+
+for (const pin of [null, '', 'main', '60a29ac', 'a'.repeat(39), 'g'.repeat(40), 'a'.repeat(40) + '\nmain']) {
+  test(`rejects missing or invalid base-commit: ${JSON.stringify(pin)}`, () => {
+    const f = fixture();
+    const file = join(f.source, 'patches/base-commit');
+    if (pin === null) rmSync(file);
+    else writeFileSync(file, pin);
+    const result = f.run('sync.sh');
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Missing patch baseline|must contain a full/);
+    assert.equal(readFileSync(f.log, 'utf8'), '');
+  });
+}
+
+test('unavailable pinned commit fails instead of falling back to main', () => {
+  const f = fixture();
+  prepareLocalMain(f);
+  writeFileSync(join(f.source, 'patches/base-commit'), 'a'.repeat(40) + '\n');
+  for (const args of [[], ['--local']]) {
+    const result = f.run('sync.sh', args);
+    assert.notEqual(result.status, 0);
+    assert.equal(result.stdout, '');
+  }
+});
+
+test('rejects a non-commit object as the patch baseline', () => {
+  const f = fixture();
+  prepareLocalMain(f);
+  writeFileSync(join(f.source, 'patches/base-commit'), git(f.upstream, 'rev-parse', 'HEAD:app.txt') + '\n');
+  const result = f.run('sync.sh', ['--local']);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /is not a commit/);
 });
 
 test('installation rejects former service options before doing any work', () => {
@@ -360,12 +356,13 @@ test(`update ${options.join(' ')} synchronizes upstream and installs patched glo
   const f = fixture();
   const result = f.run('install.sh', ['update', ...options, '--no-restart']);
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(git(f.origin, 'rev-parse', 'main'), git(f.upstream, 'rev-parse', 'HEAD'));
+  assert.equal(git(f.origin, 'for-each-ref', '--format=%(refname)'), '');
   const calls = readFileSync(f.log, 'utf8');
   assert.equal(calls.includes('npm install -g --ignore-scripts @earendil-works/pi-coding-agent@'), options.length === 0);
   const installed = calls.split('\n').find(line => line.startsWith('built ')).slice(6);
+  assert.equal(git(installed, 'rev-parse', 'HEAD'), f.baseCommit);
   const app = readFileSync(join(installed, 'app.txt'), 'utf8');
-  assert.ok(app.includes('custom layout') && app.includes('new upstream'));
+  assert.ok(app.includes('custom layout') && !app.includes('new upstream'));
   assert.equal(realpathSync(join(f.prefix, 'bin', 'pi-web')), join(installed, 'dist/cli.js'));
 });
 
