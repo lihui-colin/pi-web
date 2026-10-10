@@ -1,0 +1,307 @@
+diff --git a/pi-web-plugins/terminal/TerminalPanel.clipboard.test.ts b/pi-web-plugins/terminal/TerminalPanel.clipboard.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..9659681390165cac658c6c1cbd65df630b5a32b2
+--- /dev/null
++++ b/pi-web-plugins/terminal/TerminalPanel.clipboard.test.ts
+@@ -0,0 +1,116 @@
++// @vitest-environment happy-dom
++
++import { Terminal } from "@xterm/xterm";
++import { afterEach, describe, expect, it, vi } from "vitest";
++import * as clipboard from "./clipboard";
++import { TerminalPanel } from "./TerminalPanel";
++import { TerminalClipboardRequests } from "./terminalClipboard";
++
++if (!customElements.get("terminal-clipboard-test")) customElements.define("terminal-clipboard-test", TerminalPanel);
++
++afterEach(() => {
++  document.body.replaceChildren();
++  localStorage.clear();
++  vi.restoreAllMocks();
++});
++
++async function fixture() {
++  const panel = document.createElement("terminal-clipboard-test");
++  if (!(panel instanceof TerminalPanel)) throw new Error("Expected terminal panel");
++  document.body.append(panel);
++  await panel.updateComplete;
++  const terminal = new Terminal({ cols: 80, rows: 24 });
++  Reflect.set(panel, "visible", true);
++  Reflect.set(panel, "terminal", terminal);
++  Reflect.set(panel, "terminalClipboard", new TerminalClipboardRequests(terminal.parser));
++  Reflect.set(panel, "selectedId", "terminal-1");
++  Reflect.set(panel, "channelGeneration", 1);
++  const write = (data: string, replay = false) => {
++    const handle: unknown = Reflect.get(panel, "handleChannelFrame");
++    if (typeof handle !== "function") throw new Error("Expected terminal frame handler");
++    Reflect.apply(handle, panel, [ 1, { type: "output", data, replay, ...(replay ? { replayComplete: true } : {}) }, "terminal-1", terminal]);
++  };
++  const parsed = () => new Promise<void>((resolve) => { terminal.write("", resolve); });
++  return { panel, terminal, write, parsed };
++}
++
++function osc52(text: string, ending = "\u0007"): string {
++  return `\u001b]52;c;${Buffer.from(text).toString("base64")}${ending}`;
++}
++
++describe("Terminal OSC 52 clipboard", () => {
++  it.each(["\u0007", "\u001b\\"])("copies split UTF-8 output using the browser clipboard (terminator=%j)", async (ending) => {
++    const copy = vi.spyOn(clipboard, "writeClipboardText").mockResolvedValue(true);
++    const { panel, write, parsed } = await fixture();
++    const text = "选中的文本 😀\nsecond line";
++    for (const character of osc52(text, ending)) write(character);
++    await parsed();
++    await panel.updateComplete;
++    expect(copy).toHaveBeenCalledExactlyOnceWith(text);
++    expect(panel.shadowRoot?.querySelector('[role="status"]')?.textContent).toContain("Copied selected text");
++  });
++
++  it("ignores replayed copies even with a live copy already queued for parsing", async () => {
++    const copy = vi.spyOn(clipboard, "writeClipboardText").mockResolvedValue(true);
++    const { write, parsed } = await fixture();
++    write(osc52("old clipboard"), true);
++    write("ordinary live output");
++    write(osc52("new clipboard"));
++    await parsed();
++    expect(copy).toHaveBeenCalledExactlyOnceWith("new clipboard");
++  });
++
++  it("ignores clipboard reads, unsupported targets, empty, invalid and oversized writes", async () => {
++    const copy = vi.spyOn(clipboard, "writeClipboardText").mockResolvedValue(true);
++    const { terminal, write, parsed } = await fixture();
++    const input = vi.fn();
++    terminal.onData(input);
++    for (const data of ["c;?", "p;aGVsbG8=", "c;", "c;!!!", "c;/w==", "c;" + "YQ==".repeat(262_145)]) {
++      write(`\u001b]52;${data}\u0007`);
++    }
++    await parsed();
++    expect(copy).not.toHaveBeenCalled();
++    expect(input).not.toHaveBeenCalled();
++  });
++
++  it.each([false, true])("offers a working explicit copy button after browser failure (throws=%s)", async (throws) => {
++    const copy = vi.spyOn(clipboard, "writeClipboardText");
++    if (throws) copy.mockRejectedValueOnce(new Error("NotAllowedError"));
++    else copy.mockResolvedValueOnce(false);
++    copy.mockResolvedValueOnce(true);
++    const { panel, write, parsed } = await fixture();
++    write(osc52("retain for retry"));
++    await parsed();
++    await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelector('[role="status"]')?.textContent).toBe("Automatic copy was blocked.");
++    const retry = [...(panel.shadowRoot?.querySelectorAll("button") ?? [])].find((button) => button.textContent === "Copy to clipboard");
++    expect(retry).toBeDefined();
++    if (retry === undefined) throw new Error("Expected copy retry button");
++    retry.click();
++    await panel.updateComplete;
++    await panel.updateComplete;
++    expect(copy).toHaveBeenNthCalledWith(2, "retain for retry");
++    expect(panel.shadowRoot?.querySelector('[role="status"]')?.textContent).toContain("Copied selected text");
++  });
++
++  it("does not copy queued output belonging to a replaced channel", async () => {
++    const copy = vi.spyOn(clipboard, "writeClipboardText").mockResolvedValue(true);
++    const { panel, write, parsed } = await fixture();
++    write(osc52("stale"));
++    Reflect.set(panel, "channelGeneration", 2);
++    await parsed();
++    expect(copy).not.toHaveBeenCalled();
++  });
++
++  it("does not restore a copy notice after its terminal is disposed", async () => {
++    let finish!: (value: boolean) => void;
++    vi.spyOn(clipboard, "writeClipboardText").mockReturnValue(new Promise<boolean>((resolve) => { finish = resolve; }));
++    const { panel, write, parsed } = await fixture();
++    write(osc52("late completion"));
++    await parsed();
++    panel.remove();
++    finish(true);
++    await Promise.resolve();
++    expect(Reflect.get(panel, "clipboardRequest")).toBeUndefined();
++  });
++});
+diff --git a/pi-web-plugins/terminal/TerminalPanel.test.ts b/pi-web-plugins/terminal/TerminalPanel.test.ts
+index f5eb8cc01b7782edb320916bdd63b3143e4b1bff..1186e64d0721b1dc1efac3c68e433d1436cd0ccc 100644
+--- a/pi-web-plugins/terminal/TerminalPanel.test.ts
++++ b/pi-web-plugins/terminal/TerminalPanel.test.ts
+@@ -844,7 +844,7 @@ describe("Terminal panel lifecycle", () => {
+     callPanelMethod(panel, "handleChannelFrame", 0, { type: "error", message: "pty failed" }, "terminal-1", terminal);
+     callPanelMethod(panel, "handleChannelFrame", 0, { type: "exit", exitCode: 7 }, "terminal-1", terminal);
+ 
+-    expect(terminal.write).toHaveBeenCalledWith("hello");
++    expect(terminal.write).toHaveBeenCalledWith("hello", expect.any(Function));
+     expect(terminal.writeln).toHaveBeenCalledWith(expect.stringContaining("pty failed"));
+     expect(terminal.writeln).toHaveBeenCalledWith(expect.stringContaining("code 7"));
+     expect(Reflect.get(panel, "terminals")).toEqual([expect.objectContaining({ id: "terminal-1", exited: true, exitCode: 7 })]);
+diff --git a/pi-web-plugins/terminal/TerminalPanel.ts b/pi-web-plugins/terminal/TerminalPanel.ts
+index 45a3ea64c268478a76202ab5326ea607fa692234..e06e1cfdd3e2cc837551efc0c5191caae351cbd2 100644
+--- a/pi-web-plugins/terminal/TerminalPanel.ts
++++ b/pi-web-plugins/terminal/TerminalPanel.ts
+@@ -7,6 +7,7 @@ import { FitAddon, type ITerminalDimensions } from "@xterm/addon-fit";
+ import xtermStyles from "@xterm/xterm/css/xterm.css?inline";
+ import type { PluginPeerChannel, PluginPeerChannelClose, TerminalCommandRun, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
+ import { writeClipboardText } from "./clipboard";
++import { TerminalClipboardRequests } from "./terminalClipboard";
+ import { selectFallbackTerminal, selectPreferredTerminal } from "./terminalSelection";
+ import { TerminalPeerClient, terminalChannelFailureMessage, terminalInputFrames, type TerminalClientFrame, type TerminalInfo, type TerminalServerFrame, type TerminalSize } from "./terminalProtocol";
+ import { createTerminalCopySnapshot, DEFAULT_TERMINAL_ANSI_THEME, type TerminalCopyRunStyle, type TerminalCopySnapshot } from "./terminalCopySnapshot";
+@@ -64,6 +65,8 @@ export class TerminalPanel extends LitElement {
+   @state() private copySnapshot: TerminalCopySnapshot | undefined;
+   @state() private copyStatus: string | undefined;
+ 
++  @state() private clipboardRequest: { text: string; status: "copying" | "copied" | "blocked" } | undefined;
++  private terminalClipboard: TerminalClipboardRequests | undefined;
+   private terminal: Terminal | undefined;
+   private fitAddon: FitAddon | undefined;
+   private channel: PluginPeerChannel | undefined;
+@@ -577,6 +580,7 @@ export class TerminalPanel extends LitElement {
+     terminal.loadAddon(fitAddon);
+     terminal.open(terminalHost);
+     this.terminal = terminal;
++    this.terminalClipboard = new TerminalClipboardRequests(terminal.parser);
+     this.fitAddon = fitAddon;
+     if (typeof ResizeObserver !== "undefined") {
+       this.resizeObserver = new ResizeObserver(() => { this.fitAndNotify(); });
+@@ -703,7 +707,7 @@ export class TerminalPanel extends LitElement {
+     frame: Extract<TerminalServerFrame, { type: "output" }>,
+   ): void {
+     if (!frame.replay) {
+-      terminal.write(frame.data);
++      this.writeTerminalClipboardOutput(generation, terminalId, terminal, frame);
+       return;
+     }
+     let suppression = this.replayInputSuppression;
+@@ -713,7 +717,7 @@ export class TerminalPanel extends LitElement {
+       suppression = { generation, terminalId, terminal };
+       this.replayInputSuppression = suppression;
+     }
+-    terminal.write(frame.data, frame.replayComplete ? () => {
++    this.writeTerminalClipboardOutput(generation, terminalId, terminal, frame, frame.replayComplete ? () => {
+       if (this.replayInputSuppression === suppression
+         && this.channelIsCurrent(generation, terminalId, terminal)) {
+         this.replayInputSuppression = undefined;
+@@ -722,6 +726,50 @@ export class TerminalPanel extends LitElement {
+     } : undefined);
+   }
+ 
++  private writeTerminalClipboardOutput(
++    generation: number,
++    terminalId: string,
++    terminal: Terminal,
++    frame: Extract<TerminalServerFrame, { type: "output" }>,
++    complete?: () => void,
++  ): void {
++    const clipboard = this.terminalClipboard;
++    terminal.write(frame.data, () => {
++      // Xterm parses asynchronously. Drain at each write boundary so replayed
++      // OSC 52 requests cannot be mistaken for a later live copy request.
++      const text = clipboard?.takeText();
++      if (!frame.replay && text !== undefined && this.channelIsCurrent(generation, terminalId, terminal)) {
++        void this.copyTerminalText(text);
++      }
++      complete?.();
++    });
++  }
++
++  private async copyTerminalText(text: string): Promise<void> {
++    const request = { text, status: "copying" as const };
++    this.clipboardRequest = request;
++    let copied = false;
++    try {
++      copied = await writeClipboardText(text);
++    } catch {
++      // Browser permissions and activation rules vary. Keep the text for an
++      // explicit click, which can also use the existing HTTP clipboard fallback.
++    }
++    if (this.clipboardRequest !== request) return;
++    this.clipboardRequest = { text, status: copied ? "copied" : "blocked" };
++  }
++
++  private renderClipboardNotice() {
++    const request = this.clipboardRequest;
++    if (request === undefined) return null;
++    return html`<div class="terminal-clipboard-notice">
++      <span role="status">${request.status === "copied" ? "Copied selected text to clipboard."
++        : request.status === "copying" ? "Copying selected text…" : "Automatic copy was blocked."}</span>
++      ${request.status === "blocked" ? html`<button @click=${() => { void this.copyTerminalText(request.text); }}>Copy to clipboard</button>` : null}
++      <button aria-label="Dismiss clipboard status" @click=${() => { this.clipboardRequest = undefined; }}>×</button>
++    </div>`;
++  }
++
+   private requestTerminalRedraw(): void {
+     // Xterm parses replay asynchronously; redraw only after its final write.
+     if (this.replayInputSuppression !== undefined) return;
+@@ -833,6 +881,9 @@ export class TerminalPanel extends LitElement {
+     this.resizeObserver?.disconnect();
+     this.resizeObserver = undefined;
+     this.replayInputSuppression = undefined;
++    this.terminalClipboard?.dispose();
++    this.terminalClipboard = undefined;
++    this.clipboardRequest = undefined;
+     this.terminal?.dispose();
+     this.terminal = undefined;
+     this.fitAddon = undefined;
+@@ -1074,6 +1125,7 @@ export class TerminalPanel extends LitElement {
+         </div>
+         ${this.error === undefined ? null : html`<p class="error">${this.error}</p>`}
+         ${this.connectionError === undefined ? null : html`<p class="error">${this.connectionError}</p>`}
++        ${this.renderClipboardNotice()}
+         ${this.renderCommandRunNotice()}
+         ${this.renderTerminalAccessoryBar()}
+         ${this.loading ? html`<p class="muted">Loading terminals…</p>` : null}
+@@ -1115,6 +1167,8 @@ export class TerminalPanel extends LitElement {
+     .command-run-notice code { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--pi-text-secondary); font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+     .command-run-notice kbd { border: 1px solid var(--pi-border); border-radius: 4px; background: var(--pi-bg); padding: 0 4px; font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+     .command-run-notice button { justify-self: end; max-width: none; }
++    .terminal-clipboard-notice { display: flex; flex: 0 0 auto; gap: 8px; align-items: center; padding: 6px; background: var(--pi-bg); color: var(--pi-text); font: 12px system-ui, sans-serif; }
++    .terminal-clipboard-notice > span { flex: 1; }
+     .terminal-stage { position: relative; flex: 1 1 auto; min-height: 0; overflow: hidden; background: var(--pi-terminal-bg); }
+     .terminal-host { position: absolute; inset: 0; padding: 6px; box-sizing: border-box; overflow: hidden; }
+     .terminal-host.copying { visibility: hidden; pointer-events: none; }
+diff --git a/pi-web-plugins/terminal/terminalClipboard.ts b/pi-web-plugins/terminal/terminalClipboard.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..839cbd4e9d7542a1de627d3e1a334b13e2940573
+--- /dev/null
++++ b/pi-web-plugins/terminal/terminalClipboard.ts
+@@ -0,0 +1,41 @@
++import type { IDisposable, IParser } from "@xterm/xterm";
++
++/** Collect requests during parsing; the output callback decides whether they are live or replayed. */
++export class TerminalClipboardRequests {
++  private text: string | undefined;
++  private readonly handler: IDisposable;
++
++  constructor(parser: IParser) {
++    this.handler = parser.registerOscHandler(52, (data) => {
++      const text = decodeClipboardRequest(data);
++      if (text !== undefined) this.text = text;
++      return true;
++    });
++  }
++
++  takeText(): string | undefined {
++    const text = this.text;
++    this.text = undefined;
++    return text;
++  }
++
++  dispose(): void {
++    this.handler.dispose();
++    this.text = undefined;
++  }
++}
++
++function decodeClipboardRequest(data: string): string | undefined {
++  const separator = data.indexOf(";");
++  if (separator < 0 || !/^[cs]*$/u.test(data.slice(0, separator))) return undefined;
++  const payload = data.slice(separator + 1);
++  // Only clipboard writes: never answer queries with the user's clipboard contents.
++  // Bound allocation before decoding, and ignore empty requests rather than clearing the clipboard.
++  if (payload === "" || payload === "?" || payload.length > 1_048_576) return undefined;
++  try {
++    const bytes = Uint8Array.from(atob(payload), (character) => character.charCodeAt(0));
++    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
++  } catch {
++    return undefined;
++  }
++}

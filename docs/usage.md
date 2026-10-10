@@ -4,7 +4,7 @@
 
 `main` 是可独立维护的纯上游分支，安装和同步脚本不更新或依赖它。`terminal-patch` 是独立根提交开始的补丁分支，只保存定制维护所需的文件。不要将这两个分支相互 merge 或 rebase；通过应用 `.patch` 文件组合代码。
 
-`patches/0001-swap-chat-workspace.patch` 包含面板交换、终端重绘及其测试；`patches/0002-preserve-terminal-replay-modes.patch` 保留裁剪回放缓存时的终端模式，避免刷新后丢失 Codex 的滚轮输入。`patches/base-commit` 是整组补丁的唯一上游基线，必须包含一个完整的 40 位小写十六进制 commit ID。同步、安装和 `update` 都使用这个提交；上游或本地 `main` 前进不会改变安装版本。补丁和基线应一起审查、验证、提交。
+`patches/0001-swap-chat-workspace.patch` 包含面板交换、终端重绘及其测试；`patches/0002-preserve-terminal-replay-modes.patch` 保留裁剪回放缓存时的终端模式，避免刷新后丢失 Codex 的滚轮输入；`patches/0003-terminal-osc52-clipboard.patch` 将 Codex 等 TUI 发出的复制请求写入浏览器所在电脑的剪贴板。`patches/base-commit` 是整组补丁的唯一上游基线，必须包含一个完整的 40 位小写十六进制 commit ID。同步、安装和 `update` 都使用这个提交；上游或本地 `main` 前进不会改变安装版本。补丁和基线应一起审查、验证、提交。
 
 ## 本地安装（不启动服务）
 
@@ -51,6 +51,14 @@ npm run build
 
 已有的本地或远端 `main` 可以领先于补丁基线，也可以在其他 worktree 中使用；同步不修改这些分支和工作区。基线文件缺失、格式错误、提交不可获取时脚本会失败，不会回退到 `main` 或其他版本。
 
+## Codex 终端选中即复制
+
+Codex TUI 松开鼠标后可能显示 `Copy sent to terminal — paste to verify`，这表示已发送复制请求。补丁版 pi-web 会处理实时输出中的 OSC 52 请求，并显示自己的复制结果。它支持分段传输和 UTF-8 文本；刷新或重连时的历史回放不会再次复制旧内容。
+
+如果浏览器阻止自动写入，终端上方会显示 `Automatic copy was blocked.`，点击 **Copy to clipboard** 重试。通过局域网 HTTP 访问时，浏览器通常没有异步剪贴板 API，此按钮会使用点击触发的兼容复制方式。浏览器策略仍可能拒绝写入，只有显示 `Copied selected text to clipboard.` 才表示复制接口报告成功。
+
+安装包含此补丁的版本后，重启提供网页资源的 `pi-web-server` 并刷新页面。本补丁仅修改浏览器端，不需要为此重启 `pi-web-sessiond` 或重新创建 Codex 会话。
+
 ## 升级补丁绑定的上游版本
 
 升级基线是显式的维护操作。在 `terminal-patch` 工作区，先获取并选定要适配的上游提交，写入基线，然后准备补丁目录：
@@ -65,26 +73,24 @@ sh scripts/sync.sh
 
 ## 上游变化导致补丁冲突
 
-脚本会停止，打印保留的安装目录；纯上游 `main` 中不会写入补丁，也不会执行服务安装。在保留目录中查看 `git status`，解决冲突并测试，再生成替换补丁：
+脚本会在冲突补丁处停止并打印保留目录，后面的补丁尚未应用。可在该目录查看 `git status` 和冲突内容。
+
+重新生成补丁时，使用独立维护工作区，从 `patches/base-commit` 指定的纯上游提交开始。按编号逐个应用补丁，每个补丁解决冲突后生成差异并做一个本地维护提交，再处理下一个：
 
 ```bash
-cd /脚本打印的/release.目录
-git status
-# 编辑并解决冲突后，仅暂存补丁涉及的文件
+# HEAD 必须是当前补丁应用前的状态：上游基线 + 已提交的前序补丁
+# 将路径和编号替换为实际值
+git apply --3way --index /补丁工作区/patches/0001-swap-chat-workspace.patch
+# 如有冲突，编辑解决后仅暂存对应文件
 git add <已解决的文件>
 # 全部解决后，该命令应无输出
 git diff --name-only --diff-filter=U
-printf '\nallow-scripts=node-pty,esbuild\n' >> .npmrc
-npm ci --include=dev
-NODE_OPTIONS=--no-experimental-webstorage npm test
-npm run build
-
-# 将路径替换为 terminal-patch 工作区的实际位置
-git diff --cached --binary --full-index HEAD -- <该补丁涉及的文件> > /补丁工作区/patches/<对应补丁>.patch
-git rev-parse HEAD > /补丁工作区/patches/base-commit
+git diff --cached --binary --full-index HEAD > /补丁工作区/patches/0001-swap-chat-workspace.patch
+git commit -m "Apply patch 0001"
+# 对 0002、0003 依次重复，然后安装依赖、运行测试和构建
 ```
 
-当前两个补丁修改不同文件，应按各自涉及的文件分别重新生成，避免把相同修改重复放入多个补丁。不要将 release 目录中的全部累计修改写入单个补丁后，继续保留包含相同变更的其他补丁。
+`0001` 与 `0003` 会修改同一文件，因此不能按文件名将整个 release 的累计差异分别导出。`patches/base-commit` 始终记录纯上游提交，不要写入上述本地维护提交的 ID。全部补丁适配后，在补丁工作区重新运行 `sync.sh --local`，验证整组补丁可从上游基线顺序应用，并在新目录完成测试和构建。
 
 然后在补丁工作区提交并推送：
 
