@@ -53,9 +53,9 @@ npm run build
 
 ## Codex 终端选中即复制
 
-Codex TUI 松开鼠标后可能显示 `Copy sent to terminal — paste to verify`，这表示已发送复制请求。补丁版 pi-web 会处理实时输出中的 OSC 52 请求，并显示自己的复制结果。它支持分段传输和 UTF-8 文本；刷新或重连时的历史回放不会再次复制旧内容。
+Codex TUI 松开鼠标后可能显示 `Copy sent to terminal — paste to verify`，这表示已发送复制请求。补丁版 pi-web 会处理实时输出中的 OSC 52 请求，写入成功后在终端底部居中浮现 `Copied`，2 秒后自动消失；连续复制会重新计时。提示在 Fullscreen 模式下同样可见，不改变终端尺寸，也不拦截鼠标操作。它支持分段传输和 UTF-8 文本；刷新或重连时的历史回放不会再次复制旧内容。
 
-如果浏览器阻止自动写入，终端上方会显示 `Automatic copy was blocked.`，点击 **Copy to clipboard** 重试。通过局域网 HTTP 访问时，浏览器通常没有异步剪贴板 API，此按钮会使用点击触发的兼容复制方式。浏览器策略仍可能拒绝写入，只有显示 `Copied selected text to clipboard.` 才表示复制接口报告成功。
+如果浏览器阻止自动写入，终端底部居中会显示 `Automatic copy was blocked.`，保留到重试或手动关闭；点击 **Copy to clipboard** 重试。通过局域网 HTTP 访问时，浏览器通常没有异步剪贴板 API，此按钮会使用点击触发的兼容复制方式。浏览器策略仍可能拒绝写入，只有显示 `Copied` 才表示复制接口报告成功。
 
 安装包含此补丁的版本后，重启提供网页资源的 `pi-web-server` 并刷新页面。本补丁仅修改浏览器端，不需要为此重启 `pi-web-sessiond` 或重新创建 Codex 会话。
 

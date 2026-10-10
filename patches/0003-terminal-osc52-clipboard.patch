@@ -1,9 +1,9 @@
 diff --git a/pi-web-plugins/terminal/TerminalPanel.clipboard.test.ts b/pi-web-plugins/terminal/TerminalPanel.clipboard.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..9659681390165cac658c6c1cbd65df630b5a32b2
+index 0000000000000000000000000000000000000000..c9834f3364bee9c20165f529dd03f6f9b1403891
 --- /dev/null
 +++ b/pi-web-plugins/terminal/TerminalPanel.clipboard.test.ts
-@@ -0,0 +1,116 @@
+@@ -0,0 +1,161 @@
 +// @vitest-environment happy-dom
 +
 +import { Terminal } from "@xterm/xterm";
@@ -17,6 +17,7 @@ index 0000000000000000000000000000000000000000..9659681390165cac658c6c1cbd65df63
 +afterEach(() => {
 +  document.body.replaceChildren();
 +  localStorage.clear();
++  vi.useRealTimers();
 +  vi.restoreAllMocks();
 +});
 +
@@ -36,7 +37,11 @@ index 0000000000000000000000000000000000000000..9659681390165cac658c6c1cbd65df63
 +    if (typeof handle !== "function") throw new Error("Expected terminal frame handler");
 +    Reflect.apply(handle, panel, [ 1, { type: "output", data, replay, ...(replay ? { replayComplete: true } : {}) }, "terminal-1", terminal]);
 +  };
-+  const parsed = () => new Promise<void>((resolve) => { terminal.write("", resolve); });
++  const parsed = async () => {
++    const finished = new Promise<void>((resolve) => { terminal.write("", resolve); });
++    if (vi.isFakeTimers()) await vi.advanceTimersByTimeAsync(0);
++    await finished;
++  };
 +  return { panel, terminal, write, parsed };
 +}
 +
@@ -53,7 +58,7 @@ index 0000000000000000000000000000000000000000..9659681390165cac658c6c1cbd65df63
 +    await parsed();
 +    await panel.updateComplete;
 +    expect(copy).toHaveBeenCalledExactlyOnceWith(text);
-+    expect(panel.shadowRoot?.querySelector('[role="status"]')?.textContent).toContain("Copied selected text");
++    expect(panel.shadowRoot?.querySelector('[role="status"]')?.textContent).toBe("Copied");
 +  });
 +
 +  it("ignores replayed copies even with a live copy already queued for parsing", async () => {
@@ -80,6 +85,7 @@ index 0000000000000000000000000000000000000000..9659681390165cac658c6c1cbd65df63
 +  });
 +
 +  it.each([false, true])("offers a working explicit copy button after browser failure (throws=%s)", async (throws) => {
++    vi.useFakeTimers();
 +    const copy = vi.spyOn(clipboard, "writeClipboardText");
 +    if (throws) copy.mockRejectedValueOnce(new Error("NotAllowedError"));
 +    else copy.mockResolvedValueOnce(false);
@@ -87,6 +93,7 @@ index 0000000000000000000000000000000000000000..9659681390165cac658c6c1cbd65df63
 +    const { panel, write, parsed } = await fixture();
 +    write(osc52("retain for retry"));
 +    await parsed();
++    await vi.advanceTimersByTimeAsync(5000);
 +    await panel.updateComplete;
 +    expect(panel.shadowRoot?.querySelector('[role="status"]')?.textContent).toBe("Automatic copy was blocked.");
 +    const retry = [...(panel.shadowRoot?.querySelectorAll("button") ?? [])].find((button) => button.textContent === "Copy to clipboard");
@@ -96,7 +103,45 @@ index 0000000000000000000000000000000000000000..9659681390165cac658c6c1cbd65df63
 +    await panel.updateComplete;
 +    await panel.updateComplete;
 +    expect(copy).toHaveBeenNthCalledWith(2, "retain for retry");
-+    expect(panel.shadowRoot?.querySelector('[role="status"]')?.textContent).toContain("Copied selected text");
++    expect(panel.shadowRoot?.querySelector('[role="status"]')?.textContent).toBe("Copied");
++  });
++
++  it("shows Copied only after success and gives each new copy a full two seconds", async () => {
++    vi.useFakeTimers();
++    let finishFirst!: (value: boolean) => void;
++    let finishSecond!: (value: boolean) => void;
++    vi.spyOn(clipboard, "writeClipboardText")
++      .mockReturnValueOnce(new Promise<boolean>((resolve) => { finishFirst = resolve; }))
++      .mockReturnValueOnce(new Promise<boolean>((resolve) => { finishSecond = resolve; }));
++    const { panel, write, parsed } = await fixture();
++    const status = () => panel.shadowRoot?.querySelector('[role="status"]')?.textContent;
++    write(osc52("first selection"));
++    await parsed();
++    await panel.updateComplete;
++    expect(status()).toBeUndefined();
++
++    finishFirst(true);
++    await vi.advanceTimersByTimeAsync(0);
++    await panel.updateComplete;
++    expect(status()).toBe("Copied");
++    await vi.advanceTimersByTimeAsync(1000);
++
++    write(osc52("second selection"));
++    await parsed();
++    await panel.updateComplete;
++    expect(status()).toBeUndefined();
++    // The previous toast's deadline must not discard a pending copy's result.
++    await vi.advanceTimersByTimeAsync(2000);
++    finishSecond(true);
++    await vi.advanceTimersByTimeAsync(0);
++    await panel.updateComplete;
++    expect(status()).toBe("Copied");
++    await vi.advanceTimersByTimeAsync(1999);
++    await panel.updateComplete;
++    expect(status()).toBe("Copied");
++    await vi.advanceTimersByTimeAsync(1);
++    await panel.updateComplete;
++    expect(status()).toBeUndefined();
 +  });
 +
 +  it("does not copy queued output belonging to a replaced channel", async () => {
@@ -134,7 +179,7 @@ index f5eb8cc01b7782edb320916bdd63b3143e4b1bff..1186e64d0721b1dc1efac3c68e433d14
      expect(terminal.writeln).toHaveBeenCalledWith(expect.stringContaining("code 7"));
      expect(Reflect.get(panel, "terminals")).toEqual([expect.objectContaining({ id: "terminal-1", exited: true, exitCode: 7 })]);
 diff --git a/pi-web-plugins/terminal/TerminalPanel.ts b/pi-web-plugins/terminal/TerminalPanel.ts
-index 45a3ea64c268478a76202ab5326ea607fa692234..e06e1cfdd3e2cc837551efc0c5191caae351cbd2 100644
+index 45a3ea64c268478a76202ab5326ea607fa692234..ffeb66a4ca6e204a877bd6e221d93c669fd5e799 100644
 --- a/pi-web-plugins/terminal/TerminalPanel.ts
 +++ b/pi-web-plugins/terminal/TerminalPanel.ts
 @@ -7,6 +7,7 @@ import { FitAddon, type ITerminalDimensions } from "@xterm/addon-fit";
@@ -145,16 +190,17 @@ index 45a3ea64c268478a76202ab5326ea607fa692234..e06e1cfdd3e2cc837551efc0c5191caa
  import { selectFallbackTerminal, selectPreferredTerminal } from "./terminalSelection";
  import { TerminalPeerClient, terminalChannelFailureMessage, terminalInputFrames, type TerminalClientFrame, type TerminalInfo, type TerminalServerFrame, type TerminalSize } from "./terminalProtocol";
  import { createTerminalCopySnapshot, DEFAULT_TERMINAL_ANSI_THEME, type TerminalCopyRunStyle, type TerminalCopySnapshot } from "./terminalCopySnapshot";
-@@ -64,6 +65,8 @@ export class TerminalPanel extends LitElement {
+@@ -64,6 +65,9 @@ export class TerminalPanel extends LitElement {
    @state() private copySnapshot: TerminalCopySnapshot | undefined;
    @state() private copyStatus: string | undefined;
  
 +  @state() private clipboardRequest: { text: string; status: "copying" | "copied" | "blocked" } | undefined;
++  private clipboardNoticeTimer: ReturnType<typeof setTimeout> | undefined;
 +  private terminalClipboard: TerminalClipboardRequests | undefined;
    private terminal: Terminal | undefined;
    private fitAddon: FitAddon | undefined;
    private channel: PluginPeerChannel | undefined;
-@@ -577,6 +580,7 @@ export class TerminalPanel extends LitElement {
+@@ -577,6 +581,7 @@ export class TerminalPanel extends LitElement {
      terminal.loadAddon(fitAddon);
      terminal.open(terminalHost);
      this.terminal = terminal;
@@ -162,7 +208,7 @@ index 45a3ea64c268478a76202ab5326ea607fa692234..e06e1cfdd3e2cc837551efc0c5191caa
      this.fitAddon = fitAddon;
      if (typeof ResizeObserver !== "undefined") {
        this.resizeObserver = new ResizeObserver(() => { this.fitAndNotify(); });
-@@ -703,7 +707,7 @@ export class TerminalPanel extends LitElement {
+@@ -703,7 +708,7 @@ export class TerminalPanel extends LitElement {
      frame: Extract<TerminalServerFrame, { type: "output" }>,
    ): void {
      if (!frame.replay) {
@@ -171,7 +217,7 @@ index 45a3ea64c268478a76202ab5326ea607fa692234..e06e1cfdd3e2cc837551efc0c5191caa
        return;
      }
      let suppression = this.replayInputSuppression;
-@@ -713,7 +717,7 @@ export class TerminalPanel extends LitElement {
+@@ -713,7 +718,7 @@ export class TerminalPanel extends LitElement {
        suppression = { generation, terminalId, terminal };
        this.replayInputSuppression = suppression;
      }
@@ -180,7 +226,7 @@ index 45a3ea64c268478a76202ab5326ea607fa692234..e06e1cfdd3e2cc837551efc0c5191caa
        if (this.replayInputSuppression === suppression
          && this.channelIsCurrent(generation, terminalId, terminal)) {
          this.replayInputSuppression = undefined;
-@@ -722,6 +726,50 @@ export class TerminalPanel extends LitElement {
+@@ -722,6 +727,61 @@ export class TerminalPanel extends LitElement {
      } : undefined);
    }
  
@@ -204,6 +250,7 @@ index 45a3ea64c268478a76202ab5326ea607fa692234..e06e1cfdd3e2cc837551efc0c5191caa
 +  }
 +
 +  private async copyTerminalText(text: string): Promise<void> {
++    this.dismissClipboardNotice();
 +    const request = { text, status: "copying" as const };
 +    this.clipboardRequest = request;
 +    let copied = false;
@@ -215,46 +262,57 @@ index 45a3ea64c268478a76202ab5326ea607fa692234..e06e1cfdd3e2cc837551efc0c5191caa
 +    }
 +    if (this.clipboardRequest !== request) return;
 +    this.clipboardRequest = { text, status: copied ? "copied" : "blocked" };
++    if (copied) {
++      this.clipboardNoticeTimer = setTimeout(() => { this.dismissClipboardNotice(); }, 2000);
++    }
++  }
++
++  private dismissClipboardNotice(): void {
++    if (this.clipboardNoticeTimer !== undefined) clearTimeout(this.clipboardNoticeTimer);
++    this.clipboardNoticeTimer = undefined;
++    this.clipboardRequest = undefined;
 +  }
 +
 +  private renderClipboardNotice() {
 +    const request = this.clipboardRequest;
-+    if (request === undefined) return null;
-+    return html`<div class="terminal-clipboard-notice">
-+      <span role="status">${request.status === "copied" ? "Copied selected text to clipboard."
-+        : request.status === "copying" ? "Copying selected text…" : "Automatic copy was blocked."}</span>
-+      ${request.status === "blocked" ? html`<button @click=${() => { void this.copyTerminalText(request.text); }}>Copy to clipboard</button>` : null}
-+      <button aria-label="Dismiss clipboard status" @click=${() => { this.clipboardRequest = undefined; }}>×</button>
++    if (request === undefined || request.status === "copying") return null;
++    return html`<div class=${`terminal-clipboard-notice ${request.status}`}>
++      <span role="status">${request.status === "copied" ? "Copied" : "Automatic copy was blocked."}</span>
++      ${request.status === "blocked" ? html`
++        <button @click=${() => { void this.copyTerminalText(request.text); }}>Copy to clipboard</button>
++        <button aria-label="Dismiss clipboard status" @click=${() => { this.dismissClipboardNotice(); }}>×</button>
++      ` : null}
 +    </div>`;
 +  }
 +
    private requestTerminalRedraw(): void {
      // Xterm parses replay asynchronously; redraw only after its final write.
      if (this.replayInputSuppression !== undefined) return;
-@@ -833,6 +881,9 @@ export class TerminalPanel extends LitElement {
+@@ -833,6 +893,9 @@ export class TerminalPanel extends LitElement {
      this.resizeObserver?.disconnect();
      this.resizeObserver = undefined;
      this.replayInputSuppression = undefined;
 +    this.terminalClipboard?.dispose();
 +    this.terminalClipboard = undefined;
-+    this.clipboardRequest = undefined;
++    this.dismissClipboardNotice();
      this.terminal?.dispose();
      this.terminal = undefined;
      this.fitAddon = undefined;
-@@ -1074,6 +1125,7 @@ export class TerminalPanel extends LitElement {
+@@ -1080,6 +1143,7 @@ export class TerminalPanel extends LitElement {
+         <div class="terminal-stage">
+           <div class=${this.copySnapshot === undefined ? "terminal-host" : "terminal-host copying"} ?inert=${this.copySnapshot !== undefined}></div>
+           ${this.renderCopyMode()}
++          ${this.renderClipboardNotice()}
          </div>
-         ${this.error === undefined ? null : html`<p class="error">${this.error}</p>`}
-         ${this.connectionError === undefined ? null : html`<p class="error">${this.connectionError}</p>`}
-+        ${this.renderClipboardNotice()}
-         ${this.renderCommandRunNotice()}
-         ${this.renderTerminalAccessoryBar()}
-         ${this.loading ? html`<p class="muted">Loading terminals…</p>` : null}
-@@ -1115,6 +1167,8 @@ export class TerminalPanel extends LitElement {
+       </section>
+     `;
+@@ -1115,6 +1179,9 @@ export class TerminalPanel extends LitElement {
      .command-run-notice code { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--pi-text-secondary); font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
      .command-run-notice kbd { border: 1px solid var(--pi-border); border-radius: 4px; background: var(--pi-bg); padding: 0 4px; font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
      .command-run-notice button { justify-self: end; max-width: none; }
-+    .terminal-clipboard-notice { display: flex; flex: 0 0 auto; gap: 8px; align-items: center; padding: 6px; background: var(--pi-bg); color: var(--pi-text); font: 12px system-ui, sans-serif; }
-+    .terminal-clipboard-notice > span { flex: 1; }
++    .terminal-clipboard-notice { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); z-index: 20; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; box-sizing: border-box; width: max-content; max-width: calc(100% - 24px); padding: 8px 12px; border: 1px solid var(--pi-border); border-radius: 8px; background: var(--pi-surface); color: var(--pi-text); box-shadow: 0 4px 16px #0003; font: 12px system-ui, sans-serif; }
++    .terminal-clipboard-notice.copied { pointer-events: none; border-color: var(--pi-success-border); }
++    .terminal-clipboard-notice > span { min-width: 0; overflow-wrap: anywhere; }
      .terminal-stage { position: relative; flex: 1 1 auto; min-height: 0; overflow: hidden; background: var(--pi-terminal-bg); }
      .terminal-host { position: absolute; inset: 0; padding: 6px; box-sizing: border-box; overflow: hidden; }
      .terminal-host.copying { visibility: hidden; pointer-events: none; }
