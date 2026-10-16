@@ -29,6 +29,20 @@ function fixture() {
   } };
 }
 
+test('update forwards no-restart and rejects an automatic restart request', () => {
+  const f = fixture();
+  try {
+    writeFileSync(join(f.root, 'scripts/install.sh'), '#!/bin/bash\nprintf "%s\\n" "$@"\n', { mode: 0o755 });
+    const result = f.run('update', '25224');
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(result.stdout.trim().split('\n'), ['update', '--no-restart']);
+    assert.equal(existsSync(join(f.root, 'data/pi-web/25224/server.pid')), false);
+    const rejected = spawnSync('bash', [join(f.root, 'scripts/run.sh'), 'update', '--restart'], { encoding: 'utf8' });
+    assert.equal(rejected.status, 2);
+    assert.match(rejected.stderr, /update 不启动服务/);
+  } finally { f.cleanup(); }
+});
+
 test('two ports have independent state, socket and processes; stopping one preserves the other', () => {
   const f = fixture();
   try {

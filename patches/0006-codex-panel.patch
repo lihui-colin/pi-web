@@ -1639,10 +1639,10 @@ index 00000000..1dc9a3c6
 +    .review-content { overflow:auto; padding:8px; flex:1; } .review-content .empty { padding:8px; font-size:12px; } .change { border-bottom:1px solid var(--pi-border-muted,#ececec); margin-bottom:10px; } .change summary { font-size:12px; } .change summary span { color:var(--pi-muted,#888); font-size:10px; } .diff { overflow:auto; padding:4px 0 10px; font-size:11px; } .diff span { display:block; padding:0 8px; white-space:pre-wrap; } .addition { background:var(--pi-success-surface,#e3f1e8); } .deletion { background:var(--pi-danger-surface,#fae8e8); } .hunk { background:var(--pi-surface,#f0f0f0); color:var(--pi-muted,#777); }
 +    @container (max-width:850px) { .layout[data-review-open] { grid-template-columns:minmax(0,1fr); } aside { position:absolute; z-index:2; top:46px; bottom:0; right:0; width:min(340px,90%); box-shadow:-8px 0 24px #0001; } .transcript { padding:24px 20px; } }
 +    @container (max-width:520px) {
-+      .layout { grid-template-rows:88px minmax(0,1fr); }
-+      header { display:grid; grid-template-columns:auto auto auto; grid-template-rows:36px 44px; gap:0 6px; align-content:center; padding:0 10px; }
++      .layout { grid-template-rows:112px minmax(0,1fr); }
++      header { display:grid; grid-template-columns:auto auto auto; grid-template-rows:36px 24px 44px; gap:0 6px; align-content:center; padding:0 10px; }
 +      .header-heading { grid-column:1 / -1; max-width:100%; } .back-button { width:32px; height:32px; }
-+      .scope { display:none; } .review-toggle { grid-column:2; }
++      .scope { display:block; grid-column:1 / -1; grid-row:2; max-width:100%; overflow-x:auto; text-overflow:clip; } .review-toggle { grid-column:2; }
 +      header>button { min-height:44px; font-size:12px; padding:4px 8px; }
 +      .conversation-home { padding:6px 12px 16px; }
 +      .transcript { padding:16px 12px; overscroll-behavior:contain; }
@@ -1670,7 +1670,7 @@ index 00000000..1dc9a3c6
 +      .connection-status { padding:3px 12px max(3px,env(safe-area-inset-bottom)); }
 +      .approval { margin:6px 8px; padding:10px; }
 +      .approval button { min-height:44px; }
-+      aside { top:88px; width:100%; }
++      aside { top:112px; width:100%; }
 +      .review-header button { min-height:44px; }
 +    }
 +  `;
@@ -2834,7 +2834,7 @@ index 7f230bed..4338c847 100644
            // arbitrary fetches forbidden; browser API access uses capabilities.
            const checked = message === "direct browser fetch" ? content.replace(/\bfetch\(new URL\((?:\/\* @vite-ignore \*\/ )?"\.\/[a-zA-Z0-9._/-]+", import\.meta\.url\)/gu, "packageAsset(") : content;
 diff --git a/scripts/build-plugins.mjs b/scripts/build-plugins.mjs
-index c70c1dcf..5795bf84 100644
+index d87cebe1b0bfa99741ad86d97bd58686fd36b762..690635ca3ff47d2474e6d1bce58652125e0a44af 100644
 --- a/scripts/build-plugins.mjs
 +++ b/scripts/build-plugins.mjs
 @@ -12,6 +12,8 @@ const filesPluginSourceDir = resolve(bundledPluginsSourceDir, "files");
@@ -2845,53 +2845,55 @@ index c70c1dcf..5795bf84 100644
 +const codexPluginOutputDir = resolve(bundledPluginsOutputDir, "codex");
  const mermaidPluginSourceDir = resolve(bundledPluginsSourceDir, "mermaid");
  const mermaidPluginOutputDir = resolve(bundledPluginsOutputDir, "mermaid");
- 
-@@ -20,8 +22,8 @@ const mermaidPluginOutputDir = resolve(bundledPluginsOutputDir, "mermaid");
+ const codeHighlightSourceDir = resolve(bundledPluginsSourceDir, "code-highlight");
+@@ -22,9 +24,9 @@ const codeHighlightOutputDir = resolve(bundledPluginsOutputDir, "code-highlight"
  // packages that ship alongside them without being discovered that way (for
  // example a Pi package that is installed rather than scanned). They retain
  // separate output roots so neither becomes a discovery root for the other.
--// Files, Terminal, and Mermaid are exceptions to plain transpilation: each
+-// Files, Terminal, Mermaid, and Code highlighting are exceptions to plain transpilation: each
 -// browser entry is replaced below by a self-contained bundle. Terminal also
-+// Files, Terminal, Codex, and Mermaid are exceptions to plain transpilation: each
+-// keeps a package-local transpiled server graph. Captain's Log likewise bundles
++// Files, Terminal, Codex, Mermaid, and Code highlighting are exceptions to plain transpilation: each
 +// browser entry is replaced below by a self-contained bundle. Terminal and Codex also
- // keeps a package-local transpiled server graph. Captain's Log likewise bundles
++// keep a package-local transpiled server graph. Captain's Log likewise bundles
  // its browser entry after transpiling its standalone package graph.
  const buildTargets = [
-@@ -49,6 +51,7 @@ async function buildAll() {
+   { rootDir: bundledPluginsSourceDir, outDir: bundledPluginsOutputDir, label: "plugin" },
+@@ -51,6 +53,7 @@ async function buildAll() {
        ? new Set([
            await realpath(filesPluginSourceDir),
            await realpath(terminalPluginSourceDir),
 +          await realpath(codexPluginSourceDir),
            await realpath(mermaidPluginSourceDir),
+           await realpath(codeHighlightSourceDir),
          ])
-       : new Set();
-@@ -58,6 +61,7 @@ async function buildAll() {
+@@ -61,6 +64,7 @@ async function buildAll() {
      if (target.rootDir === bundledPluginsSourceDir) {
        await buildFilesBrowserPackage(filesPluginSourceDir, filesPluginOutputDir);
        await buildTerminalPackage(terminalPluginSourceDir, terminalPluginOutputDir);
 +      await buildTerminalPackage(codexPluginSourceDir, codexPluginOutputDir);
        await buildMermaidPackage(mermaidPluginSourceDir, mermaidPluginOutputDir);
+       await buildFilesBrowserPackage(codeHighlightSourceDir, codeHighlightOutputDir);
      } else {
-       await viteBuild({
-@@ -67,7 +71,7 @@ async function buildAll() {
+@@ -71,7 +75,7 @@ async function buildAll() {
        });
      }
      const suffix = result.transpiled === 1 ? "file" : "files";
--    const bundleSuffix = target.rootDir === bundledPluginsSourceDir ? " and the Files/Terminal/Mermaid browser bundles" : "";
-+    const bundleSuffix = target.rootDir === bundledPluginsSourceDir ? " and the Files/Terminal/Codex/Mermaid browser bundles" : "";
+-    const bundleSuffix = target.rootDir === bundledPluginsSourceDir ? " and the Files/Terminal/Mermaid/Code highlighting browser bundles" : "";
++    const bundleSuffix = target.rootDir === bundledPluginsSourceDir ? " and the Files/Terminal/Codex/Mermaid/Code highlighting browser bundles" : "";
      console.log(`[plugins] built ${String(result.transpiled)} TypeScript ${target.label} ${suffix}${bundleSuffix} into ${relative(cwd, target.outDir)}`);
    }
    await writeFile(readyPath, "ready\n");
 diff --git a/scripts/build-plugins.test.mjs b/scripts/build-plugins.test.mjs
-index 1a147ccd..c0bb7d61 100644
+index 84c5e06a280a16955a9fe76fe4448be4a1553ecd..71df44c9cda0c9a474dc30ba9e710424f6458c03 100644
 --- a/scripts/build-plugins.test.mjs
 +++ b/scripts/build-plugins.test.mjs
 @@ -141,7 +141,7 @@ it("removes stale readiness when a rebuild fails", async () => {
    await copyFile(join(repoRoot, "scripts/build-plugins.mjs"), join(tempDir, "scripts/build-plugins.mjs"));
    await symlink(join(repoRoot, "node_modules"), join(tempDir, "node_modules"), process.platform === "win32" ? "junction" : "dir");
    // Empty special-plugin directories reach the missing Files manifest before any bundle work.
--  for (const plugin of ["files", "terminal", "mermaid"]) {
-+  for (const plugin of ["files", "terminal", "mermaid", "codex"]) {
+-  for (const plugin of ["files", "terminal", "mermaid", "code-highlight"]) {
++  for (const plugin of ["files", "terminal", "codex", "mermaid", "code-highlight"]) {
      await mkdir(join(tempDir, "pi-web-plugins", plugin), { recursive: true });
    }
    const readyPath = join(tempDir, "dist/.plugins-ready");

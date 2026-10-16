@@ -14,7 +14,7 @@ install (default): Apply local patches to the cached patches/base-commit,
   to fetch that commit if missing.
   Installs Pi Agent if missing; preserves an existing Agent.
   Does not manage services. No options accepted.
-update: Update Pi Agent, fetch patches/base-commit, apply patches, test,
+update: Update Pi Agent to latest, pin upstream main in patches/base-commit, apply patches, test,
   build and link global pi-web commands. No Git branches are updated or pushed.
   --pi-only       Update only Pi Agent
   --web-only      Sync, patch and rebuild only pi-web
@@ -24,7 +24,7 @@ update: Update Pi Agent, fetch patches/base-commit, apply patches, test,
   --dry-run       Print changes without installing or restarting
 
 PI_WEB_INSTALL_ROOT  Local release parent (default: ~/.local/share/pi-web-opt)
-PI_VERSION          Pi Agent npm target (default: latest)
+PI_VERSION          Pi Agent bootstrap target for install (default: latest)
 PI_WEB_UPSTREAM_URL  Official upstream Git URL override
 PI_WEB_TEST_MAX_WORKERS  Maximum parallel test workers (default: 4)
 PI_WEB_TEST_TIMEOUT_MS   Per-test timeout in milliseconds (default: 30000)
@@ -113,7 +113,7 @@ export PI_WEB_PORT="$((10#$service_port))"
 pid_dir="${PI_WEB_RUN_DIR:-$project_root/data/pi-web/$PI_WEB_PORT}"
 
 PI_PKG="@earendil-works/pi-coding-agent"
-PI_VERSION="${PI_VERSION:-latest}"
+PI_VERSION="latest"
 
 UPDATE_PI=1
 UPDATE_WEB=1
@@ -258,13 +258,23 @@ update_pi() {
 }
 
 update_web() {
-    log "获取 patches/base-commit 指定的 pi-web、应用补丁、测试构建并替换全局命令..."
+    log "获取官方 pi-web main 最新提交、更新 patches/base-commit、应用补丁并测试构建..."
     if [[ $DRY_RUN -eq 1 ]]; then
-        log "[dry-run] sh $project_root/scripts/sync.sh (获取 patches/base-commit 指定的提交并应用补丁)"
+        log "[dry-run] git fetch --no-tags ${PI_WEB_UPSTREAM_URL:-https://github.com/jmfederico/pi-web.git} refs/heads/main；将提交 ID 写入 patches/base-commit"
+        log "[dry-run] sh $project_root/scripts/sync.sh --local (应用新基线补丁)"
         log "[dry-run] npm ci --include=dev; npm test -- --maxWorkers=${PI_WEB_TEST_MAX_WORKERS:-4} --testTimeout=${PI_WEB_TEST_TIMEOUT_MS:-30000}; npm run build; 链接补丁版全局命令"
         return 0
     fi
-    install_local remote
+    local upstream_url="${PI_WEB_UPSTREAM_URL:-https://github.com/jmfederico/pi-web.git}"
+    local latest_commit baseline_tmp
+    git -C "$project_root" fetch --no-tags "$upstream_url" refs/heads/main
+    latest_commit=$(git -C "$project_root" rev-parse --verify 'FETCH_HEAD^{commit}')
+    [[ "$latest_commit" =~ ^[0-9a-f]{40}$ ]] || { err "上游返回无效 commit ID"; return 1; }
+    baseline_tmp=$(mktemp "$project_root/patches/base-commit.XXXXXXXX")
+    printf '%s\n' "$latest_commit" > "$baseline_tmp"
+    mv "$baseline_tmp" "$project_root/patches/base-commit"
+    log "patches/base-commit -> $latest_commit"
+    install_local cached-update
     hash -r 2>/dev/null || true
 }
 

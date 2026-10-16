@@ -4,7 +4,7 @@
 
 `main` 是可独立维护的纯上游分支，安装和同步脚本不更新或依赖它。`terminal-patch` 是独立根提交开始的补丁分支，只保存定制维护所需的文件。不要将这两个分支相互 merge 或 rebase；通过应用 `.patch` 文件组合代码。
 
-`patches/0001-swap-chat-workspace.patch` 包含面板交换、终端重绘及其测试；`patches/0002-preserve-terminal-replay-modes.patch` 保留裁剪回放缓存时的终端模式，避免刷新后丢失 Codex 的滚轮输入；`patches/0003-terminal-osc52-clipboard.patch` 将 Codex 等 TUI 发出的复制请求写入浏览器所在电脑的剪贴板。`patches/base-commit` 是整组补丁的唯一上游基线，必须包含一个完整的 40 位小写十六进制 commit ID。同步、安装和 `update` 都使用这个提交；上游或本地 `main` 前进不会改变安装版本。补丁和基线应一起审查、验证、提交。
+`patches/0001-terminal-redraw.patch` 仅包含终端重连重绘修复及其测试；Chat 与 Workspace Panel 使用官方布局；`patches/0002-preserve-terminal-replay-modes.patch` 保留裁剪回放缓存时的终端模式，避免刷新后丢失 Codex 的滚轮输入；`patches/0003-terminal-osc52-clipboard.patch` 将 Codex 等 TUI 发出的复制请求写入浏览器所在电脑的剪贴板。`patches/base-commit` 是整组补丁的唯一上游基线，必须包含一个完整的 40 位小写十六进制 commit ID。同步和普通安装使用这个提交；`update` 会先用官方 `main` 最新提交更新该文件。补丁和基线应一起审查、验证、提交。
 
 ## 本地安装（不启动服务）
 
@@ -61,7 +61,7 @@ Codex TUI 松开鼠标后可能显示 `Copy sent to terminal — paste to verify
 
 ## 升级补丁绑定的上游版本
 
-升级基线是显式的维护操作。在 `terminal-patch` 工作区，先获取并选定要适配的上游提交，写入基线，然后准备补丁目录：
+`update` 会自动升级到官方 `main` 最新基线；也可手动选择基线。在 `terminal-patch` 工作区，先获取并选定要适配的上游提交，写入基线，然后准备补丁目录：
 
 ```bash
 git fetch https://github.com/jmfederico/pi-web.git main
@@ -80,12 +80,12 @@ sh scripts/sync.sh
 ```bash
 # HEAD 必须是当前补丁应用前的状态：上游基线 + 已提交的前序补丁
 # 将路径和编号替换为实际值
-git apply --3way --index /补丁工作区/patches/0001-swap-chat-workspace.patch
+git apply --3way --index /补丁工作区/patches/0001-terminal-redraw.patch
 # 如有冲突，编辑解决后仅暂存对应文件
 git add <已解决的文件>
 # 全部解决后，该命令应无输出
 git diff --name-only --diff-filter=U
-git diff --cached --binary --full-index HEAD > /补丁工作区/patches/0001-swap-chat-workspace.patch
+git diff --cached --binary --full-index HEAD > /补丁工作区/patches/0001-terminal-redraw.patch
 git commit -m "Apply patch 0001"
 # 对 0002、0003 依次重复，然后安装依赖、运行测试和构建
 ```
@@ -98,7 +98,7 @@ git commit -m "Apply patch 0001"
 cd /补丁工作区
 node --test tests/*.test.mjs
 git add patches
-git commit -m "fix: adapt layout patch to upstream"
+git commit -m "fix: adapt patches to upstream"
 git push origin terminal-patch
 sh scripts/install.sh
 ```
@@ -115,6 +115,6 @@ bash scripts/install.sh update --dry-run        # 预览操作
 bash scripts/install.sh update --no-restart     # 不停止或重启服务
 ```
 
-`install` 使用本地缓存的固定提交；`update` 默认先更新 Pi Agent，再调用 `sync.sh` 获取 `patches/base-commit` 指定提交、应用补丁，随后安装依赖、测试、构建和替换全局命令。更新不需要 origin 的推送权限，也不会自动更新补丁分支；要升级 pi-web，应先获取已适配新基线的补丁分支版本。补丁冲突或测试构建失败时，不会替换已安装的 pi-web；之前已完成的 Agent 更新或源码同步不会回滚。
+`install` 使用本地缓存的固定提交；`update` 默认先将 Pi Agent 更新到 latest，再获取官方 `main` 最新提交并原子写入 `patches/base-commit`，随后调用 `sync.sh --local` 应用补丁，随后安装依赖、测试、构建和替换全局命令。更新不需要 origin 的推送权限，也不会自动更新补丁分支；新基线如与补丁冲突，更新停止并保留新基线和冲突目录，需适配补丁后重试。拉取失败不改写基线，`--dry-run` 不拉取或改写基线。补丁冲突或测试构建失败时，不会替换已安装的 pi-web；之前已完成的 Agent 更新或源码同步不会回滚。
 
-`update` 默认只重启原先正在运行的服务；`--restart` 会在更新后启动服务，`--no-restart` 保持服务原有状态。更新失败时可能保留已停止的服务，修复后可通过运行脚本启动。支持 `--update-relay` 和 `PI_VERSION`（Agent 目标版本，默认 `latest`）。pi-web 使用 `patches/base-commit`，不使用 `PI_WEB_VERSION`。运行脚本的 `update` 命令也转入此统一入口。旧的 `update-pi-web-jmfederico.sh` 已移除；不带子命令仍默认执行 `install`。
+`update` 默认只重启原先正在运行的服务；`--restart` 会在更新后启动服务，`--no-restart` 保持服务原有状态。更新失败时可能保留已停止的服务，修复后可通过运行脚本启动。支持 `--update-relay`；update 的 Agent 目标固定为 `latest`，`PI_VERSION` 只控制普通 install 补装 Agent 的版本。pi-web 使用 `patches/base-commit`，不使用 `PI_WEB_VERSION`。运行脚本 `pi-web-run-jmfederico.sh update` 转入此入口时强制使用 `--no-restart`，不启停服务，也不接受 `--restart`。更新完成后，按需手动执行运行脚本的 `stop --port N` 和 `start --port N`。旧的 `update-pi-web-jmfederico.sh` 已移除；不带子命令仍默认执行 `install`。

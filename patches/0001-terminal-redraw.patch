@@ -1,0 +1,174 @@
+diff --git a/pi-web-plugins/terminal/TerminalPanel.test.ts b/pi-web-plugins/terminal/TerminalPanel.test.ts
+index b235b51895dc713bc91be3c852ab5fc1a9e439f6..71935bd291f8303b09cfd40b4522086f2dc728a3 100644
+--- a/pi-web-plugins/terminal/TerminalPanel.test.ts
++++ b/pi-web-plugins/terminal/TerminalPanel.test.ts
+@@ -642,6 +642,91 @@ describe("Terminal panel lifecycle", () => {
+     panel.disconnectedCallback();
+   });
+ 
++  it.each([false, true])("requests a TUI redraw and restores size without input (disconnect early=%s)", async (disconnectEarly) => {
++    vi.useFakeTimers();
++    const panel = createTerminalPanel();
++    const channel = { closed: new Promise<never>(() => undefined), send: vi.fn(), close: vi.fn() };
++    const openChannel = vi.fn(() => Promise.resolve(channel));
++    const context = terminalContext({ peer: terminalPeer(vi.fn(() => Promise.resolve([])), openChannel) });
++    const terminal = { dispose: vi.fn(), resize: vi.fn() };
++    const fit = vi.fn();
++    Reflect.set(panel, "selectedId", "terminal-1");
++    Reflect.set(panel, "terminal", terminal);
++    Reflect.set(panel, "fitAddon", { proposeDimensions: () => ({ cols: 80, rows: 24 }), fit });
++
++    callPanelMethod(panel, "connectChannel", context, "terminal-1", terminal, { cols: 80, rows: 24 });
++    await vi.waitFor(() => { expect(channel.send).toHaveBeenCalledOnce(); });
++    expect(openChannel).toHaveBeenCalledWith("terminal.attach", {
++      terminalId: "terminal-1", cols: 80, rows: 24,
++    }, expect.any(Object));
++    expect(channel.send).toHaveBeenNthCalledWith(1, { type: "resize", cols: 81, rows: 24 });
++    expect(terminal.resize).toHaveBeenCalledWith(81, 24);
++    fit.mockClear();
++    // ResizeObserver and the initial animation frame must not undo the pulse early.
++    callPanelMethod(panel, "fitAndNotify");
++    expect(channel.send).toHaveBeenCalledTimes(1);
++    expect(fit).not.toHaveBeenCalled();
++    if (disconnectEarly) panel.disconnectedCallback();
++    await vi.advanceTimersByTimeAsync(100);
++    expect(channel.send).toHaveBeenNthCalledWith(2, { type: "resize", cols: 80, rows: 24 });
++    expect(channel.send).toHaveBeenCalledTimes(2);
++    panel.disconnectedCallback();
++  });
++
++  it("waits for asynchronous replay parsing before resizing both ends, then fits the latest layout", async () => {
++    vi.useFakeTimers();
++    const panel = createTerminalPanel();
++    const channel = { closed: new Promise<never>(() => undefined), send: vi.fn(), close: vi.fn() };
++    const completions: (() => void)[] = [];
++    const terminal = {
++      dispose: vi.fn(), resize: vi.fn(),
++      write: vi.fn((_data: string, complete?: () => void) => { if (complete) completions.push(complete); }),
++    };
++    const openChannel = vi.fn((_operation: string, _params: JsonValue, options: PluginPeerChannelOptions) => {
++      options.onData({ type: "output", data: "history", replay: true, replayComplete: true });
++      return Promise.resolve(channel);
++    });
++    const context = terminalContext({ peer: terminalPeer(vi.fn(() => Promise.resolve([])), openChannel) });
++    let dimensions = { cols: 80, rows: 24 };
++    Reflect.set(panel, "selectedId", "terminal-1");
++    Reflect.set(panel, "terminal", terminal);
++    Reflect.set(panel, "fitAddon", { proposeDimensions: () => dimensions, fit: vi.fn() });
++
++    callPanelMethod(panel, "connectChannel", context, "terminal-1", terminal, dimensions);
++    await vi.advanceTimersByTimeAsync(500);
++    expect(channel.send).not.toHaveBeenCalled();
++    completions[0]?.();
++    expect(terminal.resize).toHaveBeenCalledWith(81, 24);
++    expect(channel.send).toHaveBeenCalledWith({ type: "resize", cols: 81, rows: 24 });
++    dimensions = { cols: 95, rows: 30 };
++    callPanelMethod(panel, "fitAndNotify");
++    await vi.advanceTimersByTimeAsync(100);
++    expect(channel.send).toHaveBeenLastCalledWith({ type: "resize", cols: 95, rows: 30 });
++    expect(channel.send).toHaveBeenCalledTimes(2);
++    panel.disconnectedCallback();
++  });
++
++  it("does not restore an obsolete size through a channel opened after switching workspace", async () => {
++    const panel = createTerminalPanel();
++    const channel = { closed: new Promise<never>(() => undefined), send: vi.fn(), close: vi.fn() };
++    const opening = deferred<typeof channel>();
++    const openChannel = vi.fn(() => opening.promise);
++    const context = terminalContext({ peer: terminalPeer(vi.fn(() => Promise.resolve([])), openChannel) });
++    const terminal = { dispose: vi.fn() };
++    Reflect.set(panel, "selectedId", "terminal-1");
++    Reflect.set(panel, "terminal", terminal);
++    Reflect.set(panel, "fitAddon", { proposeDimensions: () => ({ cols: 80, rows: 24 }), fit: vi.fn() });
++    callPanelMethod(panel, "connectChannel", context, "terminal-1", terminal, { cols: 80, rows: 24 });
++
++    panel.context = terminalContext();
++    panel.runtime = new TerminalBrowserRuntime(new InMemoryTerminalSelectionMemory());
++    callPanelMethod(panel, "willUpdate");
++    opening.resolve(channel);
++    await vi.waitFor(() => { expect(channel.close).toHaveBeenCalledWith("Terminal view changed"); });
++    expect(channel.send).not.toHaveBeenCalled();
++    panel.disconnectedCallback();
++  });
++
+   it("clears a stale connection error after a successful reattach", async () => {
+     const panel = createTerminalPanel();
+     const channel = { closed: new Promise<never>(() => undefined), send: vi.fn(), close: vi.fn() };
+diff --git a/pi-web-plugins/terminal/TerminalPanel.ts b/pi-web-plugins/terminal/TerminalPanel.ts
+index fd374b67d45e988c74c6b41e769913007145abc4..45a3ea64c268478a76202ab5326ea607fa692234 100644
+--- a/pi-web-plugins/terminal/TerminalPanel.ts
++++ b/pi-web-plugins/terminal/TerminalPanel.ts
+@@ -23,6 +23,8 @@ const TERMINAL_OPTIONS_BASE: ITerminalOptions = {
+ 
+ const DEFAULT_TERMINAL_SIZE: TerminalSize = { cols: 100, rows: 30 };
+ const COMMAND_RUN_POLL_INTERVAL_MS = 1000;
++// Allow debounced TUI renderers to observe the temporary width before restoring it.
++const TERMINAL_REDRAW_DELAY_MS = 100;
+ const CHANNEL_RECONNECT_DELAYS_MS = [250, 500, 1_000, 2_000, 5_000] as const;
+ const WORKSPACE_LOAD_RETRY_DELAYS_MS = [1_000, 2_000, 5_000] as const;
+ 
+@@ -78,6 +80,7 @@ export class TerminalPanel extends LitElement {
+   private readonly operationAborts = new Set<AbortController>();
+   private workspaceGeneration = 0;
+   private terminalNavigationGeneration = 0;
++  private terminalRedrawTimer: number | undefined;
+   private resizeObserver: ResizeObserver | undefined;
+   private intersectionObserver: IntersectionObserver | undefined;
+   private themeObserver: MutationObserver | undefined;
+@@ -621,7 +624,7 @@ export class TerminalPanel extends LitElement {
+       for (const frame of bufferedFrames) this.handleChannelFrame(generation, frame, terminalId, terminal);
+       this.channelReconnectAttempt = 0;
+       this.connectionError = undefined;
+-      this.fitAndNotify();
++      this.requestTerminalRedraw();
+       void channel.closed.then((close) => { this.handleChannelClosed(generation, terminalId, terminal, close); });
+     }).catch((error: unknown) => {
+       if (controller.signal.aborted || !this.channelIsCurrent(generation, terminalId, terminal)) return;
+@@ -714,11 +717,34 @@ export class TerminalPanel extends LitElement {
+       if (this.replayInputSuppression === suppression
+         && this.channelIsCurrent(generation, terminalId, terminal)) {
+         this.replayInputSuppression = undefined;
++        this.requestTerminalRedraw();
+       }
+     } : undefined);
+   }
+ 
++  private requestTerminalRedraw(): void {
++    // Xterm parses replay asynchronously; redraw only after its final write.
++    if (this.replayInputSuppression !== undefined) return;
++    const size = this.fitTerminal();
++    if (size === undefined) return;
++    // Bounded history is not a full screen snapshot for incremental TUIs. A
++    // same-size resize does not notify the PTY, so briefly change its width.
++    if (this.terminalRedrawTimer !== undefined) window.clearTimeout(this.terminalRedrawTimer);
++    this.terminalRedrawTimer = undefined;
++    if (!this.send({ type: "resize", cols: size.cols + 1, rows: size.rows })) return;
++    // Keep Xterm and the PTY at the same width while receiving the redraw.
++    this.terminal?.resize(size.cols + 1, size.rows);
++    const terminal = this.terminal;
++    const generation = this.channelGeneration;
++    this.terminalRedrawTimer = window.setTimeout(() => {
++      this.terminalRedrawTimer = undefined;
++      if (terminal !== this.terminal || generation !== this.channelGeneration) return;
++      this.fitAndNotify();
++    }, TERMINAL_REDRAW_DELAY_MS);
++  }
++
+   private fitAndNotify(): void {
++    if (this.terminalRedrawTimer !== undefined) return;
+     const size = this.fitTerminal();
+     if (size === undefined) return;
+     this.send({ type: "resize", ...size });
+@@ -790,6 +816,12 @@ export class TerminalPanel extends LitElement {
+   }
+ 
+   private disposeTerminalView(): void {
++    if (this.terminalRedrawTimer !== undefined) {
++      window.clearTimeout(this.terminalRedrawTimer);
++      this.terminalRedrawTimer = undefined;
++      // Do not leave the old workspace at the temporary width on a fast switch.
++      this.fitAndNotify();
++    }
+     this.channelGeneration += 1;
+     if (this.channelReconnectTimer !== undefined) window.clearTimeout(this.channelReconnectTimer);
+     this.channelReconnectTimer = undefined;

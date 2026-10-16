@@ -360,9 +360,10 @@ test(`update ${options.join(' ')} synchronizes upstream and installs patched glo
   const calls = readFileSync(f.log, 'utf8');
   assert.equal(calls.includes('npm install -g --ignore-scripts @earendil-works/pi-coding-agent@'), options.length === 0);
   const installed = calls.split('\n').find(line => line.startsWith('built ')).slice(6);
-  assert.equal(git(installed, 'rev-parse', 'HEAD'), f.baseCommit);
+  assert.equal(git(installed, 'rev-parse', 'HEAD'), git(f.upstream, 'rev-parse', 'main'));
+  assert.equal(readFileSync(join(f.source, 'patches/base-commit'), 'utf8').trim(), git(f.upstream, 'rev-parse', 'main'));
   const app = readFileSync(join(installed, 'app.txt'), 'utf8');
-  assert.ok(app.includes('custom layout') && !app.includes('new upstream'));
+  assert.ok(app.includes('custom layout') && app.includes('new upstream'));
   assert.equal(realpathSync(join(f.prefix, 'bin', 'pi-web')), join(installed, 'dist/cli.js'));
 });
 
@@ -400,4 +401,23 @@ test('update --web-only does not bootstrap a missing Agent', () => {
   const result = f.run('install.sh', ['update', '--web-only', '--no-restart']);
   assert.equal(result.status, 0, result.stderr);
   assert.ok(!readFileSync(f.log, 'utf8').includes('npm install -g --ignore-scripts @earendil-works/pi-coding-agent@'));
+});
+
+test('update uses latest Agent even when install bootstrap version is pinned', () => {
+  const f = fixture({ agentVersion: '0.85.1' });
+  const result = f.run('install.sh', ['update', '--pi-only', '--no-restart']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(readFileSync(f.log, 'utf8'), /npm install -g --ignore-scripts @earendil-works\/pi-coding-agent@latest/);
+  assert.equal(readFileSync(join(f.source, 'patches/base-commit'), 'utf8').trim(), f.baseCommit);
+});
+
+test('update dry-run and failed upstream fetch preserve the baseline', () => {
+  const f = fixture();
+  const before = readFileSync(join(f.source, 'patches/base-commit'), 'utf8');
+  assert.equal(f.run('install.sh', ['update', '--web-only', '--dry-run', '--no-restart']).status, 0);
+  assert.equal(readFileSync(join(f.source, 'patches/base-commit'), 'utf8'), before);
+  git(f.upstream, 'branch', '-m', 'unavailable-main');
+  assert.notEqual(f.run('install.sh', ['update', '--web-only', '--no-restart']).status, 0);
+  assert.equal(readFileSync(join(f.source, 'patches/base-commit'), 'utf8'), before);
+  assert.ok(!readFileSync(f.log, 'utf8').includes('built '));
 });

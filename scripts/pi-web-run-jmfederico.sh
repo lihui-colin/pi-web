@@ -49,8 +49,8 @@ PI WEB (jmfederico) 手动运行管理脚本
 更新选项:
   --pi-only        只升级 Pi Coding Agent
   --web-only       只升级 @jmfederico/pi-web
-  --no-restart     升级后不重启服务
-  --restart        即使服务原先未运行，升级后也启动
+  --no-restart     默认行为：更新不停止、不启动或重启服务
+  更新完成后需要手动执行 stop、start 才能使用新版本。
   --update-relay   同步升级全局 relay skill
   --dry-run        只显示将执行的升级操作
 
@@ -61,8 +61,7 @@ PI WEB (jmfederico) 手动运行管理脚本
   PI_WEB_DATA_DIR  状态目录，默认 data/pi-web/<port>/state
   PI_WEB_RUN_DIR   日志和 PID 目录，默认 data/pi-web/<port>
   PI_WEB_SESSIOND_SOCKET  默认 <状态目录>/sessiond.sock
-  PI_VERSION       update 使用的 pi 目标版本，默认 latest
-  PI_WEB_VERSION   update 使用的 pi-web 目标版本，默认 latest
+  update 将 Pi Agent 更新到 latest，并将官方 main 最新提交写入 patches/base-commit。
 EOF
 }
 
@@ -218,12 +217,18 @@ logs() {
 }
 
 update() {
+    for arg in "${ACTION_ARGS[@]}"; do
+        if [[ "$arg" == --restart ]]; then
+            echo "错误：update 不启动服务，请更新完成后手动执行 stop、start" >&2
+            return 2
+        fi
+    done
     if [[ ! -x "$update_script" ]]; then
         echo "错误：未找到可执行升级脚本 $update_script" >&2
         exit 1
     fi
     PI_WEB_HOST="$PI_WEB_HOST" PI_WEB_PORT="$PI_WEB_PORT" PI_WEB_PASSWORD="$PI_WEB_PASSWORD" \
-        "$update_script" update "${ACTION_ARGS[@]}"
+        "$update_script" update "${ACTION_ARGS[@]}" --no-restart
 }
 
 case "$ACTION" in
