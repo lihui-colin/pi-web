@@ -14,7 +14,7 @@ new file mode 100644
 index 00000000..14ddbef5
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexBrowserRuntime.ts
-@@ -0,0 +1,235 @@
+@@ -0,0 +1,254 @@
 +import type { PluginPeerChannel, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
 +import { array, errorText, object, text, type RecordValue } from "./server/protocol.js";
 +
@@ -34,6 +34,7 @@ index 00000000..14ddbef5
 +  notice: string;
 +  connected: boolean;
 +  pending: boolean;
++  sending: boolean;
 +  offset: number;
 +  listeners: Set<() => void>;
 +  timer: ReturnType<typeof setTimeout> | undefined;
@@ -54,7 +55,7 @@ index 00000000..14ddbef5
 +    let view = this.views.get(key);
 +    if (view === undefined) {
 +      const threadId = this.read(`${key}:selected`);
-+      view = { context, key, threadId, draft: this.read(`${key}:${threadId}:draft`), references: this.readReferences(key, threadId), model: "", effort: "", models: [], threads: [], cursor: "", snapshot: {}, error: "", notice: "", connected: false, pending: false, offset: 0, listeners: new Set(), timer: undefined, polling: false, generation: 0 };
++      view = { context, key, threadId, draft: this.read(`${key}:${threadId}:draft`), references: this.readReferences(key, threadId), model: "", effort: "", models: [], threads: [], cursor: "", snapshot: {}, error: "", notice: "", connected: false, pending: false, sending: false, offset: 0, listeners: new Set(), timer: undefined, polling: false, generation: 0 };
 +      this.views.set(key, view);
 +    }
 +    view.context = context;
@@ -117,6 +118,13 @@ index 00000000..14ddbef5
 +    view.draft = draft;
 +    this.write(`${view.key}:${view.threadId}:draft`, draft);
 +  }
++  inputHistory(view: CodexView, threadId = view.threadId): string[] {
++    if (threadId === view.threadId && Array.isArray(view.snapshot["inputHistory"])) return array(view.snapshot["inputHistory"]).filter((entry): entry is string => typeof entry === "string" && entry.trim() !== "");
++    try {
++      return array(JSON.parse(this.read(`${view.key}:${threadId}:input-history`) || "[]"))
++        .filter((entry): entry is string => typeof entry === "string" && entry.trim() !== "").slice(-100);
++    } catch { return []; }
++  }
 +  saveReferences(view: CodexView, paths: string[]): void {
 +    view.references = [...new Set(paths)].slice(0, 20);
 +    this.write(`${view.key}:${view.threadId}:references`, JSON.stringify(view.references));
@@ -137,13 +145,24 @@ index 00000000..14ddbef5
 +    const draft = view.draft;
 +    const references = [...view.references];
 +    const threadId = view.threadId;
-+    await this.request(view, "send", { threadId, text: draft, ...(references.length > 0 ? { references } : {}), ...(view.model === "" ? {} : { model: view.model }), ...(view.effort === "" ? {} : { effort: view.effort }) });
-+    if (view.threadId === threadId) {
-+      view.model = "";
-+      view.effort = "";
-+      if (view.draft === draft) this.saveDraft(view, "");
-+      this.saveReferences(view, view.references.filter((path) => !references.includes(path)));
-+      view.snapshot = { ...view.snapshot, busy: true, status: "starting", version: -1 };
++    view.sending = true; this.changed(view);
++    try {
++      await this.request(view, "send", { threadId, text: draft, ...(references.length > 0 ? { references } : {}), ...(view.model === "" ? {} : { model: view.model }), ...(view.effort === "" ? {} : { effort: view.effort }) });
++      if (draft.trim() !== "") {
++        const history = this.inputHistory(view, threadId);
++        if (history.at(-1) !== draft) history.push(draft);
++        this.write(`${view.key}:${threadId}:input-history`, JSON.stringify(history.slice(-100)));
++        if (view.threadId === threadId) view.snapshot = { ...view.snapshot, inputHistory: history.slice(-100) };
++      }
++      if (view.threadId === threadId) {
++        view.model = "";
++        view.effort = "";
++        if (view.draft === draft) this.saveDraft(view, "");
++        this.saveReferences(view, view.references.filter((path) => !references.includes(path)));
++        view.snapshot = { ...view.snapshot, busy: true, status: "starting", version: -1 };
++      }
++    } finally {
++      view.sending = false; this.changed(view);
 +    }
 +  }
 +  async run(view: CodexView, action: () => Promise<unknown>): Promise<void> {
@@ -255,7 +274,7 @@ new file mode 100644
 index 00000000..67df90fb
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.test.ts
-@@ -0,0 +1,321 @@
+@@ -0,0 +1,418 @@
 +// @vitest-environment happy-dom
 +import { afterEach, describe, expect, it, vi } from "vitest";
 +import type { PluginPeerChannelOptions, FileTreeResponse, JsonValue, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
@@ -319,6 +338,54 @@ index 00000000..67df90fb
 +    expect(request.mock.calls.filter(([operation]) => operation === "send")).toEqual([["send", { threadId: "thread", text: "你好" }]]);
 +    expect(view.draft).toBe("");
 +  });
++  it("shows a spinner until send acknowledgement then shows stop, and restores send on failure", async () => {
++    const { request, runtime, view, panel } = await fixture();
++    let accept: ((value: JsonValue) => void) | undefined;
++    request.mockImplementation((operation) => operation === "send" ? new Promise<JsonValue>((resolve) => { accept = resolve; }) : Promise.resolve({ changed: false }));
++    runtime.saveDraft(view, "hello"); panel.requestUpdate(); await panel.updateComplete;
++    const button = panel.shadowRoot?.querySelector<HTMLButtonElement>(".primary");
++    if (button === null || button === undefined) throw new Error("Expected composer action");
++    button.click(); await panel.updateComplete;
++    expect(view.sending).toBe(true); expect(button.disabled).toBe(true);
++    expect(button.getAttribute("aria-label")).toBe("Sending message");
++    expect(button.querySelector(".send-spinner")).not.toBeNull();
++    view.snapshot = { busy: true }; panel.requestUpdate(); await panel.updateComplete;
++    expect(button.querySelector(".send-spinner")).not.toBeNull();
++    expect(button.querySelector(".stop-icon")).toBeNull();
++    if (accept === undefined) throw new Error("Expected pending send");
++    accept({ accepted: true });
++    await vi.waitFor(() => { expect(button.disabled).toBe(false); });
++    expect(view.sending).toBe(false); expect(button.querySelector(".send-spinner")).toBeNull();
++    expect(button.getAttribute("aria-label")).toBe("Stop response");
++    view.snapshot = { busy: false }; runtime.saveDraft(view, "retry"); panel.requestUpdate(); await panel.updateComplete;
++    request.mockRejectedValueOnce(new Error("offline")); button.click();
++    await vi.waitFor(() => { expect(view.error).toContain("offline"); expect(button.disabled).toBe(false); });
++    expect(view.draft).toBe("retry"); expect(view.sending).toBe(false);
++    expect(button.getAttribute("aria-label")).toBe("Send message");
++    expect(button.querySelector(".send-spinner")).toBeNull();
++  });
++  it("uses one composer button to send, stop and return to idle", async () => {
++    const { request, panel, textarea, view } = await fixture();
++    const button = panel.shadowRoot?.querySelector<HTMLButtonElement>(".composer-controls>.primary");
++    if (button === null || button === undefined) throw new Error("Expected composer action");
++    expect(button.disabled).toBe(true);
++    textarea.value = "hello"; textarea.dispatchEvent(new Event("input")); await panel.updateComplete;
++    expect(button.disabled).toBe(false); expect(button.getAttribute("aria-label")).toBe("Send message");
++    button.click(); await panel.updateComplete; await Promise.resolve(); await panel.updateComplete;
++    expect(request).toHaveBeenCalledWith("send", { threadId: "thread", text: "hello" });
++    expect(view.draft).toBe(""); await vi.waitFor(() => { expect(button.disabled).toBe(false); });
++    expect(button.getAttribute("aria-label")).toBe("Stop response");
++    expect(panel.shadowRoot?.querySelectorAll(".composer-controls>button")).toHaveLength(1);
++    expect(panel.shadowRoot?.querySelector(".primary")).toBe(button);
++    view.pending = true; panel.requestUpdate(); await panel.updateComplete;
++    expect(button.disabled).toBe(true);
++    view.pending = false; panel.requestUpdate(); await panel.updateComplete;
++    button.click(); button.click(); await panel.updateComplete; await Promise.resolve(); await panel.updateComplete;
++    expect(request.mock.calls.filter(([operation]) => operation === "stop")).toEqual([["stop", { threadId: "thread" }]]);
++    view.snapshot = { busy: false }; panel.requestUpdate(); await panel.updateComplete;
++    expect(button.getAttribute("aria-label")).toBe("Send message"); expect(button.disabled).toBe(true);
++    expect(button.querySelector(".stop-icon")).toBeNull();
++  });
 +  it("preserves drafts separately across machine and thread changes and after request failure", async () => {
 +    const { request, runtime, view, scope } = await fixture();
 +    runtime.saveDraft(view, "draft one");
@@ -330,6 +397,55 @@ index 00000000..67df90fb
 +    expect(view.draft).toBe("draft one"); expect(view.error).toContain("offline");
 +    const recovered = new CodexBrowserRuntime(); runtimes.push(recovered);
 +    expect(recovered.view(scope).draft).toBe("draft one");
++  });
++  it("browses sent inputs and restores the unsent draft with arrow keys", async () => {
++    const { runtime, view, textarea, panel } = await fixture();
++    for (const draft of ["first", "second"]) { runtime.saveDraft(view, draft); await runtime.send(view); }
++    textarea.value = "unfinished"; textarea.dispatchEvent(new Event("input"));
++    const arrow = async (key: string) => { textarea.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true })); await panel.updateComplete; };
++    await arrow("ArrowUp"); expect(textarea.value).toBe("second");
++    await arrow("ArrowUp"); expect(textarea.value).toBe("first");
++    await arrow("ArrowUp"); expect(textarea.value).toBe("first");
++    await arrow("ArrowDown"); expect(textarea.value).toBe("second");
++    await arrow("ArrowDown"); expect(textarea.value).toBe("unfinished");
++    runtime.select(view, "other"); await panel.updateComplete;
++    await arrow("ArrowUp"); expect(textarea.value).toBe("");
++  });
++  it("browses Codex history on first open without browser input history", async () => {
++    const { view, panel, textarea, runtime, request } = await fixture();
++    expect(runtime.inputHistory(view)).toEqual([]);
++    request.mockResolvedValueOnce({ changed: true, version: 1, items: [], inputHistory: ["CLI first prompt", "CLI second prompt"] });
++    await runtime.refresh(view); await panel.updateComplete;
++    textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
++    await panel.updateComplete; expect(textarea.value).toBe("CLI second prompt");
++    textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
++    await panel.updateComplete; expect(textarea.value).toBe("CLI first prompt");
++  });
++  it("preserves multi-line navigation, selections, modified arrows and IME", async () => {
++    const { runtime, view, textarea } = await fixture();
++    runtime.saveDraft(view, "sent"); await runtime.send(view);
++    textarea.value = "first\nlast"; textarea.dispatchEvent(new Event("input"));
++    for (const [key, start, end, extra] of [
++      ["ArrowUp", 8, 8, {}], ["ArrowDown", 2, 2, {}], ["ArrowUp", 0, 2, {}],
++      ["ArrowUp", 0, 0, { isComposing: true }], ["ArrowUp", 0, 0, { shiftKey: true }],
++      ["ArrowUp", 0, 0, { ctrlKey: true }],
++    ] as const) {
++      textarea.setSelectionRange(start, end);
++      const event = new KeyboardEvent("keydown", { key, ...extra, bubbles: true, cancelable: true });
++      textarea.dispatchEvent(event);
++      expect(event.defaultPrevented).toBe(false); expect(textarea.value).toBe("first\nlast");
++    }
++  });
++  it("persists acknowledged history per thread and machine and excludes failed sends", async () => {
++    const { runtime, view, request, scope } = await fixture();
++    runtime.saveDraft(view, "sent"); await runtime.send(view);
++    runtime.saveDraft(view, "failed"); request.mockRejectedValueOnce(new Error("offline"));
++    await expect(runtime.send(view)).rejects.toThrow("offline");
++    const recovered = new CodexBrowserRuntime(); runtimes.push(recovered);
++    const restored = recovered.view(scope); restored.threadId = "thread";
++    expect(recovered.inputHistory(restored)).toEqual(["sent"]);
++    runtime.select(view, "other"); expect(runtime.inputHistory(view)).toEqual([]);
++    expect(runtime.inputHistory(runtime.view(context(request, "remote")))).toEqual([]);
 +  });
 +  it("renders safe Markdown and tools and sends scoped approval decisions", async () => {
 +    const { request, view, panel } = await fixture();
@@ -582,7 +698,7 @@ new file mode 100644
 index 00000000..44cdd595
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.ts
-@@ -0,0 +1,383 @@
+@@ -0,0 +1,409 @@
 +import { LitElement, css, html, nothing } from "lit";
 +import { property } from "lit/decorators.js";
 +import { repeat } from "lit/directives/repeat.js";
@@ -597,6 +713,7 @@ index 00000000..44cdd595
 +  @property({ attribute: false }) runtime: CodexBrowserRuntime | undefined;
 +  private view: CodexView | undefined;
 +  private unsubscribe: (() => void) | undefined;
++  private historyNavigation: { view: CodexView; generation: number; entries: string[]; index: number; draft: string; value: string } | undefined;
 +  private follow = true;
 +  private composing = false;
 +  private browsePath = "";
@@ -671,6 +788,31 @@ index 00000000..44cdd595
 +    const runtime = this.runtime;
 +    const view = this.view;
 +    if (runtime !== undefined && view !== undefined) void runtime.run(view, () => action(runtime, view));
++  }
++  private navigateInputHistory(event: KeyboardEvent, view: CodexView): void {
++    if (!["ArrowUp", "ArrowDown"].includes(event.key) || event.isComposing || this.composing || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
++    const editor = event.target;
++    if (!(editor instanceof HTMLTextAreaElement) || editor.selectionStart !== editor.selectionEnd) return;
++    const up = event.key === "ArrowUp";
++    // Leave normal multi-line cursor movement intact until the outermost line.
++    if (up ? editor.value.slice(0, editor.selectionStart).includes("\n") : editor.value.slice(editor.selectionEnd).includes("\n")) return;
++    let navigation = this.historyNavigation;
++    if (navigation?.view !== view || navigation.generation !== view.generation || navigation.value !== view.draft) navigation = undefined;
++    if (navigation === undefined) {
++      if (!up) return;
++      const entries = this.runtime?.inputHistory(view) ?? [];
++      if (entries.length === 0) return;
++      navigation = { view, generation: view.generation, entries, index: entries.length, draft: view.draft, value: view.draft };
++      this.historyNavigation = navigation;
++    }
++    event.preventDefault();
++    navigation.index = Math.max(0, Math.min(navigation.entries.length, navigation.index + (up ? -1 : 1)));
++    navigation.value = navigation.entries[navigation.index] ?? navigation.draft;
++    this.runtime?.saveDraft(view, navigation.value);
++    editor.value = navigation.value;
++    const cursor = up ? 0 : editor.value.length;
++    editor.setSelectionRange(cursor, cursor);
++    this.requestUpdate();
 +  }
 +  private markdownHtml(item: RecordValue): string {
 +    const id = text(item["id"]);
@@ -765,9 +907,9 @@ index 00000000..44cdd595
 +      <footer>
 +        ${view.references.length > 0 ? html`<div class="context-tray" aria-label="Selected workspace context">${view.references.map((path) => html`<span title=${path}>${path}<button aria-label=${`Remove ${path}`} ?disabled=${view.pending} @click=${() => { this.runtime?.saveReferences(view, view.references.filter((entry) => entry !== path)); }}>×</button></span>`)}</div>` : nothing}
 +        <textarea aria-label="Message Codex" placeholder="Ask for follow-up changes" .value=${view.draft}
-+          @input=${(event: Event) => { if (event.target instanceof HTMLTextAreaElement) { this.runtime?.saveDraft(view, event.target.value); this.requestUpdate(); } }}
++          @input=${(event: Event) => { if (event.target instanceof HTMLTextAreaElement) { this.historyNavigation = undefined; this.runtime?.saveDraft(view, event.target.value); this.requestUpdate(); } }}
 +          @compositionstart=${() => { this.composing = true; }} @compositionend=${() => { this.composing = false; }}
-+          @keydown=${(event: KeyboardEvent) => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing && !this.composing) { event.preventDefault(); if (!view.pending && !busy && view.connected && view.threadId !== "" && (view.draft.trim() !== "" || view.references.length > 0)) this.action((runtime, state) => runtime.send(state)); } }}></textarea>
++          @keydown=${(event: KeyboardEvent) => { this.navigateInputHistory(event, view); if (event.key === "Enter" && !event.shiftKey && !event.isComposing && !this.composing) { event.preventDefault(); if (!view.pending && !busy && view.connected && view.threadId !== "" && (view.draft.trim() !== "" || view.references.length > 0)) this.action((runtime, state) => runtime.send(state)); } }}></textarea>
 +        <div class="composer-controls">${this.renderContextPicker(view)}<span class="policy" title="Full access · no approval prompts">YOLO</span><details class="model-picker">
 +          <summary aria-label="Model and reasoning settings">${text(selectedModel?.["displayName"]) || modelName || "Model unavailable"} <span>${view.effort || currentEffort || "Effort unspecified"}</span></summary>
 +          <div class="model-menu"><label>Model<select aria-label="Model" ?disabled=${view.pending || busy} .value=${view.model} @change=${(event: Event) => { if (event.target instanceof HTMLSelectElement) { view.model = event.target.value; view.effort = ""; this.closeMenus(true, ".model-picker"); this.requestUpdate(); } }}>
@@ -777,8 +919,7 @@ index 00000000..44cdd595
 +          <option value="">${currentEffort || "Unspecified"} (current)</option>${array(selectedModel?.["supportedReasoningEfforts"]).map((entry) => html`<option value=${text(object(entry)["reasoningEffort"])}>${text(object(entry)["reasoningEffort"])}</option>`)}
 +        </select></label></div></details>
 +          <span class="composer-spacer"></span>
-+          ${busy ? html`<button aria-label="Stop response" ?disabled=${view.pending} @click=${() => { this.action((runtime, state) => runtime.request(state, "stop", { threadId: state.threadId })); }}>Stop</button>` : nothing}
-+          <button class="primary" aria-label="Send message" title="Send message" ?disabled=${view.pending || busy || !view.connected || view.threadId === "" || (view.draft.trim() === "" && view.references.length === 0)} @click=${() => { this.action((runtime, state) => runtime.send(state)); }}>↑</button>
++          <button class="primary" aria-label=${view.sending ? "Sending message" : busy ? "Stop response" : "Send message"} title=${view.sending ? "Sending message" : busy ? "Stop response" : "Send message"} aria-busy=${view.sending} ?disabled=${view.pending || view.sending || !view.connected || view.threadId === "" || (!busy && view.draft.trim() === "" && view.references.length === 0)} @click=${() => { this.action((runtime, state) => busy ? runtime.request(state, "stop", { threadId: state.threadId }) : runtime.send(state)); }}>${view.sending ? html`<span class="send-spinner" aria-hidden="true"></span>` : busy ? html`<span class="stop-icon" aria-hidden="true"></span>` : "↑"}</button>
 +        </div>
 +      </footer>
 +      <div class="connection-status" role="status">${view.pending ? "Working…" : text(snapshot["status"]) || (view.connected ? "Ready" : "Connecting…")}</div>
@@ -910,7 +1051,8 @@ index 00000000..44cdd595
 +    footer { flex:none; margin:12px 16px 0; padding:12px 8px 7px; background:var(--pi-surface,#f7f7f7); border:1px solid var(--pi-border-muted,#e4e4e4); border-radius:22px; box-shadow:0 4px 18px #00000005; }
 +    textarea { display:block; width:100%; resize:vertical; min-height:70px; max-height:180px; padding:3px 7px 12px; border:0; background:transparent; }
 +    textarea::placeholder { color:var(--pi-muted,#858585); } .composer-controls { display:flex; align-items:center; gap:2px; flex-wrap:wrap; } .composer-controls select { font-size:12px; max-width:180px; min-width:0; padding:4px; color:var(--pi-muted,#707070); } .composer-spacer { flex:1; }
-+    .policy { font-size:12px; padding:4px 6px; color:var(--pi-muted,#707070); } .primary { width:32px; height:32px; padding:0; border-radius:50%; background:var(--pi-text,#171717); color:var(--pi-bg,#fff); font-size:23px; } .primary:hover { background:var(--pi-muted,#666); }
++    .send-spinner { width:14px; height:14px; border:2px solid currentColor; border-right-color:transparent; border-radius:50%; animation:send-spin .7s linear infinite; } @keyframes send-spin { to { transform:rotate(360deg); } } @media(prefers-reduced-motion:reduce) { .send-spinner { animation:none; } }
++    .policy { font-size:12px; padding:4px 6px; color:var(--pi-muted,#707070); } .primary { display:grid; place-items:center; flex:none; width:28px; height:28px; padding:0; border-radius:50%; background:var(--pi-text,#171717); color:var(--pi-bg,#fff); font-size:18px; line-height:1; } .primary:hover { background:var(--pi-muted,#666); } .stop-icon { width:10px; height:10px; border-radius:2px; background:currentColor; }
 +    .message-actions { height:24px; opacity:0; display:flex; gap:4px; font-size:11px; color:var(--pi-muted,#777); } article:hover .message-actions,article:focus-within .message-actions { opacity:1; } .userMessage { position:relative; margin-bottom:32px; } .userMessage .message-actions { position:absolute; top:100%; right:4px; } .commentary { margin-bottom:12px; }
 +    .transcript .activity-group { border:0; padding:0; margin:12px 0 20px; } .activity-group>summary { display:flex; align-items:center; gap:8px; list-style:none; } .activity-group>summary::before { content:"›"; } .activity-group[open]>summary::before { transform:rotate(90deg); } .activity-group>summary>span:nth-of-type(2) { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .activity-group small { margin-left:auto; }
 +    .activity-items { border-left:1px solid var(--pi-border-muted,#e5e5e5); margin:6px 0 0 12px; padding-left:12px; } .transcript .activity-item { margin:4px 0 8px; } .activity-item>summary { display:flex; align-items:center; gap:8px; list-style:none; } .activity-item>summary::before { content:"›"; } .activity-item[open]>summary::before { transform:rotate(90deg); } .activity-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .activity-status { flex:none; font-size:11px; color:var(--pi-muted,#888); } .failed>summary,.failed .activity-status { color:var(--pi-danger,#c33); }
@@ -947,11 +1089,11 @@ index 00000000..44cdd595
 +      footer { position:relative; margin:6px 8px 0; padding:10px 8px 4px; border-radius:16px; }
 +      textarea { min-height:56px; max-height:min(120px,24dvh); font-size:16px; resize:none; }
 +      input,select,.composer-controls select { font-size:16px; min-height:44px; }
-+      .composer-controls { display:grid; grid-template-columns:44px minmax(0,1fr) auto auto; gap:2px; }
++      .composer-controls { display:grid; grid-template-columns:44px minmax(0,1fr) auto; gap:2px; }
 +      .composer-controls>.policy { grid-column:1 / -1; grid-row:2; font-size:11px; padding:2px 4px; }
 +      .composer-spacer { display:none; }
 +      .context-picker,.model-picker { position:static; max-width:100%; }
-+      .context-picker>summary,.primary { width:44px; height:44px; }
++      .context-picker>summary { width:44px; height:44px; } .composer-controls>.primary { width:32px; height:32px; min-height:32px; align-self:center; }
 +      .model-picker>summary { padding:10px 5px; min-height:44px; font-size:12px; }
 +      .composer-controls>button { min-height:44px; }
 +      .model-menu,.context-menu { left:0; right:0; bottom:calc(100% + 8px); width:auto; max-height:min(360px,50dvh); overscroll-behavior:contain; }
@@ -1207,7 +1349,7 @@ new file mode 100644
 index 00000000..abc7194f
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/codexService.test.ts
-@@ -0,0 +1,215 @@
+@@ -0,0 +1,231 @@
 +import { mkdtemp, mkdir, writeFile, symlink, rm } from "node:fs/promises";
 +import { join } from "node:path";
 +import { tmpdir } from "node:os";
@@ -1278,6 +1420,22 @@ index 00000000..abc7194f
 +    expect(f.request).not.toHaveBeenCalledWith("thread/resume", expect.anything());
 +    await f.call("create", { cwd: "/untrusted" });
 +    expect(f.request).toHaveBeenCalledWith("thread/start", expect.objectContaining({ cwd: "/work/one", sandbox: "danger-full-access", approvalPolicy: "never" }));
++  });
++  it("includes persisted user inputs beyond the transcript page without resuming", async () => {
++    const f = fixture();
++    const original = f.request.getMockImplementation();
++    if (original === undefined) throw new Error("Missing request fixture");
++    f.request.mockImplementation(async (method, params) => {
++      if (method === "thread/read") return { thread: { id: "saved", cwd: "/work/one", turns: [{ id: "old", items: [
++        { id: "u1", type: "userMessage", content: [{ type: "text", text: "CLI first prompt" }] },
++        ...Array.from({ length: 520 }, (_, index) => ({ id: `tool-${String(index)}`, type: "agentMessage", text: "output" })),
++        { id: "u2", type: "userMessage", content: [{ type: "text", text: "CLI second prompt" }] },
++      ] }] } };
++      return original(method, params);
++    });
++    const snapshot = await f.call("snapshot", { threadId: "saved" });
++    expect(snapshot["inputHistory"]).toEqual(["CLI first prompt", "CLI second prompt"]);
++    expect(f.request).not.toHaveBeenCalledWith("thread/resume", expect.anything());
 +  });
 +  it("resumes once across concurrent sends and returns deduplicated authoritative items", async () => {
 +    const f = fixture();
@@ -1428,7 +1586,7 @@ new file mode 100644
 index 00000000..3500e33d
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/codexService.ts
-@@ -0,0 +1,433 @@
+@@ -0,0 +1,441 @@
 +import { isAbsolute, relative, resolve, sep } from "node:path";
 +import { realpath, stat } from "node:fs/promises";
 +import type { JsonValue, ServerPluginPeerRequestContext, ServerPluginPeerChannelOpenContext, ServerPluginPeerChannel } from "@jmfederico/pi-web/server-plugin-api";
@@ -1445,6 +1603,7 @@ index 00000000..3500e33d
 +  error: string;
 +  busy: boolean;
 +  items: Map<string, RecordValue>;
++  inputHistory: Map<string, string>;
 +  approvals: Map<string, RecordValue>;
 +}
 +interface WorkspaceState {
@@ -1574,7 +1733,7 @@ index 00000000..3500e33d
 +      const offset = typeof input["offset"] === "number" ? Math.max(0, Math.min(512, Math.floor(input["offset"]))) : 0;
 +      const end = Math.max(0, thread.items.size - offset);
 +      return { changed: true, id, model: thread.model, effort: thread.effort, version: thread.version, status: thread.status, busy: thread.busy, error: thread.error,
-+        items: [...thread.items.values()].slice(Math.max(0, end - 40), end), offset, total: thread.items.size, approvals: [...thread.approvals.values()], policy };
++        inputHistory: [...thread.inputHistory.values()], items: [...thread.items.values()].slice(Math.max(0, end - 40), end), offset, total: thread.items.size, approvals: [...thread.approvals.values()], policy };
 +    }
 +    if (context.operation === "send") {
 +      let prompt = text(input["text"]);
@@ -1702,7 +1861,7 @@ index 00000000..3500e33d
 +      if (idle === undefined) throw new Error("Too many active Codex conversations");
 +      state.threads.delete(idle.id);
 +    }
-+    const thread: ThreadState = { id, model: "", effort: "", version: 0, turnId: "", status: "idle", error: "", busy: false, items: new Map(), approvals: new Map() };
++    const thread: ThreadState = { id, model: "", effort: "", version: 0, turnId: "", status: "idle", error: "", busy: false, items: new Map(), inputHistory: new Map(), approvals: new Map() };
 +    state.threads.set(id, thread);
 +    return thread;
 +  }
@@ -1715,7 +1874,7 @@ index 00000000..3500e33d
 +    const read = await state.connection.request("thread/read", { threadId: id, includeTurns: true });
 +    const saved = object(read["thread"]);
 +    if (resolve(string(saved["cwd"], "thread cwd", 4096)) !== state.cwd) throw new Error("Conversation belongs to another workspace");
-+    const thread: ThreadState = { id, model: text(saved["model"]), effort: text(saved["reasoningEffort"]), version: --this.historyVersion, turnId: "", status: "Stored history", error: "", busy: false, items: new Map(), approvals: new Map() };
++    const thread: ThreadState = { id, model: text(saved["model"]), effort: text(saved["reasoningEffort"]), version: --this.historyVersion, turnId: "", status: "Stored history", error: "", busy: false, items: new Map(), inputHistory: new Map(), approvals: new Map() };
 +    for (const entry of array(saved["turns"])) {
 +      const turn = object(entry);
 +      for (const item of array(turn["items"])) this.item(thread, { ...object(item), turnId: turn["id"] ?? "", turnStatus: turn["status"] ?? "", turnDurationMs: turn["durationMs"] ?? null });
@@ -1794,6 +1953,13 @@ index 00000000..3500e33d
 +    }
 +    const turnId = text(raw["turnId"]) || thread.turnId || text(previous?.["turnId"]);
 +    const status = text(raw["status"]) || text(raw["turnStatus"]) || text(previous?.["status"]);
++    if (kind === "userMessage" && body.trim() !== "") {
++      thread.inputHistory.set(id, body);
++      while (thread.inputHistory.size > 100) {
++        const first = thread.inputHistory.keys().next().value;
++        if (first !== undefined) thread.inputHistory.delete(first);
++      }
++    }
 +    thread.items.set(id, { ...previous, id, kind, text: bounded(body), status,
 +      ...(turnId ? { turnId } : {}), ...(typeof raw["phase"] === "string" ? { phase: raw["phase"] } : {}), ...details });
 +    while (thread.items.size > 512) { const first = thread.items.keys().next().value; if (first !== undefined) thread.items.delete(first); }
