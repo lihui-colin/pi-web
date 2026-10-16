@@ -16,7 +16,7 @@ sh scripts/install.sh
 
 安装脚本使用本地缓存的 `patches/base-commit` 指定提交，在独立目录应用补丁、安装依赖并测试构建，成功后将全局 `pi-web`、`pi-web-server` 和 `pi-web-sessiond` 命令链接到新版本，最后打印安装目录。若 PATH 中没有 `pi` 命令，会自动全局安装 Pi Agent（默认 `latest`，可用 `PI_VERSION` 指定）；已有 Agent 保留当前版本。它不同步远端、不注册或启动后台服务。已运行的服务需要手动先停止再启动才能使用新版本。不再提供 Swap Chat / Workspace Panel 命令，旧的浏览器布局交换偏好不再生效。
 
-详细的同步、冲突处理和补丁维护方法见 [使用文档](docs/usage.md)。
+当前补丁按功能整理为 6 个：终端修复与增强为 `0001`–`0005`，完整 Codex 插件及其界面调整为 `0006`。详细的同步、冲突处理和补丁维护方法见 [使用文档](docs/usage.md)。
 
 终端补丁还会在裁剪回放缓存时保留鼠标跟踪、备用屏幕及粘贴等模式，修复 Codex CLI 长时间运行后刷新页面无法滚动历史的问题。更新后需要重启 `pi-web-sessiond`，再新建终端并用 `codex resume` 恢复会话；旧守护进程已经丢弃的状态无法补回。
 

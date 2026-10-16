@@ -363,3 +363,16 @@ index 0000000000000000000000000000000000000000..839cbd4e9d7542a1de627d3e1a334b13
 +    return undefined;
 +  }
 +}
+diff --git a/pi-web-plugins/terminal/clipboard.ts b/pi-web-plugins/terminal/clipboard.ts
+index 1feccb2619ea487d438384ed8411ae6755c7b8d7..6919554eee5f5659a57d9a3f58dad247993ec7d7 100644
+--- a/pi-web-plugins/terminal/clipboard.ts
++++ b/pi-web-plugins/terminal/clipboard.ts
+@@ -32,7 +32,7 @@ function browserIsSecureContext(): boolean {
+ }
+ 
+ function browserClipboardWriteText(): ((text: string) => Promise<void>) | undefined {
+-  if (typeof navigator === "undefined" || !("clipboard" in navigator)) return undefined;
++  if (typeof navigator === "undefined" || typeof navigator.clipboard?.writeText !== "function") return undefined;
+   return navigator.clipboard.writeText.bind(navigator.clipboard);
+ }
+ 
