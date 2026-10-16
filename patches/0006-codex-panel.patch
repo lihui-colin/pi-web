@@ -11,10 +11,10 @@ index 00000000..b864cc1c
 +Add an optional Codex workspace plugin with persistent conversations, streamed responses, tool output, approvals, and model selection using the workspace machine's Codex CLI. Restart sessiond after installing the plugin.
 diff --git a/pi-web-plugins/codex/CodexBrowserRuntime.ts b/pi-web-plugins/codex/CodexBrowserRuntime.ts
 new file mode 100644
-index 00000000..14ddbef5
+index 00000000..15f4419a
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexBrowserRuntime.ts
-@@ -0,0 +1,254 @@
+@@ -0,0 +1,273 @@
 +import type { PluginPeerChannel, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
 +import { array, errorText, object, text, type RecordValue } from "./server/protocol.js";
 +
@@ -27,6 +27,8 @@ index 00000000..14ddbef5
 +  model: string;
 +  effort: string;
 +  models: RecordValue[];
++  defaultModel: string;
++  defaultEffort: string;
 +  threads: RecordValue[];
 +  cursor: string;
 +  snapshot: RecordValue;
@@ -54,8 +56,8 @@ index 00000000..14ddbef5
 +    const key = JSON.stringify([context.machine.id, context.workspace.projectId, context.workspace.id, context.workspace.path]);
 +    let view = this.views.get(key);
 +    if (view === undefined) {
-+      const threadId = this.read(`${key}:selected`);
-+      view = { context, key, threadId, draft: this.read(`${key}:${threadId}:draft`), references: this.readReferences(key, threadId), model: "", effort: "", models: [], threads: [], cursor: "", snapshot: {}, error: "", notice: "", connected: false, pending: false, sending: false, offset: 0, listeners: new Set(), timer: undefined, polling: false, generation: 0 };
++      const threadId = "";
++      view = { context, key, threadId, draft: this.read(`${key}:${threadId}:draft`), references: this.readReferences(key, threadId), model: "", effort: "", models: [], defaultModel: "", defaultEffort: "", threads: [], cursor: "", snapshot: {}, error: "", notice: "", connected: false, pending: false, sending: false, offset: 0, listeners: new Set(), timer: undefined, polling: false, generation: 0 };
 +      this.views.set(key, view);
 +    }
 +    view.context = context;
@@ -84,7 +86,10 @@ index 00000000..14ddbef5
 +    view.connected = true;
 +    view.notice = status["authenticated"] === false && status["requiresOpenaiAuth"] !== false
 +      ? "Sign in with `codex login` on this workspace's machine, then reconnect." : "";
-+    view.models = array((await this.request(view, "models"))["data"]).map(object);
++    const models = await this.request(view, "models");
++    view.models = array(models["data"]).map(object);
++    view.defaultModel = text(models["defaultModel"]);
++    view.defaultEffort = text(models["defaultEffort"]);
 +    await this.list(view);
 +    view.snapshot = {};
 +    this.connect(view);
@@ -109,7 +114,6 @@ index 00000000..14ddbef5
 +    view.snapshot = {};
 +    view.offset = 0;
 +    view.error = "";
-+    this.write(`${view.key}:selected`, id);
 +    this.changed(view);
 +    this.schedule(view, 0);
 +    this.connect(view);
@@ -139,14 +143,29 @@ index 00000000..14ddbef5
 +  async create(view: CodexView): Promise<void> {
 +    const result = await this.request(view, "create");
 +    this.select(view, text(result["id"]));
++    view.snapshot = { model: text(result["model"]), effort: text(result["effort"]) };
 +    await this.list(view);
 +  }
 +  async send(view: CodexView): Promise<void> {
 +    const draft = view.draft;
 +    const references = [...view.references];
-+    const threadId = view.threadId;
++    let threadId = view.threadId;
++    const model = view.model;
++    const effort = view.effort;
 +    view.sending = true; this.changed(view);
 +    try {
++      if (threadId === "") {
++        const result = await this.request(view, "create");
++        threadId = text(result["id"]);
++        if (threadId === "") throw new Error("Codex did not return a conversation ID");
++        this.select(view, threadId);
++        view.snapshot = { model: text(result["model"]), effort: text(result["effort"]) };
++        this.saveDraft(view, draft);
++        this.saveReferences(view, references);
++        view.model = model; view.effort = effort;
++        this.write(`${view.key}::draft`, "");
++        this.write(`${view.key}::references`, "[]");
++      }
 +      await this.request(view, "send", { threadId, text: draft, ...(references.length > 0 ? { references } : {}), ...(view.model === "" ? {} : { model: view.model }), ...(view.effort === "" ? {} : { effort: view.effort }) });
 +      if (draft.trim() !== "") {
 +        const history = this.inputHistory(view, threadId);
@@ -271,10 +290,10 @@ index 00000000..14ddbef5
 +}
 diff --git a/pi-web-plugins/codex/CodexPanel.test.ts b/pi-web-plugins/codex/CodexPanel.test.ts
 new file mode 100644
-index 00000000..67df90fb
+index 00000000..3f244ad9
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.test.ts
-@@ -0,0 +1,418 @@
+@@ -0,0 +1,475 @@
 +// @vitest-environment happy-dom
 +import { afterEach, describe, expect, it, vi } from "vitest";
 +import type { PluginPeerChannelOptions, FileTreeResponse, JsonValue, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
@@ -308,6 +327,20 @@ index 00000000..67df90fb
 +}
 +
 +describe("Codex panel", () => {
++  it("shows backend defaults on home and keeps them separate from thread settings and overrides", async () => {
++    const { view, runtime, request, panel } = await fixture();
++    runtime.select(view, "");
++    request.mockImplementation(async (operation) => operation === "models" ? { defaultModel: "configured", defaultEffort: "high", data: [{ model: "catalog", displayName: "Catalog default", isDefault: true }, { model: "configured", displayName: "Configured model", defaultReasoningEffort: "low" }] } : { data: [], changed: false });
++    await runtime.initialize(view); await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelector(".model-picker summary")?.textContent).toContain("Configured model");
++    expect(panel.shadowRoot?.querySelector(".model-picker summary")?.textContent).toContain("high");
++    expect(view.model).toBe(""); expect(view.effort).toBe("");
++    runtime.select(view, "saved"); view.snapshot = { model: "thread-model", effort: "medium" }; panel.requestUpdate(); await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelector(".model-picker summary")?.textContent).toContain("thread-model");
++    expect(panel.shadowRoot?.querySelector(".model-picker summary")?.textContent).not.toContain("Configured model");
++    runtime.select(view, ""); await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelector(".model-picker summary")?.textContent).toContain("Configured model");
++  });
 +  it("shows server settings without making them client overrides and clears choices across threads", async () => {
 +    const { request, view, panel, runtime } = await fixture();
 +    view.snapshot = { model: "configured-model", effort: "high" };
@@ -396,6 +429,7 @@ index 00000000..67df90fb
 +    await runtime.run(view, () => runtime.send(view));
 +    expect(view.draft).toBe("draft one"); expect(view.error).toContain("offline");
 +    const recovered = new CodexBrowserRuntime(); runtimes.push(recovered);
++    recovered.select(recovered.view(scope), "thread");
 +    expect(recovered.view(scope).draft).toBe("draft one");
 +  });
 +  it("browses sent inputs and restores the unsent draft with arrow keys", async () => {
@@ -452,7 +486,7 @@ index 00000000..67df90fb
 +    view.snapshot = { items: [{ id: "answer", kind: "agentMessage", text: '**Hello** <script>alert(1)</script> [bad](javascript:alert(1))' }, { id: "tool", kind: "fileChange", text: "-old\n+new", status: "completed" }],
 +      approvals: [{ id: "7", method: "item/commandExecution/requestApproval", params: { command: "npm test" } }] };
 +    panel.requestUpdate(); await panel.updateComplete;
-+    expect(panel.shadowRoot?.querySelector("strong")?.textContent).toBe("Codex");
++    expect(panel.shadowRoot?.querySelector("header .task-title")?.textContent).toBe("New conversation");
 +    expect(panel.shadowRoot?.querySelector(".markdown strong")?.textContent).toBe("Hello");
 +    expect(panel.shadowRoot?.querySelector("script")).toBeNull();
 +    expect(panel.shadowRoot?.querySelector('a[href^="javascript:"]')).toBeNull();
@@ -514,13 +548,11 @@ index 00000000..67df90fb
 +    model.dispatchEvent(new Event("pointerdown", { bubbles: true, composed: true }));
 +    expect(picker.open).toBe(true);
 +    model.value = "test"; model.dispatchEvent(new Event("change")); await panel.updateComplete;
-+    expect(picker.open).toBe(false);
++    expect(picker.open).toBe(true);
 +    expect(view.model).toBe("test");
-+    picker.open = true;
 +    effort.value = "high"; effort.dispatchEvent(new Event("change")); await panel.updateComplete;
-+    expect(picker.open).toBe(false);
++    expect(picker.open).toBe(true);
 +    expect(view.effort).toBe("high");
-+    picker.open = true;
 +    textarea.dispatchEvent(new Event("pointerdown", { bubbles: true, composed: true }));
 +    expect(picker.open).toBe(false);
 +    picker.open = true;
@@ -542,42 +574,85 @@ index 00000000..67df90fb
 +    expect(picker.open).toBe(false);
 +  });
 +
-+  it("dismisses conversation settings on selection, New, outside interaction and Escape", async () => {
-+    const { panel, view, textarea, request } = await fixture();
++  it("shows history on home, opens a conversation and returns with the home draft", async () => {
++    const { panel, view, runtime, request, textarea } = await fixture();
++    runtime.select(view, ""); runtime.saveDraft(view, "home draft");
 +    view.threads = [{ id: "thread", preview: "Current" }, { id: "second", preview: "Second" }];
++    request.mockImplementation(async (operation) => operation === "list" ? { data: view.threads } : { changed: true, items: [{ id: "answer", kind: "agentMessage", text: "Saved answer" }] });
 +    panel.requestUpdate(); await panel.updateComplete;
-+    const menu = panel.shadowRoot?.querySelector<HTMLDetailsElement>(".history");
-+    const select = menu?.querySelector("select");
-+    if (!menu || !select) throw new Error("Expected conversation menu");
-+    menu.open = true;
-+    select.dispatchEvent(new Event("pointerdown", { bubbles: true, composed: true }));
-+    expect(menu.open).toBe(true);
-+    select.value = "second"; select.dispatchEvent(new Event("change")); await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelector(".conversation-home")).not.toBeNull();
++    expect(panel.shadowRoot?.querySelector(".transcript")).toBeNull();
++    expect(textarea.value).toBe("home draft");
++    const cards = panel.shadowRoot?.querySelectorAll<HTMLButtonElement>(".conversation-card");
++    expect(cards).toHaveLength(2); cards?.[1]?.click(); await runtime.refresh(view); await panel.updateComplete;
 +    expect(view.threadId).toBe("second");
-+    expect(menu.open).toBe(false);
-+    expect(panel.shadowRoot?.activeElement).toBe(menu.querySelector("summary"));
-+    for (const target of [textarea, document.body]) {
-+      menu.open = true;
-+      target.dispatchEvent(new Event("pointerdown", { bubbles: true, composed: true }));
-+      expect(menu.open).toBe(false);
-+    }
-+    menu.open = true;
-+    textarea.dispatchEvent(new Event("focusin", { bubbles: true, composed: true }));
-+    expect(menu.open).toBe(false);
-+    menu.open = true;
-+    select.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, composed: true }));
-+    expect(menu.open).toBe(false);
-+    expect(panel.shadowRoot?.activeElement).toBe(menu.querySelector("summary"));
-+    menu.open = true;
-+    panel.remove(); expect(menu.open).toBe(false);
-+    document.body.append(panel); await panel.updateComplete;
-+    menu.open = true;
-+    document.body.dispatchEvent(new Event("pointerdown", { bubbles: true, composed: true }));
-+    expect(menu.open).toBe(false);
-+    menu.open = true;
-+    panel.shadowRoot?.querySelector<HTMLButtonElement>("header .new-conversation")?.click();
-+    expect(menu.open).toBe(false);
-+    expect(request).toHaveBeenCalledWith("create", {});
++    expect(panel.shadowRoot?.querySelector(".conversation-home")).toBeNull();
++    expect(panel.shadowRoot?.querySelector(".transcript")?.textContent).toContain("Saved answer");
++    const back = panel.shadowRoot?.querySelector<HTMLButtonElement>(".header-heading>.back-button");
++    expect(back?.textContent).toBe("←");
++    expect(back?.nextElementSibling?.textContent).toBe("Second");
++    expect(panel.shadowRoot?.querySelector("header")?.firstElementChild).toBe(back?.parentElement);
++    back?.click();
++    await vi.waitFor(() => { expect(view.pending).toBe(false); }); await panel.updateComplete;
++    expect(view.threadId).toBe(""); expect(textarea.value).toBe("home draft");
++    expect(panel.shadowRoot?.querySelectorAll(".conversation-card")).toHaveLength(2);
++    expect(request).not.toHaveBeenCalledWith("create", expect.anything());
++  });
++  it("toggles extra conversations below More and loads older server pages", async () => {
++    const { panel, view, runtime, request } = await fixture();
++    runtime.select(view, "");
++    view.threads = Array.from({ length: 8 }, (_, index) => ({ id: String(index), preview: `Conversation ${String(index)}` }));
++    view.cursor = "next"; panel.requestUpdate(); await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelectorAll(".conversation-card")).toHaveLength(5);
++    panel.shadowRoot?.querySelector<HTMLButtonElement>(".more-conversations")?.click(); await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelectorAll(".conversation-card")).toHaveLength(8);
++    expect(request).not.toHaveBeenCalledWith("list", expect.anything());
++    expect(panel.shadowRoot?.querySelector(".more-conversations")?.getAttribute("aria-expanded")).toBe("true");
++    expect(panel.shadowRoot?.querySelector(".more-conversations")?.nextElementSibling?.id).toBe("older-conversations");
++    panel.shadowRoot?.querySelector<HTMLButtonElement>(".more-conversations")?.click(); await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelectorAll(".conversation-card")).toHaveLength(5);
++    expect(panel.shadowRoot?.querySelector(".more-conversations")?.getAttribute("aria-expanded")).toBe("false");
++    panel.shadowRoot?.querySelector<HTMLButtonElement>(".more-conversations")?.click(); await panel.updateComplete;
++    request.mockResolvedValueOnce({ data: [{ id: "8", preview: "Next page" }], nextCursor: "" });
++    panel.shadowRoot?.querySelector<HTMLButtonElement>(".load-conversations")?.click();
++    await vi.waitFor(() => { expect(view.pending).toBe(false); expect(panel.shadowRoot?.querySelectorAll(".conversation-card")).toHaveLength(9); });
++    expect(request).toHaveBeenCalledWith("list", { cursor: "next" });
++    expect(panel.shadowRoot?.querySelector(".load-conversations")).toBeNull();
++    panel.shadowRoot?.querySelector<HTMLButtonElement>(".more-conversations")?.click(); await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelectorAll(".conversation-card")).toHaveLength(5);
++  });
++  it("starts on home even when a previous conversation was selected", async () => {
++    const { scope, runtime, view } = await fixture();
++    runtime.select(view, "old"); runtime.saveDraft(view, "saved draft");
++    const recovered = new CodexBrowserRuntime(); runtimes.push(recovered);
++    expect(recovered.view(scope).threadId).toBe("");
++    recovered.select(recovered.view(scope), "old"); expect(recovered.view(scope).draft).toBe("saved draft");
++  });
++  it("creates on first home send and carries the draft, context and model into the thread", async () => {
++    const { panel, view, runtime, request, textarea } = await fixture();
++    runtime.select(view, ""); runtime.saveReferences(view, ["src"]); view.model = "chosen"; view.effort = "high";
++    request.mockImplementation(async (operation) => operation === "create" ? { id: "new" } : { changed: false });
++    textarea.value = "new task"; textarea.dispatchEvent(new Event("input")); await panel.updateComplete;
++    const button = panel.shadowRoot?.querySelector<HTMLButtonElement>(".primary");
++    expect(button?.disabled).toBe(false); button?.click();
++    await vi.waitFor(() => { expect(view.pending).toBe(false); expect(view.threadId).toBe("new"); });
++    expect(request).toHaveBeenCalledWith("send", { threadId: "new", text: "new task", references: ["src"], model: "chosen", effort: "high" });
++    expect(request.mock.calls.filter(([operation]) => operation === "create")).toHaveLength(1);
++    expect(view.draft).toBe(""); expect(view.snapshot["busy"]).toBe(true);
++    runtime.select(view, ""); expect(view.draft).toBe(""); expect(view.references).toEqual([]);
++  });
++  it("keeps home input on create failure and retries a failed send in the created thread", async () => {
++    const { view, runtime, request } = await fixture();
++    runtime.select(view, ""); runtime.saveDraft(view, "keep me"); runtime.saveReferences(view, ["src"]);
++    request.mockRejectedValueOnce(new Error("create failed"));
++    await runtime.run(view, () => runtime.send(view));
++    expect(view.threadId).toBe(""); expect(view.draft).toBe("keep me"); expect(view.references).toEqual(["src"]); expect(view.sending).toBe(false);
++    request.mockImplementation(async (operation) => { if (operation === "create") return { id: "new" }; if (operation === "send") throw new Error("send failed"); return { changed: false }; });
++    await runtime.run(view, () => runtime.send(view));
++    expect(view.threadId).toBe("new"); expect(view.draft).toBe("keep me"); expect(view.references).toEqual(["src"]);
++    request.mockResolvedValue({ changed: false }); await runtime.run(view, () => runtime.send(view));
++    expect(request.mock.calls.filter(([operation]) => operation === "create")).toHaveLength(2);
++    expect(view.draft).toBe("");
 +  });
 +
 +  it("renders commentary, grouped tools, command results, thinking and final answers", async () => {
@@ -648,6 +723,7 @@ index 00000000..67df90fb
 +    runtime.select(view, "second"); expect(view.references).toEqual([]);
 +    runtime.select(view, "thread"); expect(view.references).toEqual(["src", "README.md"]);
 +    const recovered = new CodexBrowserRuntime(); runtimes.push(recovered);
++    recovered.select(recovered.view(scope), "thread");
 +    expect(recovered.view(scope).references).toEqual(["src", "README.md"]);
 +    request.mockRejectedValueOnce(new Error("offline"));
 +    await runtime.run(view, () => runtime.send(view));
@@ -695,10 +771,10 @@ index 00000000..67df90fb
 +});
 diff --git a/pi-web-plugins/codex/CodexPanel.ts b/pi-web-plugins/codex/CodexPanel.ts
 new file mode 100644
-index 00000000..44cdd595
+index 00000000..da029f44
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.ts
-@@ -0,0 +1,409 @@
+@@ -0,0 +1,452 @@
 +import { LitElement, css, html, nothing } from "lit";
 +import { property } from "lit/decorators.js";
 +import { repeat } from "lit/directives/repeat.js";
@@ -724,10 +800,11 @@ index 00000000..44cdd595
 +  private browseRequest = 0;
 +  private browseFilter = "";
 +  private reviewOpen = false;
++  private historyExpanded = false;
 +  private readonly resizeObserver = new ResizeObserver(() => { this.requestUpdate(); });
 +  private readonly markdown = new Map<string, { text: string; html: string }>();
 +
-+  private closeMenus(restoreFocus = false, selector = ".model-picker, .history, .context-picker"): void {
++  private closeMenus(restoreFocus = false, selector = ".model-picker, .context-picker"): void {
 +    for (const menu of this.renderRoot.querySelectorAll<HTMLDetailsElement>(selector)) {
 +      if (!menu.open) continue;
 +      menu.open = false;
@@ -736,7 +813,7 @@ index 00000000..44cdd595
 +  }
 +  private readonly dismissMenus = (event: Event): void => {
 +    const path = event.composedPath();
-+    for (const menu of this.renderRoot.querySelectorAll<HTMLDetailsElement>(".model-picker, .history, .context-picker")) {
++    for (const menu of this.renderRoot.querySelectorAll<HTMLDetailsElement>(".model-picker, .context-picker")) {
 +      if (!path.includes(menu)) menu.open = false;
 +    }
 +  };
@@ -767,6 +844,7 @@ index 00000000..44cdd595
 +    this.closeMenus();
 +    this.browseRequest++; this.browsePath = ""; this.browseEntries = [];
 +    this.view = view;
++    this.historyExpanded = false;
 +    this.follow = true;
 +    this.unsubscribe = this.runtime.subscribe(view, () => { this.requestUpdate(); });
 +  }
@@ -860,6 +938,46 @@ index 00000000..44cdd595
 +      </div>
 +    </details>`;
 +  }
++  private openConversation(view: CodexView, id: string): void {
++    this.closeMenus(); this.reviewOpen = false; this.follow = true; this.historyNavigation = undefined;
++    this.runtime?.select(view, id);
++    if (id === "") { this.historyExpanded = false; this.action((runtime, state) => runtime.list(state)); }
++    void this.updateComplete.then(() => { this.renderRoot.querySelector<HTMLTextAreaElement>("textarea")?.focus(); });
++  }
++  private conversationTime(thread: RecordValue): string {
++    const value = thread["updatedAt"] ?? thread["createdAt"];
++    const timestamp = typeof value === "number" ? (value < 1e12 ? value * 1000 : value) : typeof value === "string" ? Date.parse(value) : NaN;
++    if (!Number.isFinite(timestamp)) return "";
++    const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
++    if (seconds < 60) return "Just now";
++    if (seconds < 3600) return `${String(Math.floor(seconds / 60))} min ago`;
++    if (seconds < 86400) return `${String(Math.floor(seconds / 3600))} hr ago`;
++    if (seconds < 604800) return `${String(Math.floor(seconds / 86400))} days ago`;
++    return new Date(timestamp).toLocaleDateString();
++  }
++  private renderConversationRows(view: CodexView, threads: RecordValue[]) {
++    return repeat(threads, (thread) => text(thread["id"]), (thread) => html`
++      <button class="conversation-card" ?disabled=${view.pending || !view.connected} @click=${() => { this.openConversation(view, text(thread["id"])); }}>
++        <span class="conversation-dot" aria-hidden="true"></span><span class="conversation-copy"><span class="conversation-title">${text(thread["preview"]) || "Untitled conversation"}</span><span class="conversation-time">${this.conversationTime(thread)}</span></span>
++      </button>`);
++  }
++  private renderConversationHome(view: CodexView) {
++    const hasMore = view.threads.length > 5 || view.cursor !== "";
++    return html`<div class="conversation-home" aria-label="Conversation history">
++      <div class="home-content">
++        <div class="home-heading"><h1>Sessions</h1><button aria-label="Refresh conversations" title="Refresh conversations" ?disabled=${view.pending || !view.connected} @click=${() => { this.action((runtime, state) => runtime.list(state)); }}>↻</button></div>
++        <div class="conversation-list">${this.renderConversationRows(view, view.threads.slice(0, 5))}</div>
++        ${view.threads.length === 0 ? html`<p class="home-empty">${view.pending ? "Loading conversations…" : "No conversations yet. Send a message below to start one."}</p>` : nothing}
++        ${hasMore ? html`<button class="more-conversations" aria-expanded=${this.historyExpanded} aria-controls="older-conversations" ?disabled=${view.pending || !view.connected} @click=${() => {
++          this.historyExpanded = !this.historyExpanded; this.requestUpdate();
++          if (this.historyExpanded && view.threads.length <= 5 && view.cursor !== "") this.action((runtime, state) => runtime.list(state, true));
++        }}><span>More <span aria-hidden="true">${this.historyExpanded ? "⌃" : "⌄"}</span></span><span class="more-count">${view.threads.length > 5 ? String(view.threads.length - 5) : ""}${view.cursor !== "" ? "+" : ""}</span></button>` : nothing}
++        ${this.historyExpanded ? html`<div id="older-conversations" class="conversation-list">${this.renderConversationRows(view, view.threads.slice(5))}
++          ${view.cursor === "" ? nothing : html`<button class="load-conversations" ?disabled=${view.pending || !view.connected} @click=${() => { this.action((runtime, state) => runtime.list(state, true)); }}>Load older conversations</button>`}
++        </div>` : nothing}
++      </div>
++    </div>`;
++  }
 +  override render() {
 +    const view = this.view;
 +    if (view === undefined) return html`<p>Select a workspace to open Codex.</p>`;
@@ -867,34 +985,27 @@ index 00000000..44cdd595
 +    const busy = snapshot["busy"] === true;
 +    const items = array(snapshot["items"]).map(object);
 +    const models = view.models;
-+    const currentModel = text(snapshot["model"]);
-+    const currentEffort = text(snapshot["effort"]);
++    const currentModel = view.threadId === "" ? view.defaultModel : text(snapshot["model"]);
++    const currentEffort = view.threadId === "" ? view.defaultEffort : text(snapshot["effort"]);
 +    const modelName = view.model || currentModel;
 +    const selectedModel = models.find((model) => text(model["model"]) === modelName);
-+    const reviewOpen = this.reviewOpen;
++    const effectiveEffort = view.model !== "" ? text(selectedModel?.["defaultReasoningEffort"]) : currentEffort;
++    const home = view.threadId === "";
++    const reviewOpen = !home && this.reviewOpen;
 +    const changes = items.filter((item) => ["fileChange", "diff"].includes(text(item["kind"])));
 +    const currentThread = view.threads.find((thread) => thread["id"] === view.threadId);
 +    return html`
 +      <div class="layout" ?data-review-open=${reviewOpen}>
-+      <header><strong>Codex</strong><span class="task-title" title=${text(currentThread?.["preview"])}>${text(currentThread?.["preview"]) || "New conversation"}</span>
++      <header><div class="header-heading">${home ? html`<strong>Codex</strong>` : html`<button class="back-button new-conversation" aria-label="Back to conversations" title="Back to conversations" ?disabled=${view.pending || !view.connected} @click=${() => { this.openConversation(view, ""); }}>←</button><span class="task-title" title=${text(currentThread?.["preview"])}>${text(currentThread?.["preview"]) || "New conversation"}</span>`}</div>
 +        <span class="scope" title=${view.context.workspace.path}>${view.context.workspace.path}</span>
-+        <button class="new-conversation" aria-label="New conversation" title="New conversation" ?disabled=${view.pending || !view.connected} @click=${() => { this.closeMenus(); this.follow = true; this.action((runtime, state) => runtime.create(state)); }}>New session</button>
-+        <button class="review-toggle" aria-label="Toggle review panel" aria-expanded=${reviewOpen} @click=${() => { this.reviewOpen = !reviewOpen; this.requestUpdate(); }}>Review${changes.length > 0 ? html` <span class="count">${changes.length}</span>` : nothing}</button>
++        ${home ? html`<button class="new-conversation" aria-label="New conversation" title="New conversation" ?disabled=${view.pending || !view.connected} @click=${() => { this.openConversation(view, ""); }}>New session</button>` : nothing}
++        <button class="review-toggle" ?disabled=${home} aria-label="Toggle review panel" aria-expanded=${reviewOpen} @click=${() => { this.reviewOpen = !reviewOpen; this.requestUpdate(); }}>Review${changes.length > 0 ? html` <span class="count">${changes.length}</span>` : nothing}</button>
 +        <button ?disabled=${view.pending} @click=${() => { this.action((runtime, state) => runtime.initialize(state)); }}>Reconnect</button></header>
-+      <details class="history"><summary>Conversations</summary><div class="history-menu"><button ?disabled=${view.pending || view.threadId === ""} @click=${() => { void this.runtime?.refresh(view); }}>Refresh conversation</button>
-+        <select aria-label="Conversation" .value=${view.threadId} ?disabled=${view.pending} @change=${(event: Event) => {
-+          const target = event.target; if (target instanceof HTMLSelectElement) { this.runtime?.select(view, target.value); this.follow = true; this.closeMenus(true, ".history"); }
-+        }}><option value="">Select a conversation</option>
-+          ${view.threadId !== "" && !view.threads.some((thread) => thread["id"] === view.threadId) ? html`<option value=${view.threadId}>${view.threadId}</option>` : nothing}
-+          ${view.threads.map((thread) => html`<option value=${text(thread["id"])}>${text(thread["preview"]) || text(thread["id"])}</option>`)}
-+        </select>
-+        <button ?disabled=${view.pending || !view.connected} @click=${() => { this.action((runtime, state) => runtime.list(state)); }}>Refresh</button>
-+        ${view.cursor === "" ? nothing : html`<button ?disabled=${view.pending} @click=${() => { this.action((runtime, state) => runtime.list(state, true)); }}>More sessions</button>`}
-+      </div></details>
 +      <main>
 +      ${view.notice === "" ? nothing : html`<p role="status">${view.notice}</p>`}
 +      ${view.error === "" && text(snapshot["error"]) === "" ? nothing : html`<p class="error" role="alert">${view.error || text(snapshot["error"])}</p>`}
-+      <div class="transcript" @scroll=${(event: Event) => { const target = event.target; if (target instanceof HTMLElement) { const follow = target.scrollHeight - target.scrollTop - target.clientHeight < 60; if (follow !== this.follow) { this.follow = follow; this.requestUpdate(); } } }}>
++      ${home ? this.renderConversationHome(view) : html`<div class="transcript" @scroll=${(event: Event) => { const target = event.target; if (target instanceof HTMLElement) { const follow = target.scrollHeight - target.scrollTop - target.clientHeight < 60; if (follow !== this.follow) { this.follow = follow; this.requestUpdate(); } } }}>
++        <div class="transcript-toolbar"><button ?disabled=${view.pending} @click=${() => { void this.runtime?.refresh(view); }}>Refresh conversation</button></div>
 +        ${typeof snapshot["total"] === "number" && snapshot["total"] > items.length + view.offset ? html`<button @click=${() => { view.offset = Math.min(512, view.offset + 40); view.snapshot = { ...view.snapshot, version: -1 }; this.requestUpdate(); void this.runtime?.refresh(view); }}>Earlier messages</button>` : nothing}
 +        ${view.offset > 0 ? html`<button @click=${() => { view.offset = Math.max(0, view.offset - 40); view.snapshot = { ...view.snapshot, version: -1 }; this.requestUpdate(); void this.runtime?.refresh(view); }}>Newer messages</button>` : nothing}
 +        ${snapshot["total"] === 512 ? html`<p>Showing the most recent 512 items. Older history remains available in Codex CLI.</p>` : nothing}
@@ -903,23 +1014,23 @@ index 00000000..44cdd595
 +        ${busy ? html`<div class="working" role="status"><span class="activity-dot"></span>Working…</div>` : nothing}
 +      </div>
 +      ${!this.follow || view.offset > 0 ? html`<button class="latest" @click=${() => { this.follow = true; view.offset = 0; view.snapshot = { ...view.snapshot, version: -1 }; this.requestUpdate(); void this.runtime?.refresh(view); }}>Jump to latest</button>` : nothing}
-+      <section aria-label="Pending requests">${array(snapshot["approvals"]).map((approval) => this.renderApproval(view, object(approval)))}</section>
++      <section aria-label="Pending requests">${array(snapshot["approvals"]).map((approval) => this.renderApproval(view, object(approval)))}</section>`}
 +      <footer>
 +        ${view.references.length > 0 ? html`<div class="context-tray" aria-label="Selected workspace context">${view.references.map((path) => html`<span title=${path}>${path}<button aria-label=${`Remove ${path}`} ?disabled=${view.pending} @click=${() => { this.runtime?.saveReferences(view, view.references.filter((entry) => entry !== path)); }}>×</button></span>`)}</div>` : nothing}
-+        <textarea aria-label="Message Codex" placeholder="Ask for follow-up changes" .value=${view.draft}
++        <textarea aria-label="Message Codex" placeholder=${home ? "Ask Codex to start a new conversation" : "Ask for follow-up changes"} .value=${view.draft}
 +          @input=${(event: Event) => { if (event.target instanceof HTMLTextAreaElement) { this.historyNavigation = undefined; this.runtime?.saveDraft(view, event.target.value); this.requestUpdate(); } }}
 +          @compositionstart=${() => { this.composing = true; }} @compositionend=${() => { this.composing = false; }}
-+          @keydown=${(event: KeyboardEvent) => { this.navigateInputHistory(event, view); if (event.key === "Enter" && !event.shiftKey && !event.isComposing && !this.composing) { event.preventDefault(); if (!view.pending && !busy && view.connected && view.threadId !== "" && (view.draft.trim() !== "" || view.references.length > 0)) this.action((runtime, state) => runtime.send(state)); } }}></textarea>
++          @keydown=${(event: KeyboardEvent) => { this.navigateInputHistory(event, view); if (event.key === "Enter" && !event.shiftKey && !event.isComposing && !this.composing) { event.preventDefault(); if (!view.pending && !busy && view.connected && (view.draft.trim() !== "" || view.references.length > 0)) this.action((runtime, state) => runtime.send(state)); } }}></textarea>
 +        <div class="composer-controls">${this.renderContextPicker(view)}<span class="policy" title="Full access · no approval prompts">YOLO</span><details class="model-picker">
-+          <summary aria-label="Model and reasoning settings">${text(selectedModel?.["displayName"]) || modelName || "Model unavailable"} <span>${view.effort || currentEffort || "Effort unspecified"}</span></summary>
-+          <div class="model-menu"><label>Model<select aria-label="Model" ?disabled=${view.pending || busy} .value=${view.model} @change=${(event: Event) => { if (event.target instanceof HTMLSelectElement) { view.model = event.target.value; view.effort = ""; this.closeMenus(true, ".model-picker"); this.requestUpdate(); } }}>
++          <summary aria-label="Model and reasoning settings">${text(selectedModel?.["displayName"]) || modelName || "Model unavailable"} <span>${view.effort || effectiveEffort || "Effort unspecified"}</span></summary>
++          <div class="model-menu"><label>Model<select aria-label="Model" ?disabled=${view.pending || busy} .value=${view.model} @change=${(event: Event) => { if (event.target instanceof HTMLSelectElement) { view.model = event.target.value; view.effort = ""; this.requestUpdate(); } }}>
 +          <option value="">${currentModel || "Model unavailable"} (current)</option>${models.map((model) => html`<option value=${text(model["model"])}>${text(model["displayName"]) || text(model["model"])}</option>`)}
 +        </select></label>
-+        <label>Reasoning effort<select aria-label="Reasoning effort" ?disabled=${view.pending || busy || selectedModel === undefined} .value=${view.effort} @change=${(event: Event) => { if (event.target instanceof HTMLSelectElement) { view.effort = event.target.value; this.closeMenus(true, ".model-picker"); this.requestUpdate(); } }}>
-+          <option value="">${currentEffort || "Unspecified"} (current)</option>${array(selectedModel?.["supportedReasoningEfforts"]).map((entry) => html`<option value=${text(object(entry)["reasoningEffort"])}>${text(object(entry)["reasoningEffort"])}</option>`)}
++        <label>Reasoning effort<select aria-label="Reasoning effort" ?disabled=${view.pending || busy || selectedModel === undefined} .value=${view.effort} @change=${(event: Event) => { if (event.target instanceof HTMLSelectElement) { view.effort = event.target.value; this.requestUpdate(); } }}>
++          <option value="">${effectiveEffort || "Unspecified"} (current)</option>${array(selectedModel?.["supportedReasoningEfforts"]).map((entry) => html`<option value=${text(object(entry)["reasoningEffort"])}>${text(object(entry)["reasoningEffort"])}</option>`)}
 +        </select></label></div></details>
 +          <span class="composer-spacer"></span>
-+          <button class="primary" aria-label=${view.sending ? "Sending message" : busy ? "Stop response" : "Send message"} title=${view.sending ? "Sending message" : busy ? "Stop response" : "Send message"} aria-busy=${view.sending} ?disabled=${view.pending || view.sending || !view.connected || view.threadId === "" || (!busy && view.draft.trim() === "" && view.references.length === 0)} @click=${() => { this.action((runtime, state) => busy ? runtime.request(state, "stop", { threadId: state.threadId }) : runtime.send(state)); }}>${view.sending ? html`<span class="send-spinner" aria-hidden="true"></span>` : busy ? html`<span class="stop-icon" aria-hidden="true"></span>` : "↑"}</button>
++          <button class="primary" aria-label=${view.sending ? "Sending message" : busy ? "Stop response" : "Send message"} title=${view.sending ? "Sending message" : busy ? "Stop response" : "Send message"} aria-busy=${view.sending} ?disabled=${view.pending || view.sending || !view.connected || (!busy && view.draft.trim() === "" && view.references.length === 0)} @click=${() => { this.action((runtime, state) => busy ? runtime.request(state, "stop", { threadId: state.threadId }) : runtime.send(state)); }}>${view.sending ? html`<span class="send-spinner" aria-hidden="true"></span>` : busy ? html`<span class="stop-icon" aria-hidden="true"></span>` : "↑"}</button>
 +        </div>
 +      </footer>
 +      <div class="connection-status" role="status">${view.pending ? "Working…" : text(snapshot["status"]) || (view.connected ? "Ready" : "Connecting…")}</div>
@@ -1029,8 +1140,8 @@ index 00000000..44cdd595
 +    * { box-sizing:border-box; }
 +    .layout { position:relative; display:grid; grid-template-columns:minmax(0,1fr); grid-template-rows:46px minmax(0,1fr); height:100%; overflow:hidden; }
 +    .layout[data-review-open] { grid-template-columns:minmax(0,1fr) 300px; }
-+    header { grid-column:1 / -1; display:flex; align-items:center; gap:12px; padding:0 14px; border-bottom:1px solid var(--pi-border-muted,#ececec); min-width:0; padding-right:136px; }
-+    header strong { font-size:14px; } .task-title { font-weight:600; max-width:35%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
++    header { grid-column:1 / -1; display:flex; align-items:center; gap:12px; padding:0 14px; border-bottom:1px solid var(--pi-border-muted,#ececec); min-width:0; }
++    .header-heading { display:flex; align-items:center; gap:8px; min-width:0; max-width:45%; } header strong { font-size:14px; } .back-button { flex:none; display:grid; place-items:center; width:28px; height:28px; padding:0; font-size:18px; } .task-title { font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 +    .scope { flex:1; min-width:0; color:var(--pi-muted,#858585); font:11px/1.5 monospace; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 +    button,select,input,textarea { font:inherit; color:inherit; background:transparent; border:1px solid transparent; border-radius:7px; padding:5px 8px; }
 +    select { color-scheme:inherit; background:var(--pi-bg,#fff); color:var(--pi-text,#171717); border-color:var(--pi-border,#ddd); }
@@ -1038,10 +1149,20 @@ index 00000000..44cdd595
 +    option:checked { background:var(--pi-selection-bg,#ededed); }
 +    button,summary,select { cursor:pointer; } button:hover,summary:hover { background:var(--pi-surface-hover,#ededed); } button:disabled,select:disabled { opacity:.45; cursor:default; }
 +    button:focus-visible,select:focus-visible,summary:focus-visible,input:focus-visible,textarea:focus-visible { outline:2px solid var(--pi-accent,#777); outline-offset:2px; }
-+    .history { position:absolute; top:8px; right:12px; z-index:3; } .history>summary { padding:5px 8px; border-radius:6px; }
-+    .history-menu { position:absolute; top:34px; right:0; display:flex; flex-wrap:wrap; gap:6px; padding:12px; width:280px; border:1px solid var(--pi-border,#e4e4e4); border-radius:10px; background:var(--pi-surface,#fff); box-shadow:0 8px 24px var(--pi-shadow,#0002); }
-+    .history-menu select { width:100%; border-color:var(--pi-border-muted,#e4e4e4); }
 +    main { display:flex; flex-direction:column; min-width:0; min-height:0; position:relative; }
++    .conversation-home { flex:1; min-height:0; overflow:auto; padding:8px 16px 20px; }
++    .home-content { width:100%; }
++    .home-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:4px; }
++    .home-heading h1 { margin:0; font-size:13px; font-weight:600; } .home-heading button { padding:2px 6px; font-size:20px; color:var(--pi-muted,#888); }
++    .conversation-list { display:flex; flex-direction:column; }
++    .conversation-card { display:flex; align-items:flex-start; gap:10px; width:100%; min-height:52px; padding:9px 6px; text-align:left; border-radius:6px; }
++    .conversation-dot { flex:none; width:8px; height:8px; border-radius:50%; margin-top:6px; background:var(--pi-accent,#40a6cf); }
++    .conversation-copy { flex:1; min-width:0; } .conversation-title { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
++    .conversation-time { display:block; margin-top:2px; color:var(--pi-muted,#888); font-size:11px; }
++    .home-empty { color:var(--pi-muted,#888); padding:20px 6px; }
++    .more-conversations { display:flex; justify-content:space-between; align-items:center; width:100%; padding:5px 6px; text-align:left; border-radius:0; border-bottom:1px solid var(--pi-border-muted,#e5e5e5); color:var(--pi-muted,#888); font-size:12px; }
++    .more-count { font-size:11px; } .load-conversations { align-self:flex-start; margin:6px; font-size:12px; color:var(--pi-muted,#888); }
++    .transcript-toolbar { display:flex; justify-content:flex-end; max-width:820px; margin:0 auto 12px; color:var(--pi-muted,#888); font-size:11px; }
 +    .transcript { flex:1; min-height:0; overflow:auto; padding:30px 32px 16px; overflow-anchor:none; }
 +    article { margin:0 auto 20px; max-width:820px; } .userMessage { width:fit-content; max-width:85%; margin-left:auto; margin-right:0; padding:9px 14px; background:var(--pi-surface,#f3f3f3); border-radius:20px; }
 +    .agentMessage { padding:0; } .user-text { white-space:pre-wrap; overflow-wrap:anywhere; } .label { display:flex; justify-content:flex-end; height:0; overflow:hidden; } article:hover .label,article:focus-within .label { height:auto; } .label button { font-size:11px; color:var(--pi-muted,#777); }
@@ -1075,12 +1196,10 @@ index 00000000..44cdd595
 +    @container (max-width:520px) {
 +      .layout { grid-template-rows:88px minmax(0,1fr); }
 +      header { display:grid; grid-template-columns:auto auto auto; grid-template-rows:36px 44px; gap:0 6px; align-content:center; padding:0 10px; }
-+      .task-title,header strong { display:none; }
-+      .scope { grid-column:1 / -1; width:100%; font-size:12px; padding-right:110px; }
++      .header-heading { grid-column:1 / -1; max-width:100%; } .back-button { width:32px; height:32px; }
++      .scope { display:none; } .review-toggle { grid-column:2; }
 +      header>button { min-height:44px; font-size:12px; padding:4px 8px; }
-+      .history { top:0; right:10px; }
-+      .history>summary { min-height:44px; display:flex; align-items:center; padding:4px 8px; font-size:12px; }
-+      .history-menu { top:46px; width:min(320px,calc(100cqw - 20px)); max-height:55dvh; overflow:auto; }
++      .conversation-home { padding:6px 12px 16px; }
 +      .transcript { padding:16px 12px; overscroll-behavior:contain; }
 +      article { min-width:0; max-width:100%; }
 +      .userMessage { max-width:92%; }
@@ -1098,7 +1217,7 @@ index 00000000..44cdd595
 +      .composer-controls>button { min-height:44px; }
 +      .model-menu,.context-menu { left:0; right:0; bottom:calc(100% + 8px); width:auto; max-height:min(360px,50dvh); overscroll-behavior:contain; }
 +      .model-menu select { max-width:100%; }
-+      .context-menu button,.history-menu button { min-height:44px; }
++      .context-menu button { min-height:44px; }
 +      .context-entries { max-height:25dvh; }
 +      .connection-status { padding:3px 12px max(3px,env(safe-area-inset-bottom)); }
 +      .approval { margin:6px 8px; padding:10px; }
@@ -1346,10 +1465,10 @@ index 00000000..d3d0bcbd
 +export const createCodexConnection: ConnectionFactory = (cwd, event, exited) => new CodexProcess(cwd, event, exited);
 diff --git a/pi-web-plugins/codex/server/codexService.test.ts b/pi-web-plugins/codex/server/codexService.test.ts
 new file mode 100644
-index 00000000..abc7194f
+index 00000000..de2a0f49
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/codexService.test.ts
-@@ -0,0 +1,231 @@
+@@ -0,0 +1,243 @@
 +import { mkdtemp, mkdir, writeFile, symlink, rm } from "node:fs/promises";
 +import { join } from "node:path";
 +import { tmpdir } from "node:os";
@@ -1390,6 +1509,18 @@ index 00000000..abc7194f
 +}
 +
 +describe("Codex workspace service", () => {
++  it("returns workspace configured defaults instead of the catalog default", async () => {
++    const f = fixture();
++    f.request.mockImplementation(async (method) => {
++      if (method === "config/read") return { config: { model: "configured-model", model_reasoning_effort: "high" } };
++      if (method === "model/list") return { data: [{ model: "catalog-default", isDefault: true, defaultReasoningEffort: "low" }, { model: "configured-model", defaultReasoningEffort: "medium" }] };
++      return {};
++    });
++    expect(await f.call("models")).toMatchObject({ defaultModel: "configured-model", defaultEffort: "high" });
++    expect(f.request).toHaveBeenCalledWith("config/read", { cwd: "/work/one", includeLayers: false });
++    f.request.mockImplementation(async (method) => method === "model/list" ? { data: [{ model: "catalog-default", isDefault: true, defaultReasoningEffort: "low" }] } : { config: {} });
++    expect(await f.call("models")).toMatchObject({ defaultModel: "catalog-default", defaultEffort: "low" });
++  });
 +  it("reports configured settings from start, history, resume and setting events", async () => {
 +    const f = fixture();
 +    const original = f.request.getMockImplementation();
@@ -1406,9 +1537,9 @@ index 00000000..abc7194f
 +    expect(await f.call("snapshot", { threadId: "saved" })).toMatchObject({ model: "saved-model", effort: "medium" });
 +    expect(f.request).not.toHaveBeenCalledWith("thread/resume", expect.anything());
 +    await f.call("send", { threadId: "saved", text: "hello" });
-+    expect(await f.call("snapshot", { threadId: "saved" })).toMatchObject({ model: "resumed-model", effort: "low" });
++    expect(await f.call("snapshot", { threadId: "saved" })).toMatchObject({ model: "saved-model", effort: "medium" });
 +    await f.call("send", { threadId: "new", text: "hello", model: "chosen-model", effort: "xhigh" });
-+    expect(await f.call("snapshot", { threadId: "new" })).toMatchObject({ model: "chosen-model", effort: "xhigh" });
++    expect(await f.call("snapshot", { threadId: "new" })).toMatchObject({ model: "saved-model", effort: "medium" });
 +    f.emit({ method: "thread/settings/updated", params: { threadId: "new", threadSettings: { model: "updated-model", effort: null } } });
 +    expect(await f.call("snapshot", { threadId: "new" })).toMatchObject({ model: "updated-model", effort: "" });
 +  });
@@ -1583,10 +1714,10 @@ index 00000000..abc7194f
 +});
 diff --git a/pi-web-plugins/codex/server/codexService.ts b/pi-web-plugins/codex/server/codexService.ts
 new file mode 100644
-index 00000000..3500e33d
+index 00000000..88fe3191
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/codexService.ts
-@@ -0,0 +1,441 @@
+@@ -0,0 +1,450 @@
 +import { isAbsolute, relative, resolve, sep } from "node:path";
 +import { realpath, stat } from "node:fs/promises";
 +import type { JsonValue, ServerPluginPeerRequestContext, ServerPluginPeerChannelOpenContext, ServerPluginPeerChannel } from "@jmfederico/pi-web/server-plugin-api";
@@ -1703,11 +1834,17 @@ index 00000000..3500e33d
 +        return { authenticated: account["account"] !== null, requiresOpenaiAuth: account["requiresOpenaiAuth"] ?? true, policy, cwd: state.cwd };
 +      }
 +      case "models": {
-+        const result = await rpc("model/list", { limit: 100 });
-+        return { data: array(result["data"]).map((entry) => {
++        const [result, configuration] = await Promise.all([
++          rpc("model/list", { limit: 100 }), rpc("config/read", { cwd: state.cwd, includeLayers: false }),
++        ]);
++        const data = array(result["data"]).map((entry) => {
 +          const model = object(entry);
-+          return { id: model["id"] ?? "", model: model["model"] ?? "", displayName: model["displayName"] ?? "", supportedReasoningEfforts: model["supportedReasoningEfforts"] ?? [], defaultReasoningEffort: model["defaultReasoningEffort"] ?? "" };
-+        }) };
++          return { id: model["id"] ?? "", model: model["model"] ?? "", displayName: model["displayName"] ?? "", isDefault: model["isDefault"] === true, supportedReasoningEfforts: model["supportedReasoningEfforts"] ?? [], defaultReasoningEffort: model["defaultReasoningEffort"] ?? "" };
++        });
++        const config = object(configuration["config"]);
++        const defaultModel = text(config["model"]) || text(data.find((model) => model.isDefault)?.model);
++        const defaultEffort = text(config["model_reasoning_effort"]) || text(data.find((model) => model.model === defaultModel)?.defaultReasoningEffort);
++        return { data, defaultModel, defaultEffort };
 +      }
 +      case "list": {
 +        const result = await rpc("thread/list", { cwd: state.cwd, limit: 30, cursor: input["cursor"] === undefined ? null : string(input["cursor"], "cursor", 4096), sortKey: "updated_at", modelProviders: [] });
@@ -1721,7 +1858,7 @@ index 00000000..3500e33d
 +        const thread = object(result["thread"]);
 +        const id = string(thread["id"]);
 +        this.settings(this.remember(state, id), result);
-+        return { id };
++        return { id, model: text(result["model"]), effort: text(result["reasoningEffort"]) };
 +      }
 +      default: break;
 +    }
@@ -1766,8 +1903,11 @@ index 00000000..3500e33d
 +      thread.version++; this.notify(thread);
 +      try {
 +        const result = await rpc("turn/start", { threadId: id, input: [{ type: "text", text: prompt, text_elements: [] }], ...options });
-+        if (typeof options["model"] === "string") thread.model = options["model"];
-+        if (typeof options["effort"] === "string") thread.effort = options["effort"];
++        // Settings come from Codex, not from the requested override (which may be normalized).
++        try {
++          const current = object((await rpc("thread/read", { threadId: id, includeTurns: false }))["thread"]);
++          if (typeof current["model"] === "string") this.settings(thread, current);
++        } catch { /* The turn was accepted; keep the last authoritative settings on read failure. */ }
 +        const turn = object(result["turn"]);
 +        thread.turnId = string(turn["id"]);
 +        // A fast turn may have completed before the response arrives.
