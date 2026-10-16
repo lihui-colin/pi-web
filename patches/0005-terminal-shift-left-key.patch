@@ -1,0 +1,28 @@
+diff --git a/pi-web-plugins/terminal/terminalKeys.ts b/pi-web-plugins/terminal/terminalKeys.ts
+index 2bdbf6e3..74bb9b47 100644
+--- a/pi-web-plugins/terminal/terminalKeys.ts
++++ b/pi-web-plugins/terminal/terminalKeys.ts
+@@ -8,6 +8,7 @@ export type TerminalSoftKeyId =
+   | "ctrl-r"
+   | "ctrl-u"
+   | "ctrl-w"
++  | "shift-arrow-left"
+   | "arrow-left"
+   | "arrow-up"
+   | "arrow-down"
+@@ -42,6 +43,7 @@ export const TERMINAL_SOFT_KEYS: readonly TerminalSoftKeyDefinition[] = [
+   { id: "ctrl-r", label: "Ctrl+R", ariaLabel: "Control R", title: "Reverse search history" },
+   { id: "ctrl-u", label: "Ctrl+U", ariaLabel: "Control U", title: "Delete to the start of the line" },
+   { id: "ctrl-w", label: "Ctrl+W", ariaLabel: "Control W", title: "Delete the previous word" },
++  { id: "shift-arrow-left", label: "Shift+←", ariaLabel: "Shift Left arrow", title: "Send Shift + Left arrow" },
+   { id: "arrow-left", label: "←", ariaLabel: "Left arrow", title: "Move left" },
+   { id: "arrow-up", label: "↑", ariaLabel: "Up arrow", title: "Move up / previous command" },
+   { id: "arrow-down", label: "↓", ariaLabel: "Down arrow", title: "Move down / next command" },
+@@ -70,6 +72,7 @@ export function terminalSoftKeySequence(key: TerminalSoftKeyId, modes?: Terminal
+     case "ctrl-r": return controlSequence("r");
+     case "ctrl-u": return controlSequence("u");
+     case "ctrl-w": return controlSequence("w");
++    case "shift-arrow-left": return `${ESC}[1;2D`;
+     case "arrow-left": return cursorSequence("D", modes);
+     case "arrow-up": return cursorSequence("A", modes);
+     case "arrow-down": return cursorSequence("B", modes);
