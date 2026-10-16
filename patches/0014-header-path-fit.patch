@@ -1,0 +1,106 @@
+diff --git a/pi-web-plugins/codex/CodexPanel.test.ts b/pi-web-plugins/codex/CodexPanel.test.ts
+index f17ad5a9..c9071b4f 100644
+--- a/pi-web-plugins/codex/CodexPanel.test.ts
++++ b/pi-web-plugins/codex/CodexPanel.test.ts
+@@ -8,18 +8,18 @@ import type { RecordValue } from "./server/protocol.js";
+ customElements.define("codex-panel-test", CodexPanel);
+ const runtimes: CodexBrowserRuntime[] = [];
+ afterEach(() => { for (const runtime of runtimes) runtime.dispose(); runtimes.length = 0; document.body.replaceChildren(); localStorage.clear(); vi.useRealTimers(); vi.unstubAllGlobals(); });
+-function context(request: (operation: string, input: JsonValue) => Promise<JsonValue>, machine = "local"): WorkspacePanelContext {
++function context(request: (operation: string, input: JsonValue) => Promise<JsonValue>, machine = "local", workspacePath = "/repo"): WorkspacePanelContext {
+   return {
+     navigate: () => Promise.resolve(), machine: { id: machine, name: machine, kind: "local" },
+-    workspace: { id: "workspace", projectId: "project", path: "/repo", label: "main", isMain: true },
++    workspace: { id: "workspace", projectId: "project", path: workspacePath, label: "main", isMain: true },
+     files: { readFile: vi.fn(), listFiles: vi.fn(), writeFile: vi.fn(), deleteFile: vi.fn(), moveFile: vi.fn() },
+     peer: { request }, host: { requestRender: vi.fn() }, prompt: { insertText: vi.fn(), getText: () => "", getSelection: () => null }, terminal: { open: vi.fn(), runCommand: vi.fn() },
+   };
+ }
+-async function fixture() {
++async function fixture(workspacePath = "/repo") {
+   const request = vi.fn<(operation: string, input: JsonValue) => Promise<JsonValue>>().mockResolvedValue({ changed: false });
+   const runtime = new CodexBrowserRuntime(); runtimes.push(runtime);
+-  const scope = context(request);
++  const scope = context(request, "local", workspacePath);
+   const view = runtime.view(scope); view.connected = true; view.threadId = "thread";
+   const panel = document.createElement("codex-panel-test");
+   if (!(panel instanceof CodexPanel)) throw new Error("Expected Codex panel");
+@@ -60,6 +60,22 @@ describe("Codex panel", () => {
+       else Reflect.deleteProperty(document, "execCommand");
+     }
+   });
++  it("uses the directory name only when the full path does not fit and restores it on resize", async () => {
++    const { panel } = await fixture("/home/lihui/pi-web-opt");
++    panel.requestUpdate(); await panel.updateComplete;
++    const scope = panel.shadowRoot?.querySelector<HTMLElement>(".scope");
++    const measure = scope?.querySelector<HTMLElement>(".scope-measure");
++    if (!scope || !measure) throw new Error("Expected workspace path");
++    vi.spyOn(measure, "scrollWidth", "get").mockReturnValue(180);
++    let width = 220;
++    vi.spyOn(scope, "clientWidth", "get").mockImplementation(() => width);
++    for (const [available, expected] of [[220, "/home/lihui/pi-web-opt"], [100, "pi-web-opt"], [20, "pi-web-opt"], [180, "/home/lihui/pi-web-opt"]] as const) {
++      width = available;
++      panel.requestUpdate(); await panel.updateComplete; await panel.updateComplete;
++      expect(scope.querySelector(".scope-label")?.textContent).toBe(expected);
++      expect(scope.title).toBe("/home/lihui/pi-web-opt");
++    }
++  });
+   it("puts mobile model and permission settings in Add and restores desktop controls on resize", async () => {
+     const { panel, textarea, view } = await fixture();
+     view.models = [{ model: "test-model", displayName: "Test model" }];
+@@ -524,7 +540,7 @@ describe("Codex panel", () => {
+     const { request, view, panel, textarea } = await fixture();
+     view.models = [{ model: "test-model", displayName: "Test model", supportedReasoningEfforts: [{ reasoningEffort: "high" }] }];
+     panel.requestUpdate(); await panel.updateComplete;
+-    expect(panel.shadowRoot?.querySelector("header .scope")?.textContent).toBe("repo");
++    expect(panel.shadowRoot?.querySelector("header .scope-label")?.textContent).toBe("/repo");
+     expect(panel.shadowRoot?.querySelector("header .scope")?.getAttribute("title")).toBe("/repo");
+     const model = panel.shadowRoot?.querySelector('footer select[aria-label="Model"]');
+     const effort = panel.shadowRoot?.querySelector('footer select[aria-label="Reasoning effort"]');
+diff --git a/pi-web-plugins/codex/CodexPanel.ts b/pi-web-plugins/codex/CodexPanel.ts
+index 0ed55e0b..5b712a14 100644
+--- a/pi-web-plugins/codex/CodexPanel.ts
++++ b/pi-web-plugins/codex/CodexPanel.ts
+@@ -103,6 +103,7 @@ export class CodexPanel extends LitElement {
+   private browseFilter = "";
+   private reviewOpen = false;
+   private historyExpanded = false;
++  private compactScope = false;
+   private readonly resizeObserver = new ResizeObserver(() => { this.requestUpdate(); });
+   private readonly markdown = new Map<string, { text: string; html: string }>();
+ 
+@@ -155,6 +156,15 @@ export class CodexPanel extends LitElement {
+     this.unsubscribe = this.runtime.subscribe(view, () => { this.requestUpdate(); });
+   }
+   protected override updated(): void {
++    const scope = this.renderRoot.querySelector<HTMLElement>(".scope");
++    const fullPath = scope?.querySelector<HTMLElement>(".scope-measure");
++    if (scope && fullPath && scope.clientWidth > 0) {
++      const compact = fullPath.scrollWidth > scope.clientWidth;
++      if (compact !== this.compactScope) {
++        this.compactScope = compact;
++        this.requestUpdate();
++      }
++    }
+     if (this.view?.pending || this.view?.sending || this.view?.snapshot["busy"] === true) this.closeMenus(false, ".permission-picker");
+     const transcript = this.renderRoot.querySelector(".transcript");
+     for (const pre of this.renderRoot.querySelectorAll(".markdown pre")) {
+@@ -393,7 +403,7 @@ export class CodexPanel extends LitElement {
+     return html`
+       <div class="layout" ?data-review-open=${reviewOpen}>
+       <header><div class="header-heading">${home ? html`<strong>Codex</strong>` : html`<button class="back-button new-conversation" aria-label="Back to conversations" title="Back to conversations" ?disabled=${view.pending || !view.connected} @click=${() => { this.openConversation(view, ""); }}>←</button><span class="task-title" title=${text(currentThread?.["preview"])}>${text(currentThread?.["preview"]) || "New conversation"}</span>`}</div>
+-        <span class="scope" title=${view.context.workspace.path}>${view.context.workspace.path.split(/[\\/]/).filter(Boolean).at(-1) || view.context.workspace.path}</span>
++        <span class="scope" title=${view.context.workspace.path}><span class="scope-measure" aria-hidden="true">${view.context.workspace.path}</span><span class="scope-label">${this.compactScope ? view.context.workspace.path.split(/[\\/]/).filter(Boolean).at(-1) || view.context.workspace.path : view.context.workspace.path}</span></span>
+         <button class="new-conversation new-chat" aria-label="New chat" title="New chat" ?disabled=${view.pending || !view.connected} @click=${() => { this.openConversation(view, ""); }}><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 4H7a4 4 0 0 0-4 4v9a4 4 0 0 0 4 4h9a4 4 0 0 0 4-4v-5"></path><path d="m10 14 1-4 7-7a2.12 2.12 0 0 1 3 3l-7 7-4 1Z"></path></svg></button>
+         ${this.isMobileComposer() ? html`<details class="header-actions"><summary aria-label="More actions" title="More actions">···</summary><div class="header-actions-menu">${headerActions}</div></details>` : headerActions}</header>
+       <main>
+@@ -537,7 +547,8 @@ export class CodexPanel extends LitElement {
+     .header-actions-menu { position:absolute; z-index:6; top:100%; right:0; min-width:132px; padding:6px; border:1px solid var(--pi-border,#ddd); border-radius:10px; background:var(--pi-surface,#fff); box-shadow:0 8px 24px var(--pi-shadow,#0002); }
+     .header-actions-menu>button { display:flex; align-items:center; gap:8px; width:100%; min-height:44px; padding:8px; border-radius:7px; white-space:nowrap; }
+     .header-actions-menu>.reconnect::after { content:"Reconnect"; font-size:12px; }
+-    .scope { flex:1; min-width:0; color:var(--pi-muted,#858585); font:11px/1.5 monospace; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
++    .scope { position:relative; flex:1; min-width:0; color:var(--pi-muted,#858585); font:11px/1.5 monospace; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
++    .scope-measure { position:absolute; visibility:hidden; pointer-events:none; width:max-content; white-space:nowrap; }
+     button,select,input,textarea { font:inherit; color:inherit; background:transparent; border:1px solid transparent; border-radius:7px; padding:5px 8px; }
+     select { color-scheme:inherit; background:var(--pi-bg,#fff); color:var(--pi-text,#171717); border-color:var(--pi-border,#ddd); }
+     .new-chat,.reconnect { flex:none; display:grid; place-items:center; width:32px; height:32px; padding:5px; border-radius:50%; color:var(--pi-muted,#858585); } .new-chat svg,.reconnect svg { width:22px; height:22px; fill:none; stroke:currentColor; stroke-width:1.7; stroke-linecap:round; stroke-linejoin:round; }

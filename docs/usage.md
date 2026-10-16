@@ -105,16 +105,15 @@ sh scripts/install.sh
 
 更新基线时，应验证补丁在新提交上的测试和构建，再同时提交 `patches/base-commit` 和补丁。仅运行 `sync.sh` 不会升级基线，安装始终可复现同一组上游源码与补丁。
 
-## 统一入口更新
+## 运行脚本更新
 
 ```bash
-bash scripts/install.sh update                  # 更新 Pi Agent，并同步、构建补丁版 pi-web
-bash scripts/install.sh update --pi-only        # 只更新 Pi Agent
-bash scripts/install.sh update --web-only       # 只同步、构建补丁版 pi-web
-bash scripts/install.sh update --dry-run        # 预览操作
-bash scripts/install.sh update --no-restart     # 不停止或重启服务
+bash scripts/pi-web-run-jmfederico.sh update                  # 更新 Pi Agent，并同步、构建补丁版 pi-web
+bash scripts/pi-web-run-jmfederico.sh update --pi-only        # 只更新 Pi Agent
+bash scripts/pi-web-run-jmfederico.sh update --web-only       # 只同步、构建补丁版 pi-web
+bash scripts/pi-web-run-jmfederico.sh update --dry-run        # 预览操作
 ```
 
 `install` 使用本地缓存的固定提交；`update` 默认先将 Pi Agent 更新到 latest，再获取官方 `main` 最新提交并原子写入 `patches/base-commit`，随后调用 `sync.sh --local` 应用补丁，随后安装依赖、测试、构建和替换全局命令。更新不需要 origin 的推送权限，也不会自动更新补丁分支；新基线如与补丁冲突，更新停止并保留新基线和冲突目录，需适配补丁后重试。拉取失败不改写基线，`--dry-run` 不拉取或改写基线。补丁冲突或测试构建失败时，不会替换已安装的 pi-web；之前已完成的 Agent 更新或源码同步不会回滚。
 
-`update` 默认只重启原先正在运行的服务；`--restart` 会在更新后启动服务，`--no-restart` 保持服务原有状态。更新失败时可能保留已停止的服务，修复后可通过运行脚本启动。支持 `--update-relay`；update 的 Agent 目标固定为 `latest`，`PI_VERSION` 只控制普通 install 补装 Agent 的版本。pi-web 使用 `patches/base-commit`，不使用 `PI_WEB_VERSION`。运行脚本 `pi-web-run-jmfederico.sh update` 转入此入口时强制使用 `--no-restart`，不启停服务，也不接受 `--restart`。更新完成后，按需手动执行运行脚本的 `stop --port N` 和 `start --port N`。旧的 `update-pi-web-jmfederico.sh` 已移除；不带子命令仍默认执行 `install`。
+`update` 不启停服务。支持 `--update-relay`；update 的 Agent 目标固定为 `latest`，`PI_VERSION` 只控制普通 install 补装 Agent 的版本。pi-web 使用 `patches/base-commit`，不使用 `PI_WEB_VERSION`。更新仅通过运行脚本 `pi-web-run-jmfederico.sh update` 执行；`install.sh` 只负责安装，不接受 `update` 子命令。更新完成后，按需手动执行运行脚本的 `stop --port N` 和 `start --port N`。旧的 `update-pi-web-jmfederico.sh` 已移除；不带子命令仍默认执行 `install`。

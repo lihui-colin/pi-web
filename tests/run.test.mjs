@@ -19,7 +19,7 @@ function fixture() {
   script('ss', 'exit 0');
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}` };
   for (const key of Object.keys(env)) if (key.startsWith('PI_WEB_')) delete env[key];
-  const run = (action, port, overrides = {}) => spawnSync('bash', [join(root, 'scripts/run.sh'), action, '--port', port], {
+  const run = (action, port, overrides = {}) => spawnSync('bash', [join(root, 'scripts/run.sh'), action, ...(port === undefined ? [] : ['--port', port])], {
     env: { ...env, ...overrides }, encoding: 'utf8', timeout: 10000,
   });
   const pids = [];
@@ -29,17 +29,15 @@ function fixture() {
   } };
 }
 
-test('update forwards no-restart and rejects an automatic restart request', () => {
+test('removed restart command and update options are rejected', () => {
   const f = fixture();
   try {
-    writeFileSync(join(f.root, 'scripts/install.sh'), '#!/bin/bash\nprintf "%s\\n" "$@"\n', { mode: 0o755 });
-    const result = f.run('update', '25224');
-    assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(result.stdout.trim().split('\n'), ['update', '--no-restart']);
-    assert.equal(existsSync(join(f.root, 'data/pi-web/25224/server.pid')), false);
-    const rejected = spawnSync('bash', [join(f.root, 'scripts/run.sh'), 'update', '--restart'], { encoding: 'utf8' });
-    assert.equal(rejected.status, 2);
-    assert.match(rejected.stderr, /update 不启动服务/);
+    copyFileSync('scripts/install.sh', join(f.root, 'scripts/install.sh'));
+    for (const args of [['restart'], ['update', '--restart'], ['update', '--no-restart']]) {
+      const result = spawnSync('bash', [join(f.root, 'scripts/run.sh'), ...args], { encoding: 'utf8' });
+      assert.equal(result.status, 2, result.stderr);
+      assert.equal(existsSync(join(f.root, 'data/pi-web/8024/server.pid')), false);
+    }
   } finally { f.cleanup(); }
 });
 
@@ -62,6 +60,51 @@ test('two ports have independent state, socket and processes; stopping one prese
     assert.equal(f.run('status', '8425').status, 0);
   } finally { f.cleanup(); }
 });
+
+test('stop without a port stops the sole non-default instance', () => {
+  const f = fixture();
+  try {
+    assert.equal(f.run('start', '8425').status, 0);
+    const dir = join(f.root, 'data/pi-web/8425');
+    for (const service of ['sessiond', 'server']) f.pids.push(Number(readFileSync(join(dir, `${service}.pid`), 'utf8')));
+    mkdirSync(join(f.root, 'data/pi-web/notes'));
+    writeFileSync(join(f.root, 'data/pi-web/legacy.log'), '');
+    const result = f.run('stop');
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /唯一实例: 8425/);
+    for (const service of ['sessiond', 'server']) assert.equal(existsSync(join(dir, `${service}.pid`)), false);
+  } finally { f.cleanup(); }
+});
+
+for (const [name, ports, port, overrides, target] of [
+  ['multiple instances', ['8024', '8425'], undefined, {}, '8024'],
+  ['explicit argument', ['8425'], '8024', {}, '8024'],
+  ['environment port', ['8425'], undefined, { PI_WEB_PORT: '8024' }, '8024'],
+  ['run directory override', ['8425'], undefined, { PI_WEB_RUN_DIR: 'custom' }, 'custom'],
+  ['no instances', [], undefined, {}, '8024'],
+]) {
+  test(`stop preserves target selection with ${name}`, () => {
+    const f = fixture();
+    try {
+      for (const instance of ports) {
+        const dir = join(f.root, 'data/pi-web', instance);
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, 'server.pid'), '999999999');
+      }
+      const env = { ...overrides };
+      if (env.PI_WEB_RUN_DIR) {
+        env.PI_WEB_RUN_DIR = join(f.root, 'custom');
+        mkdirSync(env.PI_WEB_RUN_DIR);
+        writeFileSync(join(env.PI_WEB_RUN_DIR, 'server.pid'), '999999999');
+      }
+      const result = f.run('stop', port, env);
+      assert.equal(result.status, 0, result.stderr);
+      assert.doesNotMatch(result.stdout, /唯一实例/);
+      for (const instance of ports) assert.equal(existsSync(join(f.root, 'data/pi-web', instance, 'server.pid')), instance !== target);
+      if (env.PI_WEB_RUN_DIR) assert.equal(existsSync(join(env.PI_WEB_RUN_DIR, 'server.pid')), false);
+    } finally { f.cleanup(); }
+  });
+}
 
 test('explicit directory and socket overrides reach both processes', () => {
   const f = fixture();

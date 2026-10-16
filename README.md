@@ -14,7 +14,7 @@ sh scripts/sync.sh  # 获取 patches/base-commit 指定的上游提交
 sh scripts/install.sh
 ```
 
-安装脚本使用本地缓存的 `patches/base-commit` 指定提交，在独立目录应用补丁、安装依赖并测试构建，成功后将全局 `pi-web`、`pi-web-server` 和 `pi-web-sessiond` 命令链接到新版本，最后打印安装目录。若 PATH 中没有 `pi` 命令，会自动全局安装 Pi Agent（默认 `latest`，可用 `PI_VERSION` 指定）；已有 Agent 保留当前版本。它不同步远端、不注册或启动后台服务。已运行的服务需要手动重启才能使用新版本。不再提供 Swap Chat / Workspace Panel 命令，旧的浏览器布局交换偏好不再生效。
+安装脚本使用本地缓存的 `patches/base-commit` 指定提交，在独立目录应用补丁、安装依赖并测试构建，成功后将全局 `pi-web`、`pi-web-server` 和 `pi-web-sessiond` 命令链接到新版本，最后打印安装目录。若 PATH 中没有 `pi` 命令，会自动全局安装 Pi Agent（默认 `latest`，可用 `PI_VERSION` 指定）；已有 Agent 保留当前版本。它不同步远端、不注册或启动后台服务。已运行的服务需要手动先停止再启动才能使用新版本。不再提供 Swap Chat / Workspace Panel 命令，旧的浏览器布局交换偏好不再生效。
 
 详细的同步、冲突处理和补丁维护方法见 [使用文档](docs/usage.md)。
 
@@ -22,7 +22,7 @@ sh scripts/install.sh
 
 安装时默认最多并行运行 4 个测试工作进程，单个测试时限为 30 秒，避免大量并发构建引发超时。可用 `PI_WEB_TEST_MAX_WORKERS` 和 `PI_WEB_TEST_TIMEOUT_MS` 覆盖，例如 `PI_WEB_TEST_MAX_WORKERS=2 PI_WEB_TEST_TIMEOUT_MS=60000 bash scripts/install.sh`。测试失败仍会中止安装，保留原有全局版本。
 
-统一入口支持 `bash scripts/install.sh update`：更新 Pi Agent 到 latest、将官方 main 最新提交写入 patches/base-commit、应用补丁并测试构建安装，按选项重启服务。只更新 Agent 可加 `--pi-only`，只更新补丁版 pi-web 可加 `--web-only`，预览可加 `--dry-run`。
+运行脚本支持 `bash scripts/pi-web-run-jmfederico.sh update`：更新 Pi Agent 到 latest、将官方 main 最新提交写入 patches/base-commit、应用补丁并测试构建安装，不启停服务。只更新 Agent 可加 `--pi-only`，只更新补丁版 pi-web 可加 `--web-only`，预览可加 `--dry-run`。
 
 ## 手动启动与管理服务
 
@@ -35,7 +35,8 @@ bash scripts/pi-web-run-jmfederico.sh start               # 启动，默认端�
 bash scripts/pi-web-run-jmfederico.sh status              # 查看进程和 HTTP 状态
 bash scripts/pi-web-run-jmfederico.sh logs                # 跟随日志，Ctrl+C 退出查看
 bash scripts/pi-web-run-jmfederico.sh stop                # 停止两个服务
-bash scripts/pi-web-run-jmfederico.sh restart --port 8080 # 重启 8080 实例
+bash scripts/pi-web-run-jmfederico.sh stop --port 8080   # 停止 8080 实例
+bash scripts/pi-web-run-jmfederico.sh start --port 8080  # 启动 8080 实例
 bash scripts/pi-web-run-jmfederico.sh status --port 8080  # 探测指定端口
 bash scripts/pi-web-run-jmfederico.sh --help              # 查看完整帮助
 ```
@@ -55,7 +56,7 @@ bash scripts/pi-web-run-jmfederico.sh --help              # 查看完整帮助
 PI_WEB_HOST=127.0.0.1 PI_WEB_PORT=8080 bash scripts/pi-web-run-jmfederico.sh start
 ```
 
-配置不会自动保存；后续 `restart`、`status` 和涉及重启的 `update` 命令应传入相同配置，或提前 `export` 环境变量。服务运行时修改配置需要执行 `restart`。
+配置不会自动保存；后续 `stop`、`start` 和 `status` 命令应传入相同配置，或提前 `export` 环境变量。服务运行时修改配置需要先执行 `stop`，再执行 `start`。
 
 默认按端口隔离实例，状态、socket、日志和 PID 文件全部保存在仓库 `data/pi-web/<port>/` 下，不再使用 `~/.pi-web/`。例如可以同时运行：
 
@@ -65,11 +66,11 @@ bash scripts/pi-web-run-jmfederico.sh start --port 8425
 bash scripts/pi-web-run-jmfederico.sh stop --port 8424  # 只停止 8424
 ```
 
-`start`、`stop`、`restart`、`status`、`logs` 和 `update` 都按端口选择实例；不传端口时选择 `PI_WEB_PORT` 或默认的 8024。`restart --port 8425` 重启的是 8425 实例，不会将 8424 迁移到新端口。显式设置状态或端点环境变量会覆盖隔离默认值，因此多实例时不要让这些变量指向同一目录或端点（包括 `PI_WEB_SESSIOND_PORT` 和 `PI_WEB_SESSIOND_URL`）。
+`start`、`stop`、`status`、`logs` 和 `update` 都按端口选择实例；不传端口时选择 `PI_WEB_PORT` 或默认的 8024。例外：`stop` 未指定 `--port`、`PI_WEB_PORT` 或 `PI_WEB_RUN_DIR` 时，若 `data/pi-web` 下只有一个有效端口实例目录，就自动停止该实例；没有或存在多个实例时仍使用默认 8024。`stop --port 8425` 只停止 8425 实例。显式设置状态或端点环境变量会覆盖隔离默认值，因此多实例时不要让这些变量指向同一目录或端点（包括 `PI_WEB_SESSIOND_PORT` 和 `PI_WEB_SESSIOND_URL`）。
 
 `logs` 默认跟随实例目录中的 `server.log`，不存在时跟随 `sessiond.log`；每次启动对应进程时会覆盖其日志。原先的 `~/.pi-web/` 状态和 `data/pi-web/*.pid` 不会自动迁移或接管，旧实例需通过原管理方式停止。更新会替换全局程序版本；运行脚本的 update 不启停服务。
 
-该脚本也可调用统一更新入口：
+该脚本也负责更新：
 
 ```bash
 bash scripts/pi-web-run-jmfederico.sh update --dry-run    # 预览更新
@@ -78,6 +79,6 @@ bash scripts/pi-web-run-jmfederico.sh update --web-only   # 只更新补丁版 p
 bash scripts/pi-web-run-jmfederico.sh update --pi-only    # 只更新 Pi Agent
 ```
 
-运行脚本的 `update` 转交给 `scripts/install.sh update --no-restart`，不停止、不启动或重启服务，且不接受 `--restart`。更新后需要生效时，手动执行同一端口的 `stop`、`start`。直接调用安装脚本时，默认升级 Pi Agent 到 latest、获取官方 main 最新提交并写入 `patches/base-commit`，然后构建安装补丁版 pi-web。`PI_VERSION` 仅用于首次 install 补装 Agent。`--no-restart` 跳过重启，`--restart` 在服务原先未运行时也启动，`--update-relay` 同步升级全局 relay skill。`update` 自动跟随官方 `main`；补丁冲突时停止并保留新基线和现场，需要适配补丁后重试。`--dry-run` 不改写基线。
+运行脚本的 `update` 负责更新，不启停服务。更新后需要生效时，手动执行同一端口的 `stop`、`start`。默认升级 Pi Agent 到 latest、获取官方 main 最新提交并写入 `patches/base-commit`，然后构建安装补丁版 pi-web。`PI_VERSION` 仅用于首次 install 补装 Agent。`--update-relay` 同步升级全局 relay skill。`update` 自动跟随官方 `main`；补丁冲突时停止并保留新基线和现场，需要适配补丁后重试。`--dry-run` 不改写基线。
 
 新增独立 **Codex** 插件，可在 Terminal 后打开 Codex 对话、恢复历史并处理审批。安装前置条件和使用限制见 [Codex 插件说明](docs/codex-usage.md)。

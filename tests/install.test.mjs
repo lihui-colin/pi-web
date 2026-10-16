@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, copyFileSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, copyFileSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -49,7 +49,7 @@ function fixture({ conflict = false, failure = '', agent = true, agentVersion = 
   writeFileSync(join(source, 'patches', '0001-layout.patch'), patch);
   writeFileSync(join(source, 'patches', 'base-commit'), (conflict ? git(upstream, 'rev-parse', 'HEAD') : baseCommit) + '\n');
   mkdirSync(join(source, 'scripts'));
-  for (const file of ['install.sh', 'sync.sh']) copyFileSync(join(repo, 'scripts', file), join(source, 'scripts', file));
+  for (const file of ['install.sh', 'sync.sh', 'pi-web-run-jmfederico.sh']) copyFileSync(join(repo, 'scripts', file), join(source, 'scripts', file));
   git(source, 'add', '.');
   git(source, 'commit', '-m', 'patch-only root');
   git(source, 'remote', 'add', 'origin', origin);
@@ -287,13 +287,19 @@ test('failed rebuild preserves the previously installed global command', () => {
   assert.equal(execFileSync(process.execPath, [command], { encoding: 'utf8' }).trim(), 'patched');
 });
 
-function updateFixture() {
+function updateFixture({ running = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'pi-web update test '));
   roots.push(root);
   const bin = join(root, 'bin');
   const log = join(root, 'calls.log');
   mkdirSync(bin);
   writeFileSync(log, '');
+  mkdirSync(join(root, 'scripts'));
+  copyFileSync(join(repo, 'scripts/install.sh'), join(root, 'scripts/install.sh'));
+  copyFileSync(join(repo, 'scripts/pi-web-run-jmfederico.sh'), join(root, 'scripts/pi-web-run-jmfederico.sh'));
+  const runDir = join(root, 'run');
+  mkdirSync(runDir);
+  if (running) writeFileSync(join(runDir, 'server.pid'), String(process.pid));
   writeFileSync(join(bin, 'npm'), `#!/bin/sh
 printf 'npm %s\\n' "$*" >> "$TEST_LOG"
 case "$*" in
@@ -306,11 +312,29 @@ if [ "$1" = --version ]; then echo v22.19.0; exit 0; fi
 exec "$REAL_NODE" "$@"
 `);
   writeFileSync(join(bin, 'pi'), '#!/bin/sh\necho 0.85.1\n');
+  writeFileSync(join(bin, 'curl'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  for (const name of ['pi-web-server', 'pi-web-sessiond']) {
+    writeFileSync(join(bin, name), `#!/bin/sh\nprintf 'service start\\n' >> "$TEST_LOG"\nexit 1\n`, { mode: 0o755 });
+  }
   for (const file of ['node', 'npm', 'pi']) chmodSync(join(bin, file), 0o755);
-  const run = (...args) => spawnSync('sh', [join(repo, 'scripts/install.sh'), ...args], {
-    encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, TEST_LOG: log, REAL_NODE: process.execPath },
+  const run = (...args) => spawnSync('bash', [join(root, 'scripts/pi-web-run-jmfederico.sh'), ...args], {
+    encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, TEST_LOG: log, REAL_NODE: process.execPath, PI_WEB_RUN_DIR: runDir },
   });
-  return { run, log };
+  return { run, log, runDir };
+}
+
+for (const running of [false, true]) {
+  test(`update leaves services untouched: running=${running}`, () => {
+    const f = updateFixture({ running });
+    const result = f.run('update', '--pi-only');
+    assert.equal(result.status, 0, result.stderr);
+    const calls = readFileSync(f.log, 'utf8').trim().split('\n');
+    assert.deepEqual(calls.filter(line => /^service (start|stop)$/.test(line)), []);
+    assert.ok(calls.some(line => line.startsWith('npm install')));
+    assert.equal(existsSync(join(f.runDir, 'server.pid')), running);
+    if (running) assert.equal(readFileSync(join(f.runDir, 'server.pid'), 'utf8'), String(process.pid));
+    assert.equal(existsSync(join(f.runDir, 'sessiond.pid')), false);
+  });
 }
 
 for (const [option, pkg, excluded] of [
@@ -318,7 +342,7 @@ for (const [option, pkg, excluded] of [
 ]) {
   test(`update ${option} installs only the selected package even when not installed`, () => {
     const f = updateFixture();
-    const result = f.run('update', option, '--no-restart');
+    const result = f.run('update', option);
     assert.equal(result.status, 0, result.stderr);
     const installs = readFileSync(f.log, 'utf8').split('\n').filter(line => line.startsWith('npm install'));
     assert.equal(installs.length, 1);
@@ -329,7 +353,7 @@ for (const [option, pkg, excluded] of [
 
 test('update dry-run prints both updates without installing', () => {
   const f = updateFixture();
-  const result = f.run('update', '--dry-run', '--no-restart');
+  const result = f.run('update', '--dry-run');
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /\[dry-run\] npm install -g --ignore-scripts @earendil-works\/pi-coding-agent@/);
   assert.match(result.stdout, /\[dry-run\] sh .*scripts\/sync.sh/);
@@ -337,16 +361,25 @@ test('update dry-run prints both updates without installing', () => {
   assert.ok(!readFileSync(f.log, 'utf8').includes('npm install'));
 });
 
+test('install rejects update and update options without installing', () => {
+  const f = fixture();
+  for (const args of [['update'], ['update', '--web-only'], ['--pi-only'], ['install', '--dry-run']]) {
+    assert.equal(f.run('install.sh', args).status, 2);
+  }
+  assert.equal(readFileSync(f.log, 'utf8'), '');
+  assert.doesNotMatch(f.run('install.sh', ['--help']).stdout, /--pi-only|--web-only|--dry-run/);
+});
+
 test('unified entry rejects invalid arguments before executing npm', () => {
   const f = updateFixture();
-  for (const args of [['invalid'], ['install', '--dry-run'], ['update', '--pi-only', '--web-only'], ['update', '--invalid']]) {
+  for (const args of [['invalid'], ['install', '--dry-run'], ['update', '--pi-only', '--web-only'], ['update', '--invalid'], ['update', '--restart'], ['update', '--no-restart']]) {
     assert.notEqual(f.run(...args).status, 0);
   }
   assert.equal(readFileSync(f.log, 'utf8'), '');
   for (const args of [['--help'], ['install', '--help'], ['update', '--help']]) {
     const result = f.run(...args);
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /install\|update/);
+    assert.match(result.stdout, /pi-web-run-jmfederico.sh update/);
   }
 });
 
@@ -354,7 +387,7 @@ test('unified entry rejects invalid arguments before executing npm', () => {
 for (const options of [[], ['--web-only']]) {
 test(`update ${options.join(' ')} synchronizes upstream and installs patched global commands`, () => {
   const f = fixture();
-  const result = f.run('install.sh', ['update', ...options, '--no-restart']);
+  const result = f.run('pi-web-run-jmfederico.sh', ['update', ...options]);
   assert.equal(result.status, 0, result.stderr);
   assert.equal(git(f.origin, 'for-each-ref', '--format=%(refname)'), '');
   const calls = readFileSync(f.log, 'utf8');
@@ -398,14 +431,14 @@ test('Agent install failure stops before replacing pi-web', () => {
 
 test('update --web-only does not bootstrap a missing Agent', () => {
   const f = fixture({ agent: false });
-  const result = f.run('install.sh', ['update', '--web-only', '--no-restart']);
+  const result = f.run('pi-web-run-jmfederico.sh', ['update', '--web-only']);
   assert.equal(result.status, 0, result.stderr);
   assert.ok(!readFileSync(f.log, 'utf8').includes('npm install -g --ignore-scripts @earendil-works/pi-coding-agent@'));
 });
 
 test('update uses latest Agent even when install bootstrap version is pinned', () => {
   const f = fixture({ agentVersion: '0.85.1' });
-  const result = f.run('install.sh', ['update', '--pi-only', '--no-restart']);
+  const result = f.run('pi-web-run-jmfederico.sh', ['update', '--pi-only']);
   assert.equal(result.status, 0, result.stderr);
   assert.match(readFileSync(f.log, 'utf8'), /npm install -g --ignore-scripts @earendil-works\/pi-coding-agent@latest/);
   assert.equal(readFileSync(join(f.source, 'patches/base-commit'), 'utf8').trim(), f.baseCommit);
@@ -414,10 +447,10 @@ test('update uses latest Agent even when install bootstrap version is pinned', (
 test('update dry-run and failed upstream fetch preserve the baseline', () => {
   const f = fixture();
   const before = readFileSync(join(f.source, 'patches/base-commit'), 'utf8');
-  assert.equal(f.run('install.sh', ['update', '--web-only', '--dry-run', '--no-restart']).status, 0);
+  assert.equal(f.run('pi-web-run-jmfederico.sh', ['update', '--web-only', '--dry-run']).status, 0);
   assert.equal(readFileSync(join(f.source, 'patches/base-commit'), 'utf8'), before);
   git(f.upstream, 'branch', '-m', 'unavailable-main');
-  assert.notEqual(f.run('install.sh', ['update', '--web-only', '--no-restart']).status, 0);
+  assert.notEqual(f.run('pi-web-run-jmfederico.sh', ['update', '--web-only']).status, 0);
   assert.equal(readFileSync(join(f.source, 'patches/base-commit'), 'utf8'), before);
   assert.ok(!readFileSync(f.log, 'utf8').includes('built '));
 });
