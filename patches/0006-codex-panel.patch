@@ -1,0 +1,2110 @@
+diff --git a/.changeset/codex-workspace-plugin.md b/.changeset/codex-workspace-plugin.md
+new file mode 100644
+index 00000000..b864cc1c
+--- /dev/null
++++ b/.changeset/codex-workspace-plugin.md
+@@ -0,0 +1,5 @@
++---
++"@jmfederico/pi-web": patch
++---
++
++Add an optional Codex workspace plugin with persistent conversations, streamed responses, tool output, approvals, and model selection using the workspace machine's Codex CLI. Restart sessiond after installing the plugin.
+diff --git a/pi-web-plugins/codex/CodexBrowserRuntime.ts b/pi-web-plugins/codex/CodexBrowserRuntime.ts
+new file mode 100644
+index 00000000..14ddbef5
+--- /dev/null
++++ b/pi-web-plugins/codex/CodexBrowserRuntime.ts
+@@ -0,0 +1,235 @@
++import type { PluginPeerChannel, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
++import { array, errorText, object, text, type RecordValue } from "./server/protocol.js";
++
++export interface CodexView {
++  context: WorkspacePanelContext;
++  key: string;
++  threadId: string;
++  draft: string;
++  references: string[];
++  model: string;
++  effort: string;
++  models: RecordValue[];
++  threads: RecordValue[];
++  cursor: string;
++  snapshot: RecordValue;
++  error: string;
++  notice: string;
++  connected: boolean;
++  pending: boolean;
++  offset: number;
++  listeners: Set<() => void>;
++  timer: ReturnType<typeof setTimeout> | undefined;
++  polling: boolean;
++  generation: number;
++}
++
++/** Per-machine/workspace state survives panel unmounts, without owning server processes. */
++export class CodexBrowserRuntime {
++  private readonly views = new Map<string, CodexView>();
++  private disposed = false;
++  private readonly channels = new Map<CodexView, { abort: AbortController; channel?: PluginPeerChannel; retry?: ReturnType<typeof setTimeout> }>();
++  private readonly dirty = new Set<CodexView>();
++  private readonly syncErrors = new Map<CodexView, string>();
++  private readonly memory = new Map<string, string>();
++  view(context: WorkspacePanelContext): CodexView {
++    const key = JSON.stringify([context.machine.id, context.workspace.projectId, context.workspace.id, context.workspace.path]);
++    let view = this.views.get(key);
++    if (view === undefined) {
++      const threadId = this.read(`${key}:selected`);
++      view = { context, key, threadId, draft: this.read(`${key}:${threadId}:draft`), references: this.readReferences(key, threadId), model: "", effort: "", models: [], threads: [], cursor: "", snapshot: {}, error: "", notice: "", connected: false, pending: false, offset: 0, listeners: new Set(), timer: undefined, polling: false, generation: 0 };
++      this.views.set(key, view);
++    }
++    view.context = context;
++    return view;
++  }
++  subscribe(view: CodexView, listener: () => void): () => void {
++    view.listeners.add(listener);
++    if (!view.connected && !view.pending) void this.run(view, () => this.initialize(view));
++    else { this.schedule(view, 0); this.connect(view); }
++    return () => { view.listeners.delete(listener); if (view.listeners.size === 0 && view.snapshot["busy"] !== true) this.disconnect(view); };
++  }
++  badge(context: WorkspacePanelContext): string | number | undefined {
++    const view = this.view(context);
++    const count = array(view.snapshot["approvals"]).length;
++    return count > 0 ? count : view.snapshot["busy"] === true ? "…" : undefined;
++  }
++  async request(view: CodexView, operation: string, input: RecordValue = {}): Promise<RecordValue> {
++    if (this.disposed) throw new Error("Codex plugin is disabled");
++    const peer = view.context.peer;
++    if (peer?.request === undefined) throw new Error("Codex backend unavailable. Restart sessiond after installing the plugin.");
++    return object(await peer.request(operation, input));
++  }
++  async initialize(view: CodexView): Promise<void> {
++    this.disconnect(view); view.generation++;
++    const status = await this.request(view, "status");
++    view.connected = true;
++    view.notice = status["authenticated"] === false && status["requiresOpenaiAuth"] !== false
++      ? "Sign in with `codex login` on this workspace's machine, then reconnect." : "";
++    view.models = array((await this.request(view, "models"))["data"]).map(object);
++    await this.list(view);
++    view.snapshot = {};
++    this.connect(view);
++    await this.refresh(view);
++  }
++  async list(view: CodexView, more = false): Promise<void> {
++    const result = await this.request(view, "list", more && view.cursor !== "" ? { cursor: view.cursor } : {});
++    const entries = array(result["data"]).map(object);
++    view.threads = more ? [...new Map([...view.threads, ...entries].map((entry) => [text(entry["id"]), entry])).values()] : entries;
++    view.cursor = text(result["nextCursor"]);
++    this.changed(view);
++  }
++  select(view: CodexView, id: string): void {
++    this.saveDraft(view, view.draft);
++    this.disconnect(view);
++    view.generation++;
++    view.threadId = id;
++    view.model = "";
++    view.effort = "";
++    view.draft = this.read(`${view.key}:${id}:draft`);
++    view.references = this.readReferences(view.key, id);
++    view.snapshot = {};
++    view.offset = 0;
++    view.error = "";
++    this.write(`${view.key}:selected`, id);
++    this.changed(view);
++    this.schedule(view, 0);
++    this.connect(view);
++  }
++  saveDraft(view: CodexView, draft: string): void {
++    view.draft = draft;
++    this.write(`${view.key}:${view.threadId}:draft`, draft);
++  }
++  saveReferences(view: CodexView, paths: string[]): void {
++    view.references = [...new Set(paths)].slice(0, 20);
++    this.write(`${view.key}:${view.threadId}:references`, JSON.stringify(view.references));
++    this.changed(view);
++  }
++  private readReferences(key: string, threadId: string): string[] {
++    try {
++      return array(JSON.parse(this.read(`${key}:${threadId}:references`) || "[]"))
++        .filter((entry): entry is string => typeof entry === "string" && entry.length <= 4096).slice(0, 20);
++    } catch { return []; }
++  }
++  async create(view: CodexView): Promise<void> {
++    const result = await this.request(view, "create");
++    this.select(view, text(result["id"]));
++    await this.list(view);
++  }
++  async send(view: CodexView): Promise<void> {
++    const draft = view.draft;
++    const references = [...view.references];
++    const threadId = view.threadId;
++    await this.request(view, "send", { threadId, text: draft, ...(references.length > 0 ? { references } : {}), ...(view.model === "" ? {} : { model: view.model }), ...(view.effort === "" ? {} : { effort: view.effort }) });
++    if (view.threadId === threadId) {
++      view.model = "";
++      view.effort = "";
++      if (view.draft === draft) this.saveDraft(view, "");
++      this.saveReferences(view, view.references.filter((path) => !references.includes(path)));
++      view.snapshot = { ...view.snapshot, busy: true, status: "starting", version: -1 };
++    }
++  }
++  async run(view: CodexView, action: () => Promise<unknown>): Promise<void> {
++    if (view.pending || this.disposed) return;
++    view.pending = true;
++    view.error = "";
++    this.changed(view);
++    try { await action(); }
++    catch (error) { view.error = `${errorText(error)} If a send response was lost, check the conversation before sending again.`; }
++    finally { view.pending = false; this.changed(view); this.schedule(view, 0); this.connect(view); }
++  }
++  dispose(): void {
++    this.disposed = true;
++    for (const view of this.channels.keys()) this.disconnect(view);
++    this.dirty.clear(); this.syncErrors.clear();
++    for (const view of this.views.values()) { if (view.timer !== undefined) clearTimeout(view.timer); view.listeners.clear(); }
++    this.views.clear();
++  }
++  private isDisposed(): boolean { return this.disposed; }
++  async refresh(view: CodexView): Promise<void> {
++    if (this.disposed || !view.connected || view.threadId === "") return;
++    if (view.polling) { this.dirty.add(view); return; }
++    this.dirty.delete(view);
++    view.polling = true;
++    const generation = view.generation;
++    try {
++      const snapshot = await this.request(view, "snapshot", { threadId: view.threadId, version: view.snapshot["version"] ?? -1, offset: view.offset });
++      if (generation !== view.generation || this.isDisposed()) return;
++      if (view.error === this.syncErrors.get(view)) { view.error = ""; this.syncErrors.delete(view); this.changed(view); }
++      if (snapshot["changed"] === true) { view.snapshot = snapshot; this.changed(view); }
++    } catch (error) {
++      if (generation === view.generation && !this.isDisposed()) { view.error = errorText(error); this.syncErrors.set(view, view.error); this.changed(view); }
++      this.schedule(view, 4000);
++    } finally {
++      view.polling = false;
++      if (this.dirty.delete(view)) this.schedule(view, 0);
++      if (view.listeners.size === 0 && view.snapshot["busy"] !== true) this.disconnect(view);
++    }
++  }
++  private schedule(view: CodexView, delay: number): void {
++    if (view.timer !== undefined && delay > 0) return;
++    if (view.timer !== undefined) clearTimeout(view.timer);
++    if (this.disposed || (view.listeners.size === 0 && view.snapshot["busy"] !== true)) return;
++    view.timer = setTimeout(() => { view.timer = undefined; void this.refresh(view); }, delay);
++  }
++  private disconnect(view: CodexView): void {
++    const connection = this.channels.get(view);
++    this.channels.delete(view);
++    if (connection !== undefined) {
++      if (connection.retry !== undefined) clearTimeout(connection.retry);
++      connection.abort.abort(); connection.channel?.close("Codex view detached");
++    }
++    if (view.timer !== undefined) clearTimeout(view.timer);
++    view.timer = undefined;
++  }
++  private connect(view: CodexView): void {
++    const peer = view.context.peer;
++    if (this.disposed || !view.connected || view.threadId === "" || this.channels.has(view) || (view.listeners.size === 0 && view.snapshot["busy"] !== true)) return;
++    if (peer?.openChannel === undefined) {
++      if (view.notice === "") { view.notice = "Live updates unavailable. Update the host or use Refresh conversation."; this.changed(view); }
++      return;
++    }
++    const connection: { abort: AbortController; channel?: PluginPeerChannel; retry?: ReturnType<typeof setTimeout> } = { abort: new AbortController() };
++    this.channels.set(view, connection);
++    const generation = view.generation;
++    const current = (): boolean => !this.disposed && this.channels.get(view) === connection && view.generation === generation;
++    const retry = (): void => {
++      if (!current()) return;
++      delete connection.channel;
++      view.notice = "Live connection lost. Reconnecting…"; this.changed(view);
++      connection.retry = setTimeout(() => {
++        if (!current()) return;
++        this.disconnect(view); this.connect(view);
++      }, 1500);
++    };
++    void peer.openChannel("events", { threadId: view.threadId }, {
++      signal: connection.abort.signal,
++      onData: (data) => {
++        if (!current()) return;
++        const frame = object(data);
++        if (frame["type"] === "changed" && frame["threadId"] === view.threadId) this.schedule(view, 30);
++      },
++    }).then((channel) => {
++      if (!current()) { channel.close("Stale Codex subscription"); return; }
++      connection.channel = channel;
++      if (view.notice.startsWith("Live ")) view.notice = "";
++      this.changed(view);
++      this.schedule(view, 0);
++      void channel.closed.then(retry, retry);
++    }, retry);
++  }
++  private changed(view: CodexView): void {
++    if (this.disposed) return;
++    for (const listener of view.listeners) listener();
++    view.context.host.requestRender();
++  }
++  private read(key: string): string {
++    const memory = this.memory.get(key);
++    if (memory !== undefined) return memory;
++    try { return localStorage.getItem(`pi-web:codex:${key}`) ?? ""; } catch { return ""; }
++  }
++  private write(key: string, value: string): void {
++    this.memory.set(key, value);
++    try { localStorage.setItem(`pi-web:codex:${key}`, value); } catch { /* Optional browser persistence. */ }
++  }
++}
+diff --git a/pi-web-plugins/codex/CodexPanel.test.ts b/pi-web-plugins/codex/CodexPanel.test.ts
+new file mode 100644
+index 00000000..67df90fb
+--- /dev/null
++++ b/pi-web-plugins/codex/CodexPanel.test.ts
+@@ -0,0 +1,321 @@
++// @vitest-environment happy-dom
++import { afterEach, describe, expect, it, vi } from "vitest";
++import type { PluginPeerChannelOptions, FileTreeResponse, JsonValue, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
++import { CodexPanel } from "./CodexPanel.js";
++import { CodexBrowserRuntime } from "./CodexBrowserRuntime.js";
++import type { RecordValue } from "./server/protocol.js";
++
++customElements.define("codex-panel-test", CodexPanel);
++const runtimes: CodexBrowserRuntime[] = [];
++afterEach(() => { for (const runtime of runtimes) runtime.dispose(); runtimes.length = 0; document.body.replaceChildren(); localStorage.clear(); vi.useRealTimers(); });
++function context(request: (operation: string, input: JsonValue) => Promise<JsonValue>, machine = "local"): WorkspacePanelContext {
++  return {
++    navigate: () => Promise.resolve(), machine: { id: machine, name: machine, kind: "local" },
++    workspace: { id: "workspace", projectId: "project", path: "/repo", label: "main", isMain: true },
++    files: { readFile: vi.fn(), listFiles: vi.fn(), writeFile: vi.fn(), deleteFile: vi.fn(), moveFile: vi.fn() },
++    peer: { request }, host: { requestRender: vi.fn() }, prompt: { insertText: vi.fn(), getText: () => "", getSelection: () => null }, terminal: { open: vi.fn(), runCommand: vi.fn() },
++  };
++}
++async function fixture() {
++  const request = vi.fn<(operation: string, input: JsonValue) => Promise<JsonValue>>().mockResolvedValue({ changed: false });
++  const runtime = new CodexBrowserRuntime(); runtimes.push(runtime);
++  const scope = context(request);
++  const view = runtime.view(scope); view.connected = true; view.threadId = "thread";
++  const panel = document.createElement("codex-panel-test");
++  if (!(panel instanceof CodexPanel)) throw new Error("Expected Codex panel");
++  panel.context = scope; panel.runtime = runtime;
++  document.body.append(panel); await panel.updateComplete;
++  const textarea = panel.shadowRoot?.querySelector("textarea");
++  if (!(textarea instanceof HTMLTextAreaElement)) throw new Error("Expected message editor");
++  return { request, runtime, view, panel, textarea, scope };
++}
++
++describe("Codex panel", () => {
++  it("shows server settings without making them client overrides and clears choices across threads", async () => {
++    const { request, view, panel, runtime } = await fixture();
++    view.snapshot = { model: "configured-model", effort: "high" };
++    view.models = [{ model: "configured-model", displayName: "Configured model", supportedReasoningEfforts: [{ reasoningEffort: "high" }] }];
++    panel.requestUpdate(); await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelector(".model-picker summary")?.textContent).toContain("Configured model");
++    expect(panel.shadowRoot?.querySelector(".model-picker summary")?.textContent).toContain("high");
++    expect(panel.shadowRoot?.querySelector<HTMLSelectElement>('select[aria-label="Reasoning effort"]')?.disabled).toBe(false);
++    view.draft = "hello";
++    await runtime.send(view);
++    expect(request).toHaveBeenCalledWith("send", { threadId: "thread", text: "hello" });
++    view.model = "manual-model"; view.effort = "low";
++    runtime.select(view, "other"); await panel.updateComplete;
++    expect(view.model).toBe(""); expect(view.effort).toBe("");
++    expect(panel.shadowRoot?.querySelector(".model-picker summary")?.textContent).not.toContain("Configured model");
++  });
++
++  it("does not send during IME composition, sends once on Enter, and clears only acknowledged drafts", async () => {
++    const { request, panel, textarea, view } = await fixture();
++    textarea.value = "你好"; textarea.dispatchEvent(new Event("input"));
++    textarea.dispatchEvent(new CompositionEvent("compositionstart"));
++    textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
++    expect(request.mock.calls.filter(([operation]) => operation === "send")).toHaveLength(0);
++    textarea.dispatchEvent(new CompositionEvent("compositionend"));
++    textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
++    textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
++    await panel.updateComplete; await Promise.resolve(); await panel.updateComplete;
++    expect(request.mock.calls.filter(([operation]) => operation === "send")).toEqual([["send", { threadId: "thread", text: "你好" }]]);
++    expect(view.draft).toBe("");
++  });
++  it("preserves drafts separately across machine and thread changes and after request failure", async () => {
++    const { request, runtime, view, scope } = await fixture();
++    runtime.saveDraft(view, "draft one");
++    runtime.select(view, "second"); runtime.saveDraft(view, "draft two"); runtime.select(view, "thread");
++    expect(view.draft).toBe("draft one");
++    const remote = runtime.view(context(request, "remote")); expect(remote.draft).toBe("");
++    request.mockRejectedValueOnce(new Error("offline"));
++    await runtime.run(view, () => runtime.send(view));
++    expect(view.draft).toBe("draft one"); expect(view.error).toContain("offline");
++    const recovered = new CodexBrowserRuntime(); runtimes.push(recovered);
++    expect(recovered.view(scope).draft).toBe("draft one");
++  });
++  it("renders safe Markdown and tools and sends scoped approval decisions", async () => {
++    const { request, view, panel } = await fixture();
++    view.snapshot = { items: [{ id: "answer", kind: "agentMessage", text: '**Hello** <script>alert(1)</script> [bad](javascript:alert(1))' }, { id: "tool", kind: "fileChange", text: "-old\n+new", status: "completed" }],
++      approvals: [{ id: "7", method: "item/commandExecution/requestApproval", params: { command: "npm test" } }] };
++    panel.requestUpdate(); await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelector("strong")?.textContent).toBe("Codex");
++    expect(panel.shadowRoot?.querySelector(".markdown strong")?.textContent).toBe("Hello");
++    expect(panel.shadowRoot?.querySelector("script")).toBeNull();
++    expect(panel.shadowRoot?.querySelector('a[href^="javascript:"]')).toBeNull();
++    const button = [...(panel.shadowRoot?.querySelectorAll("button") ?? [])].find((entry) => entry.textContent === "Allow once");
++    button?.click(); await panel.updateComplete;
++    expect(request).toHaveBeenCalledWith("answer", { threadId: "thread", approvalId: "7", decision: "accept" });
++  });
++  it("ignores a previous conversation snapshot arriving after selection changes", async () => {
++    vi.useFakeTimers();
++    const { request, view, runtime } = await fixture();
++    let finish: (value: RecordValue) => void = () => undefined;
++    request.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
++    await vi.advanceTimersByTimeAsync(0);
++    runtime.select(view, "second");
++    finish({ changed: true, id: "thread", version: 1, items: [{ id: "stale" }] });
++    await Promise.resolve(); await Promise.resolve();
++    expect(view.snapshot).toEqual({});
++  });
++  it("uses the host directory and sends model and reasoning from the composer menu", async () => {
++    const { request, view, panel, textarea } = await fixture();
++    view.models = [{ model: "test-model", displayName: "Test model", supportedReasoningEfforts: [{ reasoningEffort: "high" }] }];
++    panel.requestUpdate(); await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelector("header .scope")?.textContent).toBe("/repo");
++    const model = panel.shadowRoot?.querySelector('footer select[aria-label="Model"]');
++    const effort = panel.shadowRoot?.querySelector('footer select[aria-label="Reasoning effort"]');
++    if (!(model instanceof HTMLSelectElement) || !(effort instanceof HTMLSelectElement)) throw new Error("Expected composer settings");
++    model.value = "test-model"; model.dispatchEvent(new Event("change")); await panel.updateComplete;
++    effort.value = "high"; effort.dispatchEvent(new Event("change")); await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelector(".model-picker summary")?.textContent).toContain("high");
++    textarea.value = "hello"; textarea.dispatchEvent(new Event("input"));
++    textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
++    await panel.updateComplete;
++    expect(request).toHaveBeenCalledWith("send", { threadId: "thread", text: "hello", model: "test-model", effort: "high" });
++  });
++  it("opens and closes review without losing the draft and safely renders diff text", async () => {
++    const { view, panel, textarea } = await fixture();
++    textarea.value = "keep this draft"; textarea.dispatchEvent(new Event("input"));
++    view.snapshot = { items: [{ id: "diff", kind: "diff", text: "-old\n+<script>bad</script>" }] };
++    panel.requestUpdate(); await panel.updateComplete;
++    panel.shadowRoot?.querySelector<HTMLButtonElement>('[aria-label="Toggle review panel"]')?.click();
++    await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelector("aside .addition")?.textContent).toBe("+<script>bad</script>");
++    expect(panel.shadowRoot?.querySelector("aside script")).toBeNull();
++    panel.shadowRoot?.querySelector<HTMLButtonElement>('[aria-label="Close review panel"]')?.click();
++    await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelector("aside")).toBeNull();
++    expect(textarea.value).toBe("keep this draft");
++  });
++
++  it("dismisses model settings on selection, outside interaction and Escape, but not inside", async () => {
++    const { panel, view, textarea } = await fixture();
++    view.models = [{ model: "test", supportedReasoningEfforts: [{ reasoningEffort: "high" }] }];
++    panel.requestUpdate(); await panel.updateComplete;
++    const picker = panel.shadowRoot?.querySelector<HTMLDetailsElement>(".model-picker");
++    const model = picker?.querySelector<HTMLSelectElement>('[aria-label="Model"]');
++    const effort = picker?.querySelector<HTMLSelectElement>('[aria-label="Reasoning effort"]');
++    if (!picker || !model || !effort) throw new Error("Expected model picker");
++    picker.open = true;
++    model.dispatchEvent(new Event("pointerdown", { bubbles: true, composed: true }));
++    expect(picker.open).toBe(true);
++    model.value = "test"; model.dispatchEvent(new Event("change")); await panel.updateComplete;
++    expect(picker.open).toBe(false);
++    expect(view.model).toBe("test");
++    picker.open = true;
++    effort.value = "high"; effort.dispatchEvent(new Event("change")); await panel.updateComplete;
++    expect(picker.open).toBe(false);
++    expect(view.effort).toBe("high");
++    picker.open = true;
++    textarea.dispatchEvent(new Event("pointerdown", { bubbles: true, composed: true }));
++    expect(picker.open).toBe(false);
++    picker.open = true;
++    document.body.dispatchEvent(new Event("pointerdown", { bubbles: true, composed: true }));
++    expect(picker.open).toBe(false);
++    picker.open = true;
++    textarea.dispatchEvent(new Event("focusin", { bubbles: true, composed: true }));
++    expect(picker.open).toBe(false);
++    picker.open = true;
++    model.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, composed: true }));
++    expect(picker.open).toBe(false);
++    expect(panel.shadowRoot?.activeElement).toBe(picker.querySelector("summary"));
++    picker.open = true;
++    panel.remove();
++    expect(picker.open).toBe(false);
++    document.body.append(panel); await panel.updateComplete;
++    picker.open = true;
++    document.body.dispatchEvent(new Event("pointerdown", { bubbles: true, composed: true }));
++    expect(picker.open).toBe(false);
++  });
++
++  it("dismisses conversation settings on selection, New, outside interaction and Escape", async () => {
++    const { panel, view, textarea, request } = await fixture();
++    view.threads = [{ id: "thread", preview: "Current" }, { id: "second", preview: "Second" }];
++    panel.requestUpdate(); await panel.updateComplete;
++    const menu = panel.shadowRoot?.querySelector<HTMLDetailsElement>(".history");
++    const select = menu?.querySelector("select");
++    if (!menu || !select) throw new Error("Expected conversation menu");
++    menu.open = true;
++    select.dispatchEvent(new Event("pointerdown", { bubbles: true, composed: true }));
++    expect(menu.open).toBe(true);
++    select.value = "second"; select.dispatchEvent(new Event("change")); await panel.updateComplete;
++    expect(view.threadId).toBe("second");
++    expect(menu.open).toBe(false);
++    expect(panel.shadowRoot?.activeElement).toBe(menu.querySelector("summary"));
++    for (const target of [textarea, document.body]) {
++      menu.open = true;
++      target.dispatchEvent(new Event("pointerdown", { bubbles: true, composed: true }));
++      expect(menu.open).toBe(false);
++    }
++    menu.open = true;
++    textarea.dispatchEvent(new Event("focusin", { bubbles: true, composed: true }));
++    expect(menu.open).toBe(false);
++    menu.open = true;
++    select.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, composed: true }));
++    expect(menu.open).toBe(false);
++    expect(panel.shadowRoot?.activeElement).toBe(menu.querySelector("summary"));
++    menu.open = true;
++    panel.remove(); expect(menu.open).toBe(false);
++    document.body.append(panel); await panel.updateComplete;
++    menu.open = true;
++    document.body.dispatchEvent(new Event("pointerdown", { bubbles: true, composed: true }));
++    expect(menu.open).toBe(false);
++    menu.open = true;
++    panel.shadowRoot?.querySelector<HTMLButtonElement>("header .new-conversation")?.click();
++    expect(menu.open).toBe(false);
++    expect(request).toHaveBeenCalledWith("create", {});
++  });
++
++  it("renders commentary, grouped tools, command results, thinking and final answers", async () => {
++    const { view, panel } = await fixture();
++    view.snapshot = { items: [
++      { id: "u", kind: "userMessage", text: "Fix it", turnId: "t" },
++      { id: "c", kind: "agentMessage", phase: "commentary", text: "I will check.", turnId: "t" },
++      { id: "r", kind: "reasoning", text: "**Inspecting** the files", status: "completed", turnId: "t" },
++      { id: "cmd", kind: "commandExecution", command: "npm test", output: "<script>failure</script>", text: "npm test", exitCode: 1, status: "completed", turnId: "t" },
++      { id: "f", kind: "fileChange", text: "a.ts", changes: [{ path: "a.ts", kind: "update", diff: "-old\n+new" }], status: "completed", turnId: "t" },
++      { id: "a", kind: "agentMessage", phase: "final_answer", text: "**Fixed**", turnDurationMs: 8000, turnId: "t" },
++    ] };
++    panel.requestUpdate(); await panel.updateComplete;
++    const root = panel.shadowRoot;
++    expect(root?.querySelector(".commentary")?.textContent).toContain("I will check.");
++    expect(root?.querySelector(".reasoning-body strong")?.textContent).toBe("Inspecting");
++    expect(root?.querySelector(".activity-group summary")?.textContent).toContain("Edited files · Ran commands · Failed");
++    expect(root?.querySelector<HTMLDetailsElement>(".activity-group")?.open).toBe(false);
++    expect(root?.querySelector(".command-footer")?.textContent).toContain("Failed · Exit code 1");
++    expect(root?.querySelector(".command-shell pre")?.textContent).toBe("<script>failure</script>");
++    expect(root?.querySelector("script")).toBeNull();
++    expect(root?.querySelector(".changed-file .addition")?.textContent).toBe("+new");
++    expect(root?.querySelector(".worked-divider")?.textContent).toContain("Worked for 8s");
++    expect(root?.querySelectorAll(".agentMessage").length).toBe(2);
++  });
++  it("shows active tool groups and collapses them on completion without a fake duration", async () => {
++    const { view, panel } = await fixture();
++    const item = { id: "cmd", kind: "commandExecution", command: "pwd", status: "inProgress", turnId: "t" };
++    view.snapshot = { busy: true, items: [item] };
++    panel.requestUpdate(); await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelector<HTMLDetailsElement>(".activity-group")?.open).toBe(true);
++    expect(panel.shadowRoot?.querySelector(".working")?.textContent).toContain("Working");
++    view.snapshot = { busy: false, items: [{ ...item, status: "completed", exitCode: 0 }, { id: "a", kind: "agentMessage", phase: "final_answer", turnId: "t", text: "Done" }] };
++    panel.requestUpdate(); await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelector<HTMLDetailsElement>(".activity-group")?.open).toBe(false);
++    expect(panel.shadowRoot?.querySelector(".working")).toBeNull();
++    expect(panel.shadowRoot?.querySelector(".worked-divider")?.textContent.trim()).toBe("Worked");
++  });
++
++  it("browses workspace context, selects files and directories, removes them and closes the picker", async () => {
++    const { panel, view, scope } = await fixture();
++    const listFiles = vi.fn<(path: string) => Promise<FileTreeResponse>>((path) => Promise.resolve<FileTreeResponse>({ path, scannedAt: "now", truncated: false, entries: path === "" ? [{ name: "src", path: "src", type: "directory" }, { name: "README.md", path: "README.md", type: "file" }] : [{ name: "app.ts", path: "src/app.ts", type: "file" }] }));
++    scope.files.listFiles = listFiles;
++    const picker = panel.shadowRoot?.querySelector<HTMLDetailsElement>(".context-picker");
++    if (!picker) throw new Error("Expected context picker");
++    picker.open = true; picker.dispatchEvent(new Event("toggle"));
++    await Promise.resolve(); await panel.updateComplete;
++    expect(listFiles).toHaveBeenCalledWith("");
++    panel.shadowRoot?.querySelector<HTMLButtonElement>('[aria-label="Add README.md"]')?.click(); await panel.updateComplete;
++    expect(view.references).toEqual(["README.md"]);
++    [...picker.querySelectorAll<HTMLButtonElement>(".context-name")].find((button) => button.textContent.includes("src"))?.click();
++    await Promise.resolve(); await panel.updateComplete;
++    expect(listFiles).toHaveBeenCalledWith("src");
++    [...picker.querySelectorAll("button")].find((button) => button.textContent === "Add directory")?.click(); await panel.updateComplete;
++    expect(view.references).toEqual(["README.md", "src"]);
++    panel.shadowRoot?.querySelector<HTMLButtonElement>('[aria-label="Remove README.md"]')?.click(); await panel.updateComplete;
++    expect(view.references).toEqual(["src"]);
++    document.body.dispatchEvent(new Event("pointerdown", { bubbles: true, composed: true }));
++    expect(picker.open).toBe(false);
++    picker.open = true;
++    picker.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, composed: true }));
++    expect(picker.open).toBe(false);
++  });
++  it("keeps selected paths isolated, persists them, and only clears acknowledged sends", async () => {
++    const { runtime, view, scope, request } = await fixture();
++    runtime.saveReferences(view, ["src", "README.md", "src"]);
++    expect(view.references).toEqual(["src", "README.md"]);
++    runtime.select(view, "second"); expect(view.references).toEqual([]);
++    runtime.select(view, "thread"); expect(view.references).toEqual(["src", "README.md"]);
++    const recovered = new CodexBrowserRuntime(); runtimes.push(recovered);
++    expect(recovered.view(scope).references).toEqual(["src", "README.md"]);
++    request.mockRejectedValueOnce(new Error("offline"));
++    await runtime.run(view, () => runtime.send(view));
++    expect(view.references).toEqual(["src", "README.md"]);
++    await runtime.run(view, () => runtime.send(view));
++    expect(request).toHaveBeenCalledWith("send", { threadId: "thread", text: "", references: ["src", "README.md"] });
++    expect(view.references).toEqual([]);
++  });
++
++  it("refreshes on push notifications without idle polling, reconnects and rejects stale events", async () => {
++    vi.useFakeTimers();
++    const { runtime, view, scope, request } = await fixture();
++    const receivers: PluginPeerChannelOptions[] = [];
++    const finishes: (() => void)[] = [];
++    const openChannel = vi.fn((_operation: string, _input: JsonValue, options: PluginPeerChannelOptions) => {
++      receivers.push(options);
++      let finish = (): void => undefined;
++      const closed = new Promise<{ code: number; reason: string; wasClean: boolean }>((resolve) => { finish = () => { resolve({ code: 1006, reason: "offline", wasClean: false }); }; });
++      finishes.push(finish);
++      return Promise.resolve({ closed, close: finish, send: vi.fn() });
++    });
++    scope.peer = { request, openChannel };
++    runtime.subscribe(view, () => undefined);
++    await vi.advanceTimersByTimeAsync(0);
++    expect(openChannel).toHaveBeenCalledTimes(1);
++    request.mockClear();
++    await vi.advanceTimersByTimeAsync(10000);
++    expect(request).not.toHaveBeenCalled();
++    for (let i = 0; i < 20; i++) receivers[0]?.onData({ type: "changed", threadId: "thread" });
++    await vi.advanceTimersByTimeAsync(30);
++    expect(request.mock.calls.filter(([operation]) => operation === "snapshot")).toHaveLength(1);
++    finishes[0]?.(); await vi.advanceTimersByTimeAsync(1500);
++    expect(openChannel).toHaveBeenCalledTimes(2);
++    runtime.select(view, "second"); await vi.advanceTimersByTimeAsync(0);
++    expect(openChannel).toHaveBeenCalledTimes(3);
++    request.mockClear();
++    receivers[0]?.onData({ type: "changed", threadId: "thread" });
++    receivers[1]?.onData({ type: "changed", threadId: "thread" });
++    await vi.advanceTimersByTimeAsync(100);
++    expect(request).not.toHaveBeenCalled();
++    runtime.dispose(); await vi.advanceTimersByTimeAsync(10000);
++    expect(openChannel).toHaveBeenCalledTimes(3);
++  });
++
++});
+diff --git a/pi-web-plugins/codex/CodexPanel.ts b/pi-web-plugins/codex/CodexPanel.ts
+new file mode 100644
+index 00000000..44cdd595
+--- /dev/null
++++ b/pi-web-plugins/codex/CodexPanel.ts
+@@ -0,0 +1,383 @@
++import { LitElement, css, html, nothing } from "lit";
++import { property } from "lit/decorators.js";
++import { repeat } from "lit/directives/repeat.js";
++import { unsafeHTML } from "lit/directives/unsafe-html.js";
++import type { FileTreeEntry, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
++import { CodexBrowserRuntime, type CodexView } from "./CodexBrowserRuntime.js";
++import { array, errorText, object, text, type RecordValue } from "./server/protocol.js";
++import { renderWorkspaceMarkdownHtml } from "./markdown.js";
++
++export class CodexPanel extends LitElement {
++  @property({ attribute: false }) context: WorkspacePanelContext | undefined;
++  @property({ attribute: false }) runtime: CodexBrowserRuntime | undefined;
++  private view: CodexView | undefined;
++  private unsubscribe: (() => void) | undefined;
++  private follow = true;
++  private composing = false;
++  private browsePath = "";
++  private browseEntries: FileTreeEntry[] = [];
++  private browseLoading = false;
++  private browseError = "";
++  private browseTruncated = false;
++  private browseRequest = 0;
++  private browseFilter = "";
++  private reviewOpen = false;
++  private readonly resizeObserver = new ResizeObserver(() => { this.requestUpdate(); });
++  private readonly markdown = new Map<string, { text: string; html: string }>();
++
++  private closeMenus(restoreFocus = false, selector = ".model-picker, .history, .context-picker"): void {
++    for (const menu of this.renderRoot.querySelectorAll<HTMLDetailsElement>(selector)) {
++      if (!menu.open) continue;
++      menu.open = false;
++      if (restoreFocus) menu.querySelector("summary")?.focus();
++    }
++  }
++  private readonly dismissMenus = (event: Event): void => {
++    const path = event.composedPath();
++    for (const menu of this.renderRoot.querySelectorAll<HTMLDetailsElement>(".model-picker, .history, .context-picker")) {
++      if (!path.includes(menu)) menu.open = false;
++    }
++  };
++  private readonly onMenuKeydown = (event: KeyboardEvent): void => {
++    if (event.key === "Escape") this.closeMenus(true);
++  };
++  override connectedCallback(): void {
++    super.connectedCallback();
++    this.resizeObserver.observe(this);
++    this.ownerDocument.addEventListener("pointerdown", this.dismissMenus, true);
++    this.ownerDocument.addEventListener("focusin", this.dismissMenus, true);
++    this.ownerDocument.addEventListener("keydown", this.onMenuKeydown);
++    this.requestUpdate();
++  }
++  override disconnectedCallback(): void {
++    this.ownerDocument.removeEventListener("pointerdown", this.dismissMenus, true);
++    this.ownerDocument.removeEventListener("focusin", this.dismissMenus, true);
++    this.ownerDocument.removeEventListener("keydown", this.onMenuKeydown);
++    this.closeMenus();
++    this.unsubscribe?.(); this.unsubscribe = undefined;
++    this.resizeObserver.disconnect(); super.disconnectedCallback();
++  }
++  protected override willUpdate(): void {
++    if (this.context === undefined || this.runtime === undefined) return;
++    const view = this.runtime.view(this.context);
++    if (view === this.view && this.unsubscribe !== undefined) return;
++    this.unsubscribe?.();
++    this.closeMenus();
++    this.browseRequest++; this.browsePath = ""; this.browseEntries = [];
++    this.view = view;
++    this.follow = true;
++    this.unsubscribe = this.runtime.subscribe(view, () => { this.requestUpdate(); });
++  }
++  protected override updated(): void {
++    const transcript = this.renderRoot.querySelector(".transcript");
++    for (const pre of this.renderRoot.querySelectorAll(".markdown pre")) {
++      if (pre.querySelector("button") !== null) continue;
++      const code = pre.querySelector("code");
++      if (code === null) continue;
++      const button = document.createElement("button");
++      button.textContent = "Copy code";
++      button.setAttribute("aria-label", "Copy code block");
++      button.addEventListener("click", () => { this.action(async () => { await navigator.clipboard.writeText(code.textContent); }); });
++      pre.append(button);
++    }
++    if (this.follow && transcript !== null) transcript.scrollTop = transcript.scrollHeight;
++  }
++  private action(action: (runtime: CodexBrowserRuntime, view: CodexView) => Promise<unknown>): void {
++    const runtime = this.runtime;
++    const view = this.view;
++    if (runtime !== undefined && view !== undefined) void runtime.run(view, () => action(runtime, view));
++  }
++  private markdownHtml(item: RecordValue): string {
++    const id = text(item["id"]);
++    const body = text(item["text"]);
++    let cached = this.markdown.get(id);
++    if (cached?.text !== body) {
++      cached = { text: body, html: renderWorkspaceMarkdownHtml(body) };
++      if (this.markdown.size > 512) this.markdown.clear();
++      this.markdown.set(id, cached);
++    }
++    return cached.html;
++  }
++  private async browse(path: string): Promise<void> {
++    const view = this.view;
++    if (view === undefined) return;
++    const request = ++this.browseRequest;
++    const generation = view.generation;
++    this.browseLoading = true; this.browseError = ""; this.browseFilter = ""; this.requestUpdate();
++    try {
++      const result = await view.context.files.listFiles(path);
++      if (request !== this.browseRequest || view !== this.view || generation !== view.generation) return;
++      this.browsePath = result.path;
++      this.browseEntries = [...result.entries].sort((a, b) => Number(b.type === "directory") - Number(a.type === "directory") || a.name.localeCompare(b.name));
++      this.browseTruncated = result.truncated;
++    } catch (error) {
++      if (request === this.browseRequest && view === this.view && generation === view.generation) this.browseError = errorText(error);
++    } finally {
++      if (request === this.browseRequest) { this.browseLoading = false; this.requestUpdate(); }
++    }
++  }
++  private addReference(view: CodexView, path: string): void {
++    if (view.pending || view.references.length >= 20) return;
++    this.runtime?.saveReferences(view, [...view.references, path || "."]);
++  }
++  private renderContextPicker(view: CodexView) {
++    const entries = this.browseEntries.filter((entry) => entry.name.toLowerCase().includes(this.browseFilter.toLowerCase()));
++    return html`<details class="context-picker" @toggle=${(event: Event) => { if (event.currentTarget instanceof HTMLDetailsElement && event.currentTarget.open) void this.browse(this.browsePath); }}>
++      <summary aria-label="Add workspace files or directories" title="Add workspace files or directories">+</summary>
++      <div class="context-menu" aria-label="Workspace files and directories">
++        <div class="context-heading"><strong>Workspace context</strong><button aria-label="Close workspace picker" @click=${() => { this.closeMenus(true, ".context-picker"); }}>×</button></div>
++        <div class="context-navigation"><button aria-label="Parent directory" ?disabled=${this.browseLoading || this.browsePath === ""} @click=${() => { void this.browse(this.browsePath.split("/").slice(0, -1).join("/")); }}>↑</button><span title=${view.context.workspace.path}>${this.browsePath || view.context.workspace.label}</span><button ?disabled=${view.pending || this.browseLoading || this.browseError !== "" || view.references.length >= 20 || view.references.includes(this.browsePath || ".")} @click=${() => { this.addReference(view, this.browsePath); }}>Add directory</button></div>
++        <input class="context-filter" aria-label="Filter workspace items" placeholder="Filter files and directories" .value=${this.browseFilter} @input=${(event: Event) => { if (event.target instanceof HTMLInputElement) { this.browseFilter = event.target.value; this.requestUpdate(); } }}>
++        ${this.browseLoading ? html`<p role="status">Loading…</p>` : this.browseError !== "" ? html`<p class="error" role="alert">${this.browseError}</p><button @click=${() => { void this.browse(this.browsePath); }}>Retry</button>` : html`<div class="context-entries">${entries.map((entry) => html`<div class="context-entry"><button class="context-name" title=${entry.path} ?disabled=${entry.type === "symlink" || view.pending} @click=${() => { if (entry.type === "directory") void this.browse(entry.path); else this.addReference(view, entry.path); }}>${entry.type === "directory" ? "▸" : "·"} ${entry.name}</button><button aria-label=${`Add ${entry.path}`} ?disabled=${view.pending || entry.type === "symlink" || view.references.length >= 20 || view.references.includes(entry.path)} @click=${() => { this.addReference(view, entry.path); }}>${view.references.includes(entry.path) ? "Added" : entry.type === "symlink" ? "Link" : "Add"}</button></div>`)}</div>${entries.length === 0 ? html`<p>No matching files or directories.</p>` : nothing}${this.browseTruncated ? html`<p>Only part of this directory is listed. Add the directory to reference all its contents.</p>` : nothing}`}
++        <div class="context-bottom"><small>Selected ${view.references.length} / 20 · Paths only</small><button @click=${() => { this.closeMenus(true, ".context-picker"); }}>Done</button></div>
++      </div>
++    </details>`;
++  }
++  override render() {
++    const view = this.view;
++    if (view === undefined) return html`<p>Select a workspace to open Codex.</p>`;
++    const snapshot = view.snapshot;
++    const busy = snapshot["busy"] === true;
++    const items = array(snapshot["items"]).map(object);
++    const models = view.models;
++    const currentModel = text(snapshot["model"]);
++    const currentEffort = text(snapshot["effort"]);
++    const modelName = view.model || currentModel;
++    const selectedModel = models.find((model) => text(model["model"]) === modelName);
++    const reviewOpen = this.reviewOpen;
++    const changes = items.filter((item) => ["fileChange", "diff"].includes(text(item["kind"])));
++    const currentThread = view.threads.find((thread) => thread["id"] === view.threadId);
++    return html`
++      <div class="layout" ?data-review-open=${reviewOpen}>
++      <header><strong>Codex</strong><span class="task-title" title=${text(currentThread?.["preview"])}>${text(currentThread?.["preview"]) || "New conversation"}</span>
++        <span class="scope" title=${view.context.workspace.path}>${view.context.workspace.path}</span>
++        <button class="new-conversation" aria-label="New conversation" title="New conversation" ?disabled=${view.pending || !view.connected} @click=${() => { this.closeMenus(); this.follow = true; this.action((runtime, state) => runtime.create(state)); }}>New session</button>
++        <button class="review-toggle" aria-label="Toggle review panel" aria-expanded=${reviewOpen} @click=${() => { this.reviewOpen = !reviewOpen; this.requestUpdate(); }}>Review${changes.length > 0 ? html` <span class="count">${changes.length}</span>` : nothing}</button>
++        <button ?disabled=${view.pending} @click=${() => { this.action((runtime, state) => runtime.initialize(state)); }}>Reconnect</button></header>
++      <details class="history"><summary>Conversations</summary><div class="history-menu"><button ?disabled=${view.pending || view.threadId === ""} @click=${() => { void this.runtime?.refresh(view); }}>Refresh conversation</button>
++        <select aria-label="Conversation" .value=${view.threadId} ?disabled=${view.pending} @change=${(event: Event) => {
++          const target = event.target; if (target instanceof HTMLSelectElement) { this.runtime?.select(view, target.value); this.follow = true; this.closeMenus(true, ".history"); }
++        }}><option value="">Select a conversation</option>
++          ${view.threadId !== "" && !view.threads.some((thread) => thread["id"] === view.threadId) ? html`<option value=${view.threadId}>${view.threadId}</option>` : nothing}
++          ${view.threads.map((thread) => html`<option value=${text(thread["id"])}>${text(thread["preview"]) || text(thread["id"])}</option>`)}
++        </select>
++        <button ?disabled=${view.pending || !view.connected} @click=${() => { this.action((runtime, state) => runtime.list(state)); }}>Refresh</button>
++        ${view.cursor === "" ? nothing : html`<button ?disabled=${view.pending} @click=${() => { this.action((runtime, state) => runtime.list(state, true)); }}>More sessions</button>`}
++      </div></details>
++      <main>
++      ${view.notice === "" ? nothing : html`<p role="status">${view.notice}</p>`}
++      ${view.error === "" && text(snapshot["error"]) === "" ? nothing : html`<p class="error" role="alert">${view.error || text(snapshot["error"])}</p>`}
++      <div class="transcript" @scroll=${(event: Event) => { const target = event.target; if (target instanceof HTMLElement) { const follow = target.scrollHeight - target.scrollTop - target.clientHeight < 60; if (follow !== this.follow) { this.follow = follow; this.requestUpdate(); } } }}>
++        ${typeof snapshot["total"] === "number" && snapshot["total"] > items.length + view.offset ? html`<button @click=${() => { view.offset = Math.min(512, view.offset + 40); view.snapshot = { ...view.snapshot, version: -1 }; this.requestUpdate(); void this.runtime?.refresh(view); }}>Earlier messages</button>` : nothing}
++        ${view.offset > 0 ? html`<button @click=${() => { view.offset = Math.max(0, view.offset - 40); view.snapshot = { ...view.snapshot, version: -1 }; this.requestUpdate(); void this.runtime?.refresh(view); }}>Newer messages</button>` : nothing}
++        ${snapshot["total"] === 512 ? html`<p>Showing the most recent 512 items. Older history remains available in Codex CLI.</p>` : nothing}
++        ${items.length === 0 ? html`<p class="empty">${view.threadId === "" ? "Create or select a Codex conversation in this workspace." : "Send a message to begin."}</p>` : nothing}
++        ${this.renderTimeline(items)}
++        ${busy ? html`<div class="working" role="status"><span class="activity-dot"></span>Working…</div>` : nothing}
++      </div>
++      ${!this.follow || view.offset > 0 ? html`<button class="latest" @click=${() => { this.follow = true; view.offset = 0; view.snapshot = { ...view.snapshot, version: -1 }; this.requestUpdate(); void this.runtime?.refresh(view); }}>Jump to latest</button>` : nothing}
++      <section aria-label="Pending requests">${array(snapshot["approvals"]).map((approval) => this.renderApproval(view, object(approval)))}</section>
++      <footer>
++        ${view.references.length > 0 ? html`<div class="context-tray" aria-label="Selected workspace context">${view.references.map((path) => html`<span title=${path}>${path}<button aria-label=${`Remove ${path}`} ?disabled=${view.pending} @click=${() => { this.runtime?.saveReferences(view, view.references.filter((entry) => entry !== path)); }}>×</button></span>`)}</div>` : nothing}
++        <textarea aria-label="Message Codex" placeholder="Ask for follow-up changes" .value=${view.draft}
++          @input=${(event: Event) => { if (event.target instanceof HTMLTextAreaElement) { this.runtime?.saveDraft(view, event.target.value); this.requestUpdate(); } }}
++          @compositionstart=${() => { this.composing = true; }} @compositionend=${() => { this.composing = false; }}
++          @keydown=${(event: KeyboardEvent) => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing && !this.composing) { event.preventDefault(); if (!view.pending && !busy && view.connected && view.threadId !== "" && (view.draft.trim() !== "" || view.references.length > 0)) this.action((runtime, state) => runtime.send(state)); } }}></textarea>
++        <div class="composer-controls">${this.renderContextPicker(view)}<span class="policy" title="Full access · no approval prompts">YOLO</span><details class="model-picker">
++          <summary aria-label="Model and reasoning settings">${text(selectedModel?.["displayName"]) || modelName || "Model unavailable"} <span>${view.effort || currentEffort || "Effort unspecified"}</span></summary>
++          <div class="model-menu"><label>Model<select aria-label="Model" ?disabled=${view.pending || busy} .value=${view.model} @change=${(event: Event) => { if (event.target instanceof HTMLSelectElement) { view.model = event.target.value; view.effort = ""; this.closeMenus(true, ".model-picker"); this.requestUpdate(); } }}>
++          <option value="">${currentModel || "Model unavailable"} (current)</option>${models.map((model) => html`<option value=${text(model["model"])}>${text(model["displayName"]) || text(model["model"])}</option>`)}
++        </select></label>
++        <label>Reasoning effort<select aria-label="Reasoning effort" ?disabled=${view.pending || busy || selectedModel === undefined} .value=${view.effort} @change=${(event: Event) => { if (event.target instanceof HTMLSelectElement) { view.effort = event.target.value; this.closeMenus(true, ".model-picker"); this.requestUpdate(); } }}>
++          <option value="">${currentEffort || "Unspecified"} (current)</option>${array(selectedModel?.["supportedReasoningEfforts"]).map((entry) => html`<option value=${text(object(entry)["reasoningEffort"])}>${text(object(entry)["reasoningEffort"])}</option>`)}
++        </select></label></div></details>
++          <span class="composer-spacer"></span>
++          ${busy ? html`<button aria-label="Stop response" ?disabled=${view.pending} @click=${() => { this.action((runtime, state) => runtime.request(state, "stop", { threadId: state.threadId })); }}>Stop</button>` : nothing}
++          <button class="primary" aria-label="Send message" title="Send message" ?disabled=${view.pending || busy || !view.connected || view.threadId === "" || (view.draft.trim() === "" && view.references.length === 0)} @click=${() => { this.action((runtime, state) => runtime.send(state)); }}>↑</button>
++        </div>
++      </footer>
++      <div class="connection-status" role="status">${view.pending ? "Working…" : text(snapshot["status"]) || (view.connected ? "Ready" : "Connecting…")}</div>
++      </main>
++      ${reviewOpen ? html`<aside aria-label="Review changes">
++        <div class="review-header"><span>Review <span class="count">${changes.length}</span></span><button aria-label="Close review panel" @click=${() => { this.reviewOpen = false; this.requestUpdate(); }}>×</button></div>
++        <div class="review-content">${changes.length === 0 ? html`<p class="empty">File changes will appear here.</p>` : changes.map((item) => html`
++          <details class="change" open><summary>${text(item["kind"]) === "diff" ? "Turn diff" : "File changes"} <span>${text(item["status"])}</span></summary>
++            <pre class="diff">${text(item["text"]).split("\n").map((line) => html`<span class=${line.startsWith("+") && !line.startsWith("+++") ? "addition" : line.startsWith("-") && !line.startsWith("---") ? "deletion" : line.startsWith("@@") ? "hunk" : "context"}>${line || " "}</span>`)}</pre>
++          </details>`)}</div>
++      </aside>` : nothing}
++      </div>`;
++  }
++  private activityState(item: RecordValue): string {
++    const status = text(item["status"]);
++    if (["failed", "errored", "declined"].includes(status) || (typeof item["exitCode"] === "number" && item["exitCode"] !== 0)) return "Failed";
++    if (["interrupted", "cancelled"].includes(status)) return "Stopped";
++    if (["inProgress", "running", "starting"].includes(status)) return "Running";
++    return status === "completed" ? "Completed" : "";
++  }
++  private activityLabel(item: RecordValue): string {
++    const labels: Record<string, string> = { commandExecution: "Run command", fileChange: "File changes", reasoning: "Thinking", plan: "Plan", webSearch: "Web search", mcpToolCall: "Tool call", dynamicToolCall: "Tool call", collabAgentToolCall: "Agent activity", imageView: "View image", imageGeneration: "Generate image", diff: "Changes" };
++    const kind = text(item["kind"]);
++    return text(item["title"]) || (kind === "commandExecution" ? (text(item["command"]).split("\n")[0] ?? "") : "") || (labels[kind] ?? "Tool activity");
++  }
++  private duration(value: unknown): string {
++    if (typeof value !== "number" || !Number.isFinite(value) || value < 1000) return "";
++    const seconds = Math.round(value / 1000);
++    return seconds < 60 ? `${String(seconds)}s` : `${String(Math.floor(seconds / 60))}m ${String(seconds % 60)}s`;
++  }
++  private renderTimeline(items: RecordValue[]) {
++    const groups: { id: string; activity: boolean; items: RecordValue[] }[] = [];
++    for (const item of items) {
++      const kind = text(item["kind"]);
++      if (kind === "diff") continue;
++      const activity = !["userMessage", "agentMessage", "reasoning", "plan"].includes(kind);
++      const last = groups.at(-1);
++      if (activity && last?.activity === true && last.items[0]?.["turnId"] === item["turnId"]) last.items.push(item);
++      else groups.push({ id: text(item["id"]), activity, items: [item] });
++    }
++    return repeat(groups, (group) => group.id, (group) => {
++      if (!group.activity) {
++        const item = group.items[0];
++        if (item === undefined) return nothing;
++        const worked = item["kind"] === "agentMessage" && item["phase"] === "final_answer" && items.some((entry) => entry["turnId"] === item["turnId"] && !["agentMessage", "userMessage", "diff"].includes(text(entry["kind"])));
++        const duration = this.duration(item["turnDurationMs"]);
++        return html`${worked ? html`<div class="worked-divider">${duration ? `Worked for ${duration}` : "Worked"}<span></span></div>` : nothing}${this.renderItem(item)}`;
++      }
++      const active = [...group.items].reverse().find((item) => this.activityState(item) === "Running");
++      const kinds = new Set(group.items.map((item) => text(item["kind"])));
++      const parts = [kinds.has("fileChange") ? "Edited files" : "", kinds.has("commandExecution") ? "Ran commands" : "", kinds.has("webSearch") ? "Searched the web" : ""].filter(Boolean);
++      const failed = group.items.some((item) => this.activityState(item) === "Failed");
++      const title = active !== undefined ? this.activityLabel(active) : `${parts.join(" · ") || "Tool activity"}${failed ? " · Failed" : ""}`;
++      return html`<details class="activity-group" ?open=${active !== undefined}><summary><span class=${active !== undefined ? "activity-dot" : "activity-mark"}>${active !== undefined ? "" : failed ? "!" : "✓"}</span><span>${title}</span><small>${group.items.length}</small></summary><div class="activity-items">${repeat(group.items, (item) => text(item["id"]), (item) => this.renderItem(item))}</div></details>`;
++    });
++  }
++  private renderDiff(body: string) {
++    return html`<pre class="diff">${body.split("\n").map((line) => html`<span class=${line.startsWith("+") && !line.startsWith("+++") ? "addition" : line.startsWith("-") && !line.startsWith("---") ? "deletion" : line.startsWith("@@") ? "hunk" : "context"}>${line || " "}</span>`)}</pre>`;
++  }
++  private renderItem(item: RecordValue) {
++    const kind = text(item["kind"]);
++    const body = text(item["text"]);
++    const copy = html`<button aria-label="Copy message or tool output" @click=${() => { this.action(async () => { await navigator.clipboard.writeText(body); }); }}>Copy</button>`;
++    if (kind === "userMessage" || kind === "agentMessage") {
++      return html`<article class=${`${kind} ${text(item["phase"]) === "commentary" ? "commentary" : ""}`} aria-label=${kind === "userMessage" ? "Your message" : "Codex response"}>
++        ${kind === "agentMessage" ? html`<div class="markdown">${unsafeHTML(this.markdownHtml(item))}</div>` : html`<div class="user-text">${body}</div>`}
++        <div class="message-actions">${copy}</div></article>`;
++    }
++    const state = this.activityState(item);
++    const elapsed = this.duration(item["durationMs"]);
++    const changes = array(item["changes"]).map(object);
++    return html`<details class=${`activity-item ${state === "Failed" ? "failed" : ""} ${kind}`} ?open=${kind === "reasoning" && state === "Running"}>
++      <summary><span class="activity-name">${this.activityLabel(item)}</span><span class="activity-status">${state}${elapsed ? ` · ${elapsed}` : ""}</span></summary>
++      ${kind === "commandExecution" ? html`<div class="command-shell"><div class="command-line"><span>$</span><code>${text(item["command"]) || body.split("\n")[0]}</code></div><pre>${typeof item["output"] === "string" ? item["output"] : body.split("\n").slice(1).join("\n")}</pre><div class="command-footer">${state}${typeof item["exitCode"] === "number" ? ` · Exit code ${String(item["exitCode"])}` : ""}${text(item["cwd"]) ? html`<span title=${text(item["cwd"])}>${text(item["cwd"])}</span>` : nothing}</div></div>`
++        : kind === "fileChange" ? html`${changes.length ? changes.map((change) => html`<div class="changed-file"><div class="file-heading">${text(change["path"])}<small>${text(change["kind"])}</small></div>${this.renderDiff(text(change["diff"]))}</div>`) : this.renderDiff(body)}`
++        : ["reasoning", "plan"].includes(kind) ? html`<div class="markdown reasoning-body">${unsafeHTML(this.markdownHtml(item))}</div>`
++        : html`${text(item["input"]) ? html`<details class="tool-input"><summary>Input</summary><pre>${text(item["input"])}</pre></details>` : nothing}<pre class="tool-output">${body || (state === "Running" ? "Waiting for output…" : "No output")}</pre>`}
++      <div class="tool-actions">${copy}</div>
++    </details>`;
++  }
++  private renderApproval(view: CodexView, approval: RecordValue) {
++    const params = object(approval["params"]);
++    const id = text(approval["id"]);
++    const answer = (input: RecordValue): void => { this.action((runtime, state) => runtime.request(state, "answer", { threadId: state.threadId, approvalId: id, ...input })); };
++    const questions = array(params["questions"]);
++    return html`<form class="approval" @submit=${(event: SubmitEvent) => {
++      event.preventDefault();
++      if (!(event.target instanceof HTMLFormElement)) return;
++      const form = new FormData(event.target);
++      answer({ answers: Object.fromEntries(questions.map((question) => { const key = text(object(question)["id"]); return [key, text(form.get(key))]; })) });
++    }}><strong>${text(approval["method"])}</strong>
++      <small>${view.context.machine.id} / ${view.context.workspace.label} / ${view.threadId}</small>
++      <pre>${[text(params["command"]), text(params["cwd"]), text(params["reason"]), text(params["grantRoot"])].filter((value) => value !== "").join("\n") || "Review the associated tool changes before approving."}</pre>
++      ${questions.length > 0 ? html`${questions.map((entry) => {
++        const question = object(entry); const options = array(question["options"]);
++        return html`<label>${text(question["question"])}${options.length > 0
++          ? html`<select name=${text(question["id"])} required>${options.map((option) => html`<option value=${text(object(option)["label"])}>${text(object(option)["label"])} — ${text(object(option)["description"])}</option>`)}</select>`
++          : html`<input name=${text(question["id"])} type=${question["isSecret"] === true ? "password" : "text"} required maxlength="4000">`}</label>`;
++      })}<button type="submit" ?disabled=${view.pending}>Submit answers</button>` : html`
++        <button type="button" ?disabled=${view.pending} @click=${() => { answer({ decision: "accept" }); }}>Allow once</button>
++        <button type="button" ?disabled=${view.pending} @click=${() => { answer({ decision: "decline" }); }}>Deny</button>
++        <button type="button" ?disabled=${view.pending} @click=${() => { answer({ decision: "cancel" }); }}>Cancel</button>`}
++    </form>`;
++  }
++  static override styles = css`
++    :host { display:block; height:100%; min-height:0; min-width:0; container-type:inline-size; color-scheme:inherit; color:var(--pi-text,#171717); background:var(--pi-bg,#fff); font:13px/1.5 system-ui,sans-serif; }
++    * { box-sizing:border-box; }
++    .layout { position:relative; display:grid; grid-template-columns:minmax(0,1fr); grid-template-rows:46px minmax(0,1fr); height:100%; overflow:hidden; }
++    .layout[data-review-open] { grid-template-columns:minmax(0,1fr) 300px; }
++    header { grid-column:1 / -1; display:flex; align-items:center; gap:12px; padding:0 14px; border-bottom:1px solid var(--pi-border-muted,#ececec); min-width:0; padding-right:136px; }
++    header strong { font-size:14px; } .task-title { font-weight:600; max-width:35%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
++    .scope { flex:1; min-width:0; color:var(--pi-muted,#858585); font:11px/1.5 monospace; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
++    button,select,input,textarea { font:inherit; color:inherit; background:transparent; border:1px solid transparent; border-radius:7px; padding:5px 8px; }
++    select { color-scheme:inherit; background:var(--pi-bg,#fff); color:var(--pi-text,#171717); border-color:var(--pi-border,#ddd); }
++    option,optgroup { background:var(--pi-surface,#fff); color:var(--pi-text,#171717); }
++    option:checked { background:var(--pi-selection-bg,#ededed); }
++    button,summary,select { cursor:pointer; } button:hover,summary:hover { background:var(--pi-surface-hover,#ededed); } button:disabled,select:disabled { opacity:.45; cursor:default; }
++    button:focus-visible,select:focus-visible,summary:focus-visible,input:focus-visible,textarea:focus-visible { outline:2px solid var(--pi-accent,#777); outline-offset:2px; }
++    .history { position:absolute; top:8px; right:12px; z-index:3; } .history>summary { padding:5px 8px; border-radius:6px; }
++    .history-menu { position:absolute; top:34px; right:0; display:flex; flex-wrap:wrap; gap:6px; padding:12px; width:280px; border:1px solid var(--pi-border,#e4e4e4); border-radius:10px; background:var(--pi-surface,#fff); box-shadow:0 8px 24px var(--pi-shadow,#0002); }
++    .history-menu select { width:100%; border-color:var(--pi-border-muted,#e4e4e4); }
++    main { display:flex; flex-direction:column; min-width:0; min-height:0; position:relative; }
++    .transcript { flex:1; min-height:0; overflow:auto; padding:30px 32px 16px; overflow-anchor:none; }
++    article { margin:0 auto 20px; max-width:820px; } .userMessage { width:fit-content; max-width:85%; margin-left:auto; margin-right:0; padding:9px 14px; background:var(--pi-surface,#f3f3f3); border-radius:20px; }
++    .agentMessage { padding:0; } .user-text { white-space:pre-wrap; overflow-wrap:anywhere; } .label { display:flex; justify-content:flex-end; height:0; overflow:hidden; } article:hover .label,article:focus-within .label { height:auto; } .label button { font-size:11px; color:var(--pi-muted,#777); }
++    pre { white-space:pre-wrap; overflow-wrap:anywhere; margin:0; font:12px/1.6 monospace; } .userMessage pre { font:inherit; }
++    .transcript details { margin:12px 0; color:var(--pi-muted,#777); } .transcript details pre { padding:12px; background:var(--pi-surface,#f7f7f7); border-radius:8px; }
++    summary { padding:6px; } .markdown { overflow-wrap:anywhere; } .markdown p { margin:0 0 12px; } .markdown pre { padding:12px; overflow:auto; background:var(--pi-surface,#f7f7f7); border-radius:8px; } .markdown a { color:var(--pi-accent,#4569ae); } .markdown table { border-collapse:collapse; display:block; overflow:auto; } .markdown td,.markdown th { border:1px solid var(--pi-border,#ddd); padding:4px; }
++    footer { flex:none; margin:12px 16px 0; padding:12px 8px 7px; background:var(--pi-surface,#f7f7f7); border:1px solid var(--pi-border-muted,#e4e4e4); border-radius:22px; box-shadow:0 4px 18px #00000005; }
++    textarea { display:block; width:100%; resize:vertical; min-height:70px; max-height:180px; padding:3px 7px 12px; border:0; background:transparent; }
++    textarea::placeholder { color:var(--pi-muted,#858585); } .composer-controls { display:flex; align-items:center; gap:2px; flex-wrap:wrap; } .composer-controls select { font-size:12px; max-width:180px; min-width:0; padding:4px; color:var(--pi-muted,#707070); } .composer-spacer { flex:1; }
++    .policy { font-size:12px; padding:4px 6px; color:var(--pi-muted,#707070); } .primary { width:32px; height:32px; padding:0; border-radius:50%; background:var(--pi-text,#171717); color:var(--pi-bg,#fff); font-size:23px; } .primary:hover { background:var(--pi-muted,#666); }
++    .message-actions { height:24px; opacity:0; display:flex; gap:4px; font-size:11px; color:var(--pi-muted,#777); } article:hover .message-actions,article:focus-within .message-actions { opacity:1; } .userMessage { position:relative; margin-bottom:32px; } .userMessage .message-actions { position:absolute; top:100%; right:4px; } .commentary { margin-bottom:12px; }
++    .transcript .activity-group { border:0; padding:0; margin:12px 0 20px; } .activity-group>summary { display:flex; align-items:center; gap:8px; list-style:none; } .activity-group>summary::before { content:"›"; } .activity-group[open]>summary::before { transform:rotate(90deg); } .activity-group>summary>span:nth-of-type(2) { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .activity-group small { margin-left:auto; }
++    .activity-items { border-left:1px solid var(--pi-border-muted,#e5e5e5); margin:6px 0 0 12px; padding-left:12px; } .transcript .activity-item { margin:4px 0 8px; } .activity-item>summary { display:flex; align-items:center; gap:8px; list-style:none; } .activity-item>summary::before { content:"›"; } .activity-item[open]>summary::before { transform:rotate(90deg); } .activity-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .activity-status { flex:none; font-size:11px; color:var(--pi-muted,#888); } .failed>summary,.failed .activity-status { color:var(--pi-danger,#c33); }
++    .command-shell { border:1px solid var(--pi-border-muted,#e5e5e5); border-radius:10px; overflow:hidden; margin:8px 0; background:var(--pi-surface,#f7f7f7); color:var(--pi-text,#171717); } .command-line { display:flex; gap:10px; padding:12px; font:12px/1.6 monospace; } .command-line code { white-space:pre-wrap; overflow-wrap:anywhere; } .command-line>span { color:var(--pi-muted,#888); } .transcript .command-shell pre { padding:0 12px 12px; border-radius:0; max-height:320px; overflow:auto; } .command-footer { border-top:1px solid var(--pi-border-muted,#e5e5e5); padding:7px 12px; font-size:11px; display:flex; gap:12px; } .command-footer>span { margin-left:auto; max-width:60%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
++    .changed-file { margin:8px 0; border:1px solid var(--pi-border-muted,#e5e5e5); border-radius:8px; overflow:hidden; } .file-heading { padding:8px 10px; overflow-wrap:anywhere; font:12px/1.5 monospace; display:flex; gap:8px; } .file-heading small { margin-left:auto; } .transcript .changed-file .diff { padding:0; margin:0; border-radius:0; background:transparent; } .reasoning-body { padding:8px 12px; color:var(--pi-muted,#777); } .tool-output { max-height:320px; overflow:auto; } .tool-actions { display:flex; justify-content:flex-end; font-size:11px; } .worked-divider { display:flex; align-items:center; gap:10px; margin:20px 0; color:var(--pi-muted,#777); } .worked-divider>span { height:1px; flex:1; background:var(--pi-border-muted,#e5e5e5); }
++    .working { display:flex; align-items:center; gap:8px; margin:16px 0; color:var(--pi-muted,#777); } .activity-dot { display:inline-block; width:7px; height:7px; flex:none; border-radius:50%; background:currentColor; animation:activity-pulse 1.4s ease-in-out infinite; } @keyframes activity-pulse { 50% { opacity:.3; } } @media(prefers-reduced-motion:reduce) { .activity-dot { animation:none; } } @media(hover:none) { .message-actions { opacity:1; } }
++    .context-picker { position:relative; flex:none; } .context-picker>summary { display:grid; place-items:center; width:28px; height:28px; border:1px solid var(--pi-border-muted,#ddd); border-radius:50%; padding:0; list-style:none; font-size:20px; line-height:1; } .context-picker>summary::-webkit-details-marker { display:none; }
++    .context-menu { position:absolute; z-index:5; bottom:36px; left:0; width:min(360px,calc(100cqw - 40px)); max-height:min(440px,65cqh); overflow:auto; padding:10px; border:1px solid var(--pi-border,#ddd); border-radius:12px; background:var(--pi-surface,#fff); box-shadow:0 8px 24px var(--pi-shadow,#0002); } .context-heading,.context-navigation,.context-bottom,.context-entry { display:flex; align-items:center; gap:6px; } .context-heading strong,.context-navigation>span,.context-bottom small { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .context-navigation { margin:6px 0; font-size:11px; } .context-filter { width:100%; border-color:var(--pi-border-muted,#ddd); margin-bottom:8px; } .context-entries { max-height:230px; overflow:auto; } .context-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-align:left; } .context-entry>button:last-child { font-size:11px; } .context-menu p { font-size:12px; margin:10px 0; } .context-bottom { margin-top:8px; border-top:1px solid var(--pi-border-muted,#ddd); padding-top:6px; }
++    .context-tray { display:flex; flex-wrap:wrap; gap:6px; padding:0 6px 8px; max-height:100px; overflow:auto; } .context-tray>span { display:flex; align-items:center; gap:4px; border:1px solid var(--pi-border-muted,#ddd); border-radius:8px; padding-left:8px; max-width:100%; overflow-wrap:anywhere; font-size:11px; } .context-tray button { flex:none; }
++    .model-picker { position:relative; min-width:0; max-width:65%; } .model-picker>summary { font-size:13px; color:var(--pi-muted,#707070); padding:4px 5px; border-radius:7px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; list-style:none; } .model-picker>summary::-webkit-details-marker { display:none; } .model-picker>summary::after { content:"⌄"; margin-left:6px; } .model-picker>summary span { margin-left:5px; }
++    .model-menu { position:absolute; z-index:4; left:0; bottom:36px; width:224px; max-height:min(320px,50vh); overflow:auto; padding:12px; border:1px solid var(--pi-border,#e4e4e4); border-radius:10px; background:var(--pi-surface,#fff); box-shadow:0 8px 24px var(--pi-shadow,#0002); } .model-menu label { font-size:11px; color:var(--pi-muted,#777); margin-bottom:8px; } .model-menu select { max-width:100%; width:100%; margin-top:4px; color:var(--pi-text,#171717); }
++    .connection-status { padding:3px 20px; min-height:22px; font-size:10px; color:var(--pi-muted,#888); }
++    .latest { align-self:center; font-size:11px; border-color:var(--pi-border-muted,#eee); } section { flex-shrink:0; max-height:35%; overflow:auto; }
++    .approval { margin:8px 16px; padding:12px; border:1px solid var(--pi-accent,#8ab4ff); border-radius:10px; } .approval strong,small { overflow-wrap:anywhere; } small { display:block; font-size:11px; color:var(--pi-muted,#777); } .approval pre { margin:8px 0; } label { display:block; } label input,label select { display:block; width:100%; border-color:var(--pi-border,#ddd); }
++    .error { color:var(--pi-danger,#c33); overflow-wrap:anywhere; max-height:120px; overflow:auto; } main>p { margin:8px 16px; } .empty { color:var(--pi-muted,#888); margin:12px 0; }
++    aside { min-width:0; min-height:0; border-left:1px solid var(--pi-border-muted,#ececec); display:flex; flex-direction:column; background:var(--pi-bg,#fff); }
++    .review-header { display:flex; align-items:center; justify-content:space-between; padding:8px 12px; border-bottom:1px solid var(--pi-border-muted,#ececec); color:var(--pi-muted,#666); } .count { display:inline-block; padding:0 5px; background:var(--pi-surface,#f3f3f3); border-radius:4px; font-size:11px; }
++    .review-content { overflow:auto; padding:8px; flex:1; } .review-content .empty { padding:8px; font-size:12px; } .change { border-bottom:1px solid var(--pi-border-muted,#ececec); margin-bottom:10px; } .change summary { font-size:12px; } .change summary span { color:var(--pi-muted,#888); font-size:10px; } .diff { overflow:auto; padding:4px 0 10px; font-size:11px; } .diff span { display:block; padding:0 8px; white-space:pre-wrap; } .addition { background:var(--pi-success-surface,#e3f1e8); } .deletion { background:var(--pi-danger-surface,#fae8e8); } .hunk { background:var(--pi-surface,#f0f0f0); color:var(--pi-muted,#777); }
++    @container (max-width:850px) { .layout[data-review-open] { grid-template-columns:minmax(0,1fr); } aside { position:absolute; z-index:2; top:46px; bottom:0; right:0; width:min(340px,90%); box-shadow:-8px 0 24px #0001; } .transcript { padding:24px 20px; } }
++    @container (max-width:520px) {
++      .layout { grid-template-rows:88px minmax(0,1fr); }
++      header { display:grid; grid-template-columns:auto auto auto; grid-template-rows:36px 44px; gap:0 6px; align-content:center; padding:0 10px; }
++      .task-title,header strong { display:none; }
++      .scope { grid-column:1 / -1; width:100%; font-size:12px; padding-right:110px; }
++      header>button { min-height:44px; font-size:12px; padding:4px 8px; }
++      .history { top:0; right:10px; }
++      .history>summary { min-height:44px; display:flex; align-items:center; padding:4px 8px; font-size:12px; }
++      .history-menu { top:46px; width:min(320px,calc(100cqw - 20px)); max-height:55dvh; overflow:auto; }
++      .transcript { padding:16px 12px; overscroll-behavior:contain; }
++      article { min-width:0; max-width:100%; }
++      .userMessage { max-width:92%; }
++      .markdown img { max-width:100%; height:auto; }
++      .command-line code { min-width:0; }
++      footer { position:relative; margin:6px 8px 0; padding:10px 8px 4px; border-radius:16px; }
++      textarea { min-height:56px; max-height:min(120px,24dvh); font-size:16px; resize:none; }
++      input,select,.composer-controls select { font-size:16px; min-height:44px; }
++      .composer-controls { display:grid; grid-template-columns:44px minmax(0,1fr) auto auto; gap:2px; }
++      .composer-controls>.policy { grid-column:1 / -1; grid-row:2; font-size:11px; padding:2px 4px; }
++      .composer-spacer { display:none; }
++      .context-picker,.model-picker { position:static; max-width:100%; }
++      .context-picker>summary,.primary { width:44px; height:44px; }
++      .model-picker>summary { padding:10px 5px; min-height:44px; font-size:12px; }
++      .composer-controls>button { min-height:44px; }
++      .model-menu,.context-menu { left:0; right:0; bottom:calc(100% + 8px); width:auto; max-height:min(360px,50dvh); overscroll-behavior:contain; }
++      .model-menu select { max-width:100%; }
++      .context-menu button,.history-menu button { min-height:44px; }
++      .context-entries { max-height:25dvh; }
++      .connection-status { padding:3px 12px max(3px,env(safe-area-inset-bottom)); }
++      .approval { margin:6px 8px; padding:10px; }
++      .approval button { min-height:44px; }
++      aside { top:88px; width:100%; }
++      .review-header button { min-height:44px; }
++    }
++  `;
++}
+diff --git a/pi-web-plugins/codex/markdown.ts b/pi-web-plugins/codex/markdown.ts
+new file mode 120000
+index 00000000..217c2463
+--- /dev/null
++++ b/pi-web-plugins/codex/markdown.ts
+@@ -0,0 +1 @@
++../files/workspaceMarkdown.ts
+\ No newline at end of file
+diff --git a/pi-web-plugins/codex/package.json b/pi-web-plugins/codex/package.json
+new file mode 100644
+index 00000000..3fef6ee6
+--- /dev/null
++++ b/pi-web-plugins/codex/package.json
+@@ -0,0 +1,14 @@
++{
++  "name": "@pi-web/codex-plugin",
++  "private": true,
++  "type": "module",
++  "piWeb": {
++    "plugins": [{
++      "id": "pi-web.codex",
++      "browserRoot": "browser",
++      "module": "browser/pi-web-plugin.js",
++      "serverModule": "server-plugin.js",
++      "machineSpecific": true
++    }]
++  }
++}
+diff --git a/pi-web-plugins/codex/pi-web-plugin.ts b/pi-web-plugins/codex/pi-web-plugin.ts
+new file mode 100644
+index 00000000..b4617070
+--- /dev/null
++++ b/pi-web-plugins/codex/pi-web-plugin.ts
+@@ -0,0 +1,32 @@
++import type { PiWebPlugin } from "@jmfederico/pi-web/plugin-api";
++import { html, unsafeStatic } from "lit/static-html.js";
++import { CodexPanel } from "./CodexPanel.js";
++import { CodexBrowserRuntime } from "./CodexBrowserRuntime.js";
++
++const plugin: PiWebPlugin = {
++  apiVersion: 4,
++  name: "Codex",
++  activate(context) {
++    const runtime = new CodexBrowserRuntime();
++    const name = `pi-web-codex-${context.runtimePluginId.replaceAll(/[^a-z0-9]+/gu, "-")}`;
++    if (customElements.get(name) === undefined) customElements.define(name, class extends CodexPanel {});
++    const tag = unsafeStatic(name);
++    const dispose = (): void => { runtime.dispose(); };
++    context.lifetimeSignal.addEventListener("abort", dispose, { once: true });
++    return {
++      dispose: () => { context.lifetimeSignal.removeEventListener("abort", dispose); dispose(); },
++      contributions: {
++        workspacePanels: [{
++          id: "workspace.codex", title: "Codex", order: 31,
++          icon: context.svg`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m8 6-6 6 6 6M16 6l6 6-6 6M14 3l-4 18"/></svg>`,
++          badge: (workspace) => runtime.badge(workspace),
++          render: (workspace) => html`<${tag} .context=${workspace} .runtime=${runtime}></${tag}>`,
++        }],
++        actions: [{ id: "view.codex", title: "Go to Codex", group: "Navigation", enabled: (runtimeContext) => runtimeContext.state.selectedWorkspace !== undefined,
++          run: (runtimeContext) => { runtimeContext.selectWorkspaceTool(`${context.runtimePluginId}:workspace.codex`); },
++        }],
++      },
++    };
++  },
++};
++export default plugin;
+diff --git a/pi-web-plugins/codex/server/codexProtocol.test.ts b/pi-web-plugins/codex/server/codexProtocol.test.ts
+new file mode 100644
+index 00000000..8e50a997
+--- /dev/null
++++ b/pi-web-plugins/codex/server/codexProtocol.test.ts
+@@ -0,0 +1,62 @@
++import { afterEach, describe, expect, it, vi } from "vitest";
++import { CodexProcess } from "./codexProtocol.js";
++import type { RecordValue } from "./protocol.js";
++
++const connections: CodexProcess[] = [];
++afterEach(() => { for (const connection of connections) connection.dispose(); connections.length = 0; vi.useRealTimers(); });
++const script = `
++let buffer='';
++process.stdin.on('data',chunk=>{ buffer+=chunk; let end; while((end=buffer.indexOf('\\n'))>=0){const line=buffer.slice(0,end);buffer=buffer.slice(end+1);const msg=JSON.parse(line);if(msg.method==='initialized')continue;
++ if(msg.method==='hang'){continue;}
++ if(msg.method==='crash'){process.exit(3);}
++ if(msg.method==='malformed'){process.stdout.write('not-json\\n');continue;}
++ const result=msg.method==='initialize'?{}:{message:'你好 😀',pid:process.pid};
++ const data=Buffer.from(JSON.stringify({id:msg.id,result})+'\\n');
++ if(msg.method==='split'){for(let i=0;i<data.length;i++)process.stdout.write(data.subarray(i,i+1));}
++ else process.stdout.write(data);
++}});
++`;
++function fixture() {
++  const events: RecordValue[] = [];
++  const exited = vi.fn();
++  const connection = new CodexProcess(process.cwd(), (frame) => { events.push(frame); }, exited, process.execPath, ["-e", script]);
++  connections.push(connection);
++  return { connection, exited };
++}
++
++describe("Codex stdio transport", () => {
++  it("initializes, correlates parallel requests, and decodes split UTF-8 lines", async () => {
++    const { connection } = fixture();
++    const results = await Promise.all([connection.request("split", {}), connection.request("normal", {})]);
++    expect(results.map((result) => result["message"])).toEqual(["你好 😀", "你好 😀"]);
++  });
++  it("rejects pending requests on process exit and malformed frames", async () => {
++    const first = fixture();
++    await expect(first.connection.request("crash", {})).rejects.toThrow("exited");
++    expect(first.exited).toHaveBeenCalledTimes(1);
++    const second = fixture();
++    await expect(second.connection.request("malformed", {})).rejects.toThrow("protocol error");
++    expect(second.exited).toHaveBeenCalledTimes(1);
++  });
++  it("bounds stalled RPCs and rejects every pending call on timeout", async () => {
++    const { connection } = fixture();
++    await connection.request("normal", {});
++    vi.useFakeTimers();
++    const first = expect(connection.request("hang", {})).rejects.toThrow("timed out");
++    const second = expect(connection.request("hang", {})).rejects.toThrow("timed out");
++    await vi.advanceTimersByTimeAsync(25000);
++    await Promise.all([first, second]);
++    vi.useRealTimers();
++  });
++  it("terminates its actual child on disposal and reports missing executables", async () => {
++    const { connection } = fixture();
++    const result = await connection.request("pid", {});
++    const pid = result["pid"];
++    if (typeof pid !== "number") throw new Error("Expected child pid");
++    connection.dispose();
++    await vi.waitFor(() => { expect(() => process.kill(pid, 0)).toThrow(); });
++    const missing = new CodexProcess(process.cwd(), () => undefined, () => undefined, "/missing/pi-web-codex-executable");
++    connections.push(missing);
++    await expect(missing.request("status", {})).rejects.toThrow("Install Codex CLI");
++  });
++});
+diff --git a/pi-web-plugins/codex/server/codexProtocol.ts b/pi-web-plugins/codex/server/codexProtocol.ts
+new file mode 100644
+index 00000000..d3d0bcbd
+--- /dev/null
++++ b/pi-web-plugins/codex/server/codexProtocol.ts
+@@ -0,0 +1,96 @@
++import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
++import { StringDecoder } from "node:string_decoder";
++import { errorText, object, type RecordValue } from "./protocol.js";
++
++export interface CodexConnection {
++  request(method: string, params: RecordValue): Promise<RecordValue>;
++  reply(id: string | number, result: RecordValue): void;
++  reject(id: string | number, message: string): void;
++  dispose(): void;
++}
++export type ConnectionFactory = (cwd: string, event: (frame: RecordValue) => void, exited: (message: string) => void) => CodexConnection;
++
++/** Owns stdio framing and pending RPCs. Never binds process lifetime to an HTTP request. */
++export class CodexProcess implements CodexConnection {
++  private readonly child: ChildProcessWithoutNullStreams;
++  private readonly pending = new Map<number, { resolve: (value: RecordValue) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
++  private nextId = 0;
++  private buffer = "";
++  private ended = false;
++  private readonly ready: Promise<void>;
++
++  constructor(cwd: string, private readonly event: (frame: RecordValue) => void, private readonly exited: (message: string) => void,
++    command = "codex", args = ["app-server", "--listen", "stdio://"]) {
++    this.child = spawn(command, args, { cwd, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
++    const decoder = new StringDecoder("utf8");
++    this.child.stdout.on("data", (chunk: Buffer) => {
++      try {
++        this.buffer += decoder.write(chunk);
++        let newline: number;
++        while ((newline = this.buffer.indexOf("\n")) !== -1) {
++          if (newline > 16 * 1024 * 1024) throw new Error("Codex response exceeds 16 MiB");
++          const line = this.buffer.slice(0, newline);
++          this.buffer = this.buffer.slice(newline + 1);
++          if (line.trim() !== "") this.receive(object(JSON.parse(line)));
++        }
++        if (this.buffer.length > 16 * 1024 * 1024) throw new Error("Codex response exceeds 16 MiB");
++      } catch (error) { this.fail(`Codex protocol error: ${errorText(error)}`); }
++    });
++    // Drain diagnostics without retaining prompts, credentials, or unbounded logs.
++    this.child.stderr.resume();
++    this.child.stdin.on("error", (error) => { this.fail(`Codex stdin: ${error.message}`); });
++    this.child.on("error", (error) => { this.fail(`Cannot start Codex. Install Codex CLI on this machine and check its PATH. ${error.message}`); });
++    this.child.on("exit", (code, signal) => { this.fail(`Codex app-server exited (${String(code ?? signal)}). Reopen the conversation to recover saved history.`); });
++    this.ready = this.rpc("initialize", { clientInfo: { name: "pi_web_codex", title: "PI WEB Codex", version: "1.0.0" }, capabilities: { experimentalApi: true } })
++      .then(() => { this.write({ method: "initialized" }); });
++    void this.ready.catch((error: unknown) => { this.fail(`Codex initialization failed: ${errorText(error)}`); });
++  }
++
++  async request(method: string, params: RecordValue): Promise<RecordValue> {
++    await this.ready;
++    return this.rpc(method, params);
++  }
++  reply(id: string | number, result: RecordValue): void { this.write({ id, result }); }
++  reject(id: string | number, message: string): void { this.write({ id, error: { code: -32601, message } }); }
++  dispose(): void { this.fail("Codex plugin stopped; active work was interrupted."); }
++
++  private rpc(method: string, params: RecordValue): Promise<RecordValue> {
++    if (this.ended) return Promise.reject(new Error("Codex process is unavailable; reconnect to recover."));
++    const id = ++this.nextId;
++    return new Promise((resolve, reject) => {
++      const timer = setTimeout(() => { this.fail(`Codex ${method} timed out; process stopped to avoid an uncertain active turn.`); }, 25000);
++      this.pending.set(id, { resolve, reject, timer });
++      try { this.write({ id, method, params }); }
++      catch (error) { this.fail(errorText(error)); }
++    });
++  }
++  private write(frame: RecordValue): void {
++    if (this.ended) throw new Error("Codex process is closed");
++    if (this.child.stdin.writableLength > 1024 * 1024) throw new Error("Codex input queue is full");
++    this.child.stdin.write(`${JSON.stringify(frame)}\n`);
++  }
++  private receive(frame: RecordValue): void {
++    if (typeof frame["method"] === "string") { this.event(frame); return; }
++    const id = frame["id"];
++    if (typeof id !== "number") return;
++    const pending = this.pending.get(id);
++    if (pending === undefined) return;
++    this.pending.delete(id);
++    clearTimeout(pending.timer);
++    if (frame["error"] !== undefined) pending.reject(new Error(`Codex: ${JSON.stringify(frame["error"])}`));
++    else pending.resolve(object(frame["result"]));
++  }
++  private fail(message: string): void {
++    if (this.ended) return;
++    this.ended = true;
++    for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(new Error(message)); }
++    this.pending.clear();
++    this.child.kill("SIGTERM");
++    const killTimer = setTimeout(() => { if (this.child.exitCode === null) this.child.kill("SIGKILL"); }, 2000);
++    killTimer.unref();
++    this.child.once("exit", () => { clearTimeout(killTimer); });
++    this.exited(message);
++  }
++}
++
++export const createCodexConnection: ConnectionFactory = (cwd, event, exited) => new CodexProcess(cwd, event, exited);
+diff --git a/pi-web-plugins/codex/server/codexService.test.ts b/pi-web-plugins/codex/server/codexService.test.ts
+new file mode 100644
+index 00000000..abc7194f
+--- /dev/null
++++ b/pi-web-plugins/codex/server/codexService.test.ts
+@@ -0,0 +1,215 @@
++import { mkdtemp, mkdir, writeFile, symlink, rm } from "node:fs/promises";
++import { join } from "node:path";
++import { tmpdir } from "node:os";
++import { afterEach, describe, expect, it, vi } from "vitest";
++import type { ServerPluginPeerRequestContext, ServerPluginPeerChannelOpenContext } from "@jmfederico/pi-web/server-plugin-api";
++import { CodexService } from "./codexService.js";
++import type { CodexConnection } from "./codexProtocol.js";
++import { array, object, type RecordValue } from "./protocol.js";
++
++const services: CodexService[] = [];
++afterEach(() => { for (const service of services) service.dispose(); services.length = 0; });
++function fixture() {
++  let emit: (frame: RecordValue) => void = () => undefined;
++  let exit: (message: string) => void = () => undefined;
++  let cwd = "/work/one";
++  const request = vi.fn(async (method: string, params: RecordValue): Promise<RecordValue> => {
++    await Promise.resolve();
++    if (method === "thread/start") return { thread: { id: "new", cwd: params["cwd"] ?? null, turns: [] } };
++    if (method === "thread/read") return { thread: { id: "saved", cwd, turns: [{ id: "old", status: "completed", items: [{ id: "answer", type: "agentMessage", text: "Saved answer" }] }] } };
++    if (method === "thread/resume") return { thread: { id: "saved", cwd, turns: [{ id: "old", status: "completed", items: [{ id: "answer", type: "agentMessage", text: "Saved answer" }] }] } };
++    if (method === "turn/start") return { turn: { id: "turn", status: "inProgress" } };
++    return {};
++  });
++  const reply = vi.fn();
++  const reject = vi.fn();
++  const connection: CodexConnection = { request, reply, reject, dispose: vi.fn() };
++  const service = new CodexService((_cwd, event, exited) => { emit = event; exit = exited; return connection; });
++  services.push(service);
++  const call = (operation: string, input: RecordValue = {}, workspace = "/work/one") => service.request({
++    project: { id: "project", name: "Project", path: "/work" }, workspace: { id: workspace, projectId: "project", path: workspace, label: "One", isMain: true },
++    operation, input, signal: new AbortController().signal,
++  } satisfies ServerPluginPeerRequestContext).then(object);
++  const open = (send: ServerPluginPeerChannelOpenContext["send"], signal: AbortSignal, id = "new", workspace = "/work/one") => service.openChannel({
++    project: { id: "project", name: "Project", path: "/work" }, workspace: { id: workspace, projectId: "project", path: workspace, label: "One", isMain: true },
++    operation: "events", input: { threadId: id }, signal, send,
++  });
++  return { call, open, request, connection, reply, reject, emit: (frame: RecordValue) => { emit(frame); }, exit: (message: string) => { exit(message); }, cwd: (value: string) => { cwd = value; } };
++}
++
++describe("Codex workspace service", () => {
++  it("reports configured settings from start, history, resume and setting events", async () => {
++    const f = fixture();
++    const original = f.request.getMockImplementation();
++    if (original === undefined) throw new Error("Missing request fixture");
++    f.request.mockImplementation(async (method, params) => {
++      const result = await original(method, params);
++      if (method === "thread/start") return { ...result, model: "configured-model", reasoningEffort: "high" };
++      if (method === "thread/resume") return { ...result, model: "resumed-model", reasoningEffort: "low" };
++      if (method === "thread/read") return { thread: { ...object(result["thread"]), model: "saved-model", reasoningEffort: "medium" } };
++      return result;
++    });
++    await f.call("create");
++    expect(await f.call("snapshot", { threadId: "new" })).toMatchObject({ model: "configured-model", effort: "high" });
++    expect(await f.call("snapshot", { threadId: "saved" })).toMatchObject({ model: "saved-model", effort: "medium" });
++    expect(f.request).not.toHaveBeenCalledWith("thread/resume", expect.anything());
++    await f.call("send", { threadId: "saved", text: "hello" });
++    expect(await f.call("snapshot", { threadId: "saved" })).toMatchObject({ model: "resumed-model", effort: "low" });
++    await f.call("send", { threadId: "new", text: "hello", model: "chosen-model", effort: "xhigh" });
++    expect(await f.call("snapshot", { threadId: "new" })).toMatchObject({ model: "chosen-model", effort: "xhigh" });
++    f.emit({ method: "thread/settings/updated", params: { threadId: "new", threadSettings: { model: "updated-model", effort: null } } });
++    expect(await f.call("snapshot", { threadId: "new" })).toMatchObject({ model: "updated-model", effort: "" });
++  });
++
++  it("checks persisted thread cwd before resume and never accepts client cwd", async () => {
++    const f = fixture();
++    f.cwd("/other/workspace");
++    await expect(f.call("snapshot", { threadId: "saved", cwd: "/other/workspace" })).rejects.toThrow("another workspace");
++    expect(f.request).not.toHaveBeenCalledWith("thread/resume", expect.anything());
++    await f.call("create", { cwd: "/untrusted" });
++    expect(f.request).toHaveBeenCalledWith("thread/start", expect.objectContaining({ cwd: "/work/one", sandbox: "danger-full-access", approvalPolicy: "never" }));
++  });
++  it("resumes once across concurrent sends and returns deduplicated authoritative items", async () => {
++    const f = fixture();
++    await Promise.allSettled([f.call("send", { threadId: "saved", text: "hello" }), f.call("send", { threadId: "saved", text: "duplicate" })]);
++    expect(f.request.mock.calls.filter(([method]) => method === "thread/resume")).toHaveLength(1); expect(f.request).toHaveBeenCalledWith("thread/resume", expect.objectContaining({ sandbox: "danger-full-access", approvalPolicy: "never" }));
++    f.emit({ method: "item/agentMessage/delta", params: { threadId: "saved", itemId: "answer", delta: " plus" } });
++    f.emit({ method: "item/completed", params: { threadId: "saved", item: { id: "answer", type: "agentMessage", text: "Final" } } });
++    const snapshot = await f.call("snapshot", { threadId: "saved" });
++    expect(snapshot["items"]).toEqual([{ id: "answer", kind: "agentMessage", text: "Final", status: "completed", turnId: "turn" }]);
++    expect(await f.call("snapshot", { threadId: "saved", version: snapshot["version"] ?? -1 })).toEqual({ changed: false });
++  });
++  it("reads externally owned history without resuming, refreshes it, and recovers after a rejected send", async () => {
++    const f = fixture();
++    const original = f.request.getMockImplementation();
++    if (original === undefined) throw new Error("Missing request fixture");
++    let answer = "External answer";
++    let locked = true;
++    f.request.mockImplementation(async (method, params) => {
++      if (method === "thread/resume" && locked) throw new Error('Codex: {"code":-32600,"message":"thread saved already has an active writer"}');
++      if (method === "thread/read") return { thread: { id: "saved", cwd: "/work/one", turns: [{ id: "old", items: [{ id: "answer", type: "agentMessage", text: answer }] }] } };
++      return original(method, params);
++    });
++    const first = await f.call("snapshot", { threadId: "saved" });
++    expect(first["items"]).toEqual([expect.objectContaining({ text: "External answer" })]);
++    expect(f.request).not.toHaveBeenCalledWith("thread/resume", expect.anything());
++    answer = "Updated externally";
++    const updated = await f.call("snapshot", { threadId: "saved", version: first["version"] ?? -1 });
++    expect(updated).toMatchObject({ changed: true, items: [expect.objectContaining({ text: answer })] });
++    await expect(f.call("send", { threadId: "saved", text: "hello" })).rejects.toThrow("Close it there");
++    expect(f.request).not.toHaveBeenCalledWith("turn/start", expect.anything());
++    expect(await f.call("snapshot", { threadId: "saved" })).toMatchObject({ items: [expect.objectContaining({ text: answer })] });
++    locked = false;
++    await expect(f.call("send", { threadId: "saved", text: "hello" })).resolves.toEqual({ accepted: true });
++  });
++  it("rejects concurrent sends, allows sending after completion, and scopes stop to the active turn", async () => {
++    const f = fixture();
++    await f.call("create");
++    const results = await Promise.allSettled([f.call("send", { threadId: "new", text: "hello" }), f.call("send", { threadId: "new", text: "duplicate" })]);
++    expect(results.map((result) => result.status)).toEqual(["fulfilled", "rejected"]);
++    await f.call("stop", { threadId: "new" });
++    expect(f.request).toHaveBeenCalledWith("turn/interrupt", { threadId: "new", turnId: "turn" });
++    f.emit({ method: "turn/completed", params: { threadId: "new", turn: { id: "turn", status: "interrupted" } } });
++    await expect(f.call("send", { threadId: "new", text: "continue" })).resolves.toEqual({ accepted: true });
++  });
++  it("applies an approval once and rejects escalation, expiry, and cross-workspace answers", async () => {
++    const f = fixture();
++    await f.call("create");
++    f.emit({ id: 7, method: "item/commandExecution/requestApproval", params: { threadId: "new", command: "npm test", turnId: "turn" } });
++    expect((await f.call("snapshot", { threadId: "new" }))["approvals"]).toHaveLength(1);
++    await expect(f.call("answer", { threadId: "new", approvalId: "7", decision: "acceptForSession" })).rejects.toThrow("Unsupported approval decision");
++    await expect(f.call("answer", { threadId: "new", approvalId: "7", decision: "accept" }, "/work/two")).rejects.toThrow("another workspace");
++    await f.call("answer", { threadId: "new", approvalId: "7", decision: "accept" });
++    await expect(f.call("answer", { threadId: "new", approvalId: "7", decision: "accept" })).rejects.toThrow("already answered");
++    expect(f.reply).toHaveBeenCalledTimes(1);
++    expect(f.reply).toHaveBeenCalledWith(7, { decision: "accept" });
++  });
++  it("returns explicit unsupported interaction errors and clears requests on turn completion", async () => {
++    const f = fixture(); await f.call("create");
++    f.emit({ id: "a", method: "item/fileChange/requestApproval", params: { threadId: "new", turnId: "turn" } });
++    f.emit({ id: "b", method: "future/interaction", params: { threadId: "new" } });
++    expect(f.reject).toHaveBeenCalledWith("b", expect.stringContaining("Unsupported interaction"));
++    f.emit({ method: "turn/completed", params: { threadId: "new", turn: { id: "turn", status: "completed" } } });
++    await expect(f.call("answer", { threadId: "new", approvalId: '"a"', decision: "accept" })).rejects.toThrow("expired");
++  });
++  it("preserves a process-exit error in snapshots until an explicit reconnect", async () => {
++    const f = fixture(); await f.call("create"); await f.call("send", { threadId: "new", text: "hi" });
++    f.exit("Process stopped");
++    expect(await f.call("snapshot", { threadId: "new" })).toMatchObject({ busy: false, status: "interrupted", error: "Process stopped" });
++  });
++  it("preserves structured activity, reasoning deltas, phase and actual turn duration", async () => {
++    const f = fixture(); await f.call("create");
++    f.emit({ method: "turn/started", params: { threadId: "new", turn: { id: "t", status: "inProgress" } } });
++    const emitItem = (item: RecordValue, method = "item/completed") => { f.emit({ method, params: { threadId: "new", turnId: "t", item } }); };
++    emitItem({ id: "reason", type: "reasoning", summary: [], content: [] }, "item/started");
++    for (const delta of ["Checking ", "the files"]) f.emit({ method: "item/reasoning/summaryTextDelta", params: { threadId: "new", turnId: "t", itemId: "reason", delta, summaryIndex: 0 } });
++    f.emit({ method: "item/reasoning/textDelta", params: { threadId: "new", turnId: "t", itemId: "reason", delta: "Other content", contentIndex: 0 } });
++    emitItem({ id: "cmd", type: "commandExecution", command: "npm test", cwd: "/work/one", aggregatedOutput: "", status: "inProgress" }, "item/started");
++    f.emit({ method: "item/commandExecution/outputDelta", params: { threadId: "new", turnId: "t", itemId: "cmd", delta: "failure" } });
++    expect((await f.call("snapshot", { threadId: "new" }))["items"]).toEqual(expect.arrayContaining([expect.objectContaining({ id: "cmd", output: "failure", command: "npm test" })]));
++    emitItem({ id: "cmd", type: "commandExecution", command: "npm test", cwd: "/work/one", aggregatedOutput: "failure", status: "completed", exitCode: 1, durationMs: 1200 });
++    emitItem({ id: "files", type: "fileChange", changes: [{ path: "src/a.ts", kind: { type: "update" }, diff: "-old\n+new" }], status: "completed" });
++    emitItem({ id: "tool", type: "mcpToolCall", server: "files", tool: "read", arguments: { path: "a" }, result: null, error: null });
++    emitItem({ id: "answer", type: "agentMessage", phase: "final_answer", text: "Done" });
++    f.emit({ method: "turn/completed", params: { threadId: "new", turn: { id: "t", status: "completed", durationMs: 8000 } } });
++    expect((await f.call("snapshot", { threadId: "new" }))["items"]).toEqual(expect.arrayContaining([
++      expect.objectContaining({ id: "reason", text: "Checking the files", status: "completed" }),
++      expect.objectContaining({ id: "cmd", exitCode: 1, durationMs: 1200, output: "failure" }),
++      expect.objectContaining({ id: "files", changes: [{ path: "src/a.ts", kind: "update", diff: "-old\n+new" }] }),
++      expect.objectContaining({ id: "tool", title: "files / read", text: "" }),
++      expect.objectContaining({ id: "answer", phase: "final_answer", turnId: "t", turnDurationMs: 8000 }),
++    ]));
++  });
++  it("keeps history turn metadata without inventing missing durations", async () => {
++    const f = fixture();
++    const snapshot = await f.call("snapshot", { threadId: "saved" });
++    expect(snapshot["items"]).toEqual([expect.objectContaining({ turnId: "old", status: "completed", text: "Saved answer" })]);
++    expect(object(array(snapshot["items"])[0])["turnDurationMs"]).toBeUndefined();
++  });
++
++  it("sends validated workspace file and directory paths and rejects escapes or missing paths", async () => {
++    const root = await mkdtemp(join(tmpdir(), "codex-context-"));
++    try {
++      const cwd = join(root, "workspace"); await mkdir(cwd); await mkdir(join(cwd, "src"));
++      await writeFile(join(cwd, "README.md"), "hello"); await writeFile(join(root, "outside.txt"), "private");
++      await symlink(join(root, "outside.txt"), join(cwd, "escape"));
++      const f = fixture(); await f.call("create", {}, cwd);
++      for (const references of [["../outside.txt"], [join(root, "outside.txt")], ["escape"], ["missing"], Array.from({ length: 21 }, () => "src")]) {
++        await expect(f.call("send", { threadId: "new", text: "", references }, cwd)).rejects.toThrow();
++      }
++      expect(f.request).not.toHaveBeenCalledWith("turn/start", expect.anything());
++      await f.call("send", { threadId: "new", text: "Review these", references: ["README.md", "src"] }, cwd);
++      expect(f.request).toHaveBeenCalledWith("turn/start", expect.objectContaining({
++        threadId: "new", input: [{ type: "text", text: 'Review these\nSelected workspace context (paths relative to the working directory; read as needed):\nFile: "README.md"\nDirectory: "src"', text_elements: [] }],
++      }));
++    } finally { await rm(root, { recursive: true, force: true }); }
++  });
++
++  it("pushes coalesced changes only to the subscribed workspace and cleans up on abort", async () => {
++    vi.useFakeTimers();
++    try {
++      const f = fixture(); await f.call("create");
++      const send = vi.fn(); const abort = new AbortController();
++      const channel = await f.open(send, abort.signal);
++      await vi.advanceTimersByTimeAsync(30); expect(send).toHaveBeenCalledTimes(1); send.mockClear();
++      for (let i = 0; i < 20; i++) f.emit({ method: "item/agentMessage/delta", params: { threadId: "new", itemId: "a", delta: "x" } });
++      await vi.advanceTimersByTimeAsync(30);
++      expect(send).toHaveBeenCalledTimes(1);
++      expect(send).toHaveBeenCalledWith({ type: "changed", threadId: "new" });
++      send.mockClear(); await vi.advanceTimersByTimeAsync(10000); expect(send).not.toHaveBeenCalled();
++      abort.abort(); await channel.closed;
++      f.emit({ method: "turn/completed", params: { threadId: "new", turn: { id: "t", status: "completed" } } });
++      await vi.advanceTimersByTimeAsync(30); expect(send).not.toHaveBeenCalled();
++      await expect(f.open(send, new AbortController().signal, "saved", "/other")).rejects.toThrow("another workspace");
++    } finally { vi.useRealTimers(); }
++  });
++  it("observes saved history without resuming its writer and closes on service disposal", async () => {
++    const f = fixture(); const send = vi.fn();
++    const channel = await f.open(send, new AbortController().signal, "saved");
++    expect(f.request).not.toHaveBeenCalledWith("thread/resume", expect.anything());
++    for (const service of services) service.dispose();
++    await channel.closed;
++    expect(send).not.toHaveBeenCalled();
++  });
++
++});
+diff --git a/pi-web-plugins/codex/server/codexService.ts b/pi-web-plugins/codex/server/codexService.ts
+new file mode 100644
+index 00000000..3500e33d
+--- /dev/null
++++ b/pi-web-plugins/codex/server/codexService.ts
+@@ -0,0 +1,433 @@
++import { isAbsolute, relative, resolve, sep } from "node:path";
++import { realpath, stat } from "node:fs/promises";
++import type { JsonValue, ServerPluginPeerRequestContext, ServerPluginPeerChannelOpenContext, ServerPluginPeerChannel } from "@jmfederico/pi-web/server-plugin-api";
++import { createCodexConnection, type CodexConnection, type ConnectionFactory } from "./codexProtocol.js";
++import { array, bounded, errorText, object, string, text, type RecordValue } from "./protocol.js";
++
++interface ThreadState {
++  id: string;
++  version: number;
++  model: string;
++  effort: string;
++  turnId: string;
++  status: string;
++  error: string;
++  busy: boolean;
++  items: Map<string, RecordValue>;
++  approvals: Map<string, RecordValue>;
++}
++interface WorkspaceState {
++  cwd: string;
++  projectId: string;
++  workspaceId: string;
++  connection: CodexConnection;
++  threads: Map<string, ThreadState>;
++  opening: Map<string, Promise<ThreadState>>;
++  error: string;
++  touched: number;
++}
++const policy = { approvalPolicy: "never", sandbox: "danger-full-access", approvalsReviewer: "user" };
++
++export class CodexService {
++  private readonly workspaces = new Map<string, WorkspaceState>();
++  private readonly sweep: ReturnType<typeof setInterval>;
++  private disposed = false;
++  private checking = false;
++  private historyVersion = -1;
++  private readonly subscriptions = new Set<{ state: WorkspaceState; id: string; notify: () => void; close: () => void }>();
++  async openChannel(context: ServerPluginPeerChannelOpenContext): Promise<ServerPluginPeerChannel> {
++    if (context.operation !== "events") throw new Error("Unsupported Codex channel");
++    context.signal.throwIfAborted();
++    const id = string(object(context.input)["threadId"], "threadId");
++    const state = this.workspace({ ...context, operation: "snapshot" });
++    // Read-only validation: observing external history must not acquire its writer.
++    await this.readSnapshot(state, id);
++    context.signal.throwIfAborted();
++    if (this.disposed) throw new Error("Codex plugin stopped");
++    let finish = (): void => undefined;
++    const closed = new Promise<void>((resolve) => { finish = resolve; });
++    let timer: ReturnType<typeof setTimeout> | undefined;
++    let ended = false;
++    const close = (): void => {
++      if (ended) return;
++      ended = true;
++      if (timer !== undefined) clearTimeout(timer);
++      this.subscriptions.delete(subscription);
++      context.signal.removeEventListener("abort", close);
++      finish();
++    };
++    const notify = (): void => {
++      if (ended || timer !== undefined) return;
++      timer = setTimeout(() => {
++        timer = undefined;
++        try { context.send({ type: "changed", threadId: id }); } catch { close(); }
++      }, 30);
++    };
++    const subscription = { state, id, notify, close };
++    this.subscriptions.add(subscription);
++    context.signal.addEventListener("abort", close, { once: true });
++    notify();
++    return { closed, receive: () => { throw new Error("Codex events channel is read-only"); }, close };
++  }
++  private notify(thread: ThreadState): void {
++    for (const subscription of this.subscriptions) {
++      if (subscription.state.threads.get(subscription.id) === thread) subscription.notify();
++    }
++  }
++  private closeSubscriptions(state?: WorkspaceState): void {
++    for (const subscription of this.subscriptions) {
++      if (state === undefined || subscription.state === state) subscription.close();
++    }
++  }
++  constructor(private readonly connect: ConnectionFactory = createCodexConnection,
++    private readonly resolveWorkspace?: (selection: { projectId: string; workspaceId: string }) => Promise<{ workspace: { path: string } }>) {
++    this.sweep = setInterval(() => {
++      void this.checkWorkspaces();
++      for (const [key, state] of this.workspaces) {
++        if (Date.now() - state.touched > 15 * 60000 && !this.active(state) && state.opening.size === 0) {
++          this.workspaces.delete(key);
++          this.closeSubscriptions(state); state.connection.dispose();
++        }
++      }
++    }, 60000);
++    this.sweep.unref();
++  }
++  dispose(): void {
++    this.disposed = true;
++    this.closeSubscriptions();
++    clearInterval(this.sweep);
++    for (const state of this.workspaces.values()) { this.closeSubscriptions(state); state.connection.dispose(); }
++    this.workspaces.clear();
++  }
++
++  async request(context: ServerPluginPeerRequestContext): Promise<JsonValue> {
++    if (context.signal.aborted || this.disposed) throw new Error("Codex request cancelled");
++    const supported = new Set(["status", "list", "models", "create", "snapshot", "send", "stop", "answer"]);
++    if (!supported.has(context.operation)) throw new Error("Unsupported Codex operation");
++    const input = object(context.input);
++    const state = this.workspace(context);
++    const rpc = (method: string, params: RecordValue) => state.connection.request(method, params);
++    switch (context.operation) {
++      case "status": {
++        const account = await rpc("account/read", { refreshToken: false });
++        return { authenticated: account["account"] !== null, requiresOpenaiAuth: account["requiresOpenaiAuth"] ?? true, policy, cwd: state.cwd };
++      }
++      case "models": {
++        const result = await rpc("model/list", { limit: 100 });
++        return { data: array(result["data"]).map((entry) => {
++          const model = object(entry);
++          return { id: model["id"] ?? "", model: model["model"] ?? "", displayName: model["displayName"] ?? "", supportedReasoningEfforts: model["supportedReasoningEfforts"] ?? [], defaultReasoningEffort: model["defaultReasoningEffort"] ?? "" };
++        }) };
++      }
++      case "list": {
++        const result = await rpc("thread/list", { cwd: state.cwd, limit: 30, cursor: input["cursor"] === undefined ? null : string(input["cursor"], "cursor", 4096), sortKey: "updated_at", modelProviders: [] });
++        return { data: array(result["data"]).filter((entry) => text(object(entry)["cwd"]) === state.cwd).map((entry) => {
++          const thread = object(entry);
++          return { id: string(thread["id"]), preview: bounded(text(thread["name"]) || text(thread["preview"]), 160), updatedAt: thread["updatedAt"] ?? 0 };
++        }), nextCursor: result["nextCursor"] ?? null };
++      }
++      case "create": {
++        const result = await rpc("thread/start", { cwd: state.cwd, ...policy });
++        const thread = object(result["thread"]);
++        const id = string(thread["id"]);
++        this.settings(this.remember(state, id), result);
++        return { id };
++      }
++      default: break;
++    }
++    const id = string(input["threadId"], "threadId");
++    const thread = context.operation === "snapshot" ? await this.readSnapshot(state, id) : await this.load(state, id);
++    context.signal.throwIfAborted();
++    if (context.operation === "snapshot") {
++      if (input["version"] === thread.version) return { changed: false };
++      const offset = typeof input["offset"] === "number" ? Math.max(0, Math.min(512, Math.floor(input["offset"]))) : 0;
++      const end = Math.max(0, thread.items.size - offset);
++      return { changed: true, id, model: thread.model, effort: thread.effort, version: thread.version, status: thread.status, busy: thread.busy, error: thread.error,
++        items: [...thread.items.values()].slice(Math.max(0, end - 40), end), offset, total: thread.items.size, approvals: [...thread.approvals.values()], policy };
++    }
++    if (context.operation === "send") {
++      let prompt = text(input["text"]);
++      if (prompt.length > 64000) throw new Error("Message exceeds 64000 characters");
++      const references = array(input["references"]);
++      if (references.length > 20) throw new Error("Select at most 20 workspace items");
++      if (references.length > 0) {
++        const root = await realpath(state.cwd);
++        const selected: string[] = [];
++        for (const entry of references) {
++          const path = string(entry, "workspace path", 4096);
++          if (isAbsolute(path) || path.split(/[\\/]/u).includes("..")) throw new Error("Attachment must be inside the current workspace");
++          const target = await realpath(resolve(root, path));
++          const within = relative(root, target);
++          if (isAbsolute(within) || within === ".." || within.startsWith(`..${sep}`)) throw new Error("Attachment must be inside the current workspace");
++          const info = await stat(target);
++          if (!info.isFile() && !info.isDirectory()) throw new Error("Only workspace files and directories can be attached");
++          selected.push(`${info.isDirectory() ? "Directory" : "File"}: ${JSON.stringify(path)}`);
++        }
++        prompt = [prompt, "Selected workspace context (paths relative to the working directory; read as needed):", ...selected].filter(Boolean).join("\n");
++      }
++      if (prompt.trim() === "") throw new Error("Enter a message or select workspace context");
++      if (thread.busy) throw new Error("This conversation already has an active turn");
++      const options: RecordValue = {};
++      if (input["model"] !== undefined) options["model"] = string(input["model"], "model");
++      if (input["effort"] !== undefined) options["effort"] = string(input["effort"], "reasoning effort", 32);
++      thread.busy = true;
++      thread.status = "starting";
++      thread.error = "";
++      thread.version++; this.notify(thread);
++      try {
++        const result = await rpc("turn/start", { threadId: id, input: [{ type: "text", text: prompt, text_elements: [] }], ...options });
++        if (typeof options["model"] === "string") thread.model = options["model"];
++        if (typeof options["effort"] === "string") thread.effort = options["effort"];
++        const turn = object(result["turn"]);
++        thread.turnId = string(turn["id"]);
++        // A fast turn may have completed before the response arrives.
++        this.started(thread);
++        return { accepted: true };
++      } catch (error) {
++        thread.busy = false;
++        thread.status = "failed";
++        thread.error = errorText(error);
++        throw error;
++      } finally { thread.version++; this.notify(thread); }
++    }
++    if (context.operation === "stop") {
++      if (!thread.busy || thread.turnId === "") throw new Error("No active turn to stop");
++      await rpc("turn/interrupt", { threadId: id, turnId: thread.turnId });
++      return { accepted: true };
++    }
++    const approvalId = string(input["approvalId"], "approvalId");
++    const approval = thread.approvals.get(approvalId);
++    if (approval === undefined) throw new Error("This request was already answered or expired");
++    let response: RecordValue;
++    if (approval["method"] === "item/tool/requestUserInput") {
++      const answers = object(input["answers"]);
++      response = { answers: Object.fromEntries(array(object(approval["params"])["questions"]).map((question) => {
++        const key = string(object(question)["id"]);
++        return [key, { answers: [string(answers[key], "answer", 4000)] }];
++      })) };
++    } else {
++      const decision = string(input["decision"], "decision");
++      if (!["accept", "decline", "cancel"].includes(decision)) throw new Error("Unsupported approval decision");
++      response = { decision };
++    }
++    const requestId = approval["requestId"];
++    if (typeof requestId !== "string" && typeof requestId !== "number") throw new Error("Invalid approval request");
++    // No await between lookup and removal: competing clients cannot decide twice.
++    thread.approvals.delete(approvalId);
++    thread.version++; this.notify(thread);
++    state.connection.reply(requestId, response);
++    return { accepted: true };
++  }
++
++  private async checkWorkspaces(): Promise<void> {
++    if (this.checking || this.resolveWorkspace === undefined || this.disposed) return;
++    this.checking = true;
++    try {
++      for (const [key, state] of this.workspaces) {
++        try {
++          const authority = await this.resolveWorkspace({ projectId: state.projectId, workspaceId: state.workspaceId });
++          if (resolve(authority.workspace.path) === state.cwd) continue;
++        } catch { /* Revoked or deleted workspace: stop its owned process. */ }
++        if (this.workspaces.get(key) === state) { this.workspaces.delete(key); this.closeSubscriptions(state); state.connection.dispose(); }
++      }
++    } finally { this.checking = false; }
++  }
++  private settings(thread: ThreadState, result: RecordValue): void {
++    thread.model = text(result["model"]);
++    thread.effort = text(result["reasoningEffort"]);
++  }
++  private started(thread: ThreadState): void { if (thread.status === "starting") thread.status = "inProgress"; }
++  private active(state: WorkspaceState): boolean {
++    return [...this.subscriptions].some((subscription) => subscription.state === state) || [...state.threads.values()].some((thread) => thread.busy || thread.approvals.size > 0);
++  }
++  private workspace(context: ServerPluginPeerRequestContext): WorkspaceState {
++    const cwd = resolve(context.workspace.path);
++    const key = JSON.stringify([context.project.id, context.workspace.id, cwd]);
++    let state = this.workspaces.get(key);
++    if (state?.error !== undefined && state.error !== "" && context.operation !== "snapshot") {
++      this.closeSubscriptions(state);
++      this.workspaces.delete(key);
++      state = undefined;
++    }
++    if (state === undefined) {
++      if (this.workspaces.size >= 16) throw new Error("Codex workspace limit reached. Idle instances expire after 15 minutes.");
++      const threads = new Map<string, ThreadState>();
++      const connection = this.connect(cwd, (frame) => { this.event(created, frame); }, (message) => {
++        created.error = message;
++        for (const thread of threads.values()) { thread.busy = false; thread.status = "interrupted"; thread.error = message; thread.approvals.clear(); thread.version++; this.notify(thread); }
++      });
++      const created: WorkspaceState = { cwd, projectId: context.project.id, workspaceId: context.workspace.id, threads, opening: new Map(), error: "", touched: Date.now(), connection };
++      state = created;
++      this.workspaces.set(key, state);
++    }
++    state.touched = Date.now();
++    return state;
++  }
++  private remember(state: WorkspaceState, id: string): ThreadState {
++    const existing = state.threads.get(id);
++    if (existing !== undefined) return existing;
++    if (state.threads.size >= 30) {
++      const idle = [...state.threads.values()].find((thread) => !thread.busy && thread.approvals.size === 0);
++      if (idle === undefined) throw new Error("Too many active Codex conversations");
++      state.threads.delete(idle.id);
++    }
++    const thread: ThreadState = { id, model: "", effort: "", version: 0, turnId: "", status: "idle", error: "", busy: false, items: new Map(), approvals: new Map() };
++    state.threads.set(id, thread);
++    return thread;
++  }
++  private async readSnapshot(state: WorkspaceState, id: string): Promise<ThreadState> {
++    const opening = state.opening.get(id);
++    if (opening !== undefined) return opening;
++    const existing = state.threads.get(id);
++    if (existing !== undefined) return existing;
++    // Viewing external history must not acquire the thread's exclusive writer.
++    const read = await state.connection.request("thread/read", { threadId: id, includeTurns: true });
++    const saved = object(read["thread"]);
++    if (resolve(string(saved["cwd"], "thread cwd", 4096)) !== state.cwd) throw new Error("Conversation belongs to another workspace");
++    const thread: ThreadState = { id, model: text(saved["model"]), effort: text(saved["reasoningEffort"]), version: --this.historyVersion, turnId: "", status: "Stored history", error: "", busy: false, items: new Map(), approvals: new Map() };
++    for (const entry of array(saved["turns"])) {
++      const turn = object(entry);
++      for (const item of array(turn["items"])) this.item(thread, { ...object(item), turnId: turn["id"] ?? "", turnStatus: turn["status"] ?? "", turnDurationMs: turn["durationMs"] ?? null });
++    }
++    // Do not cache external history: its owner can persist more items between polls.
++    return thread;
++  }
++  private async load(state: WorkspaceState, id: string): Promise<ThreadState> {
++    const opening = state.opening.get(id);
++    if (opening !== undefined) return opening;
++    const existing = state.threads.get(id);
++    if (existing !== undefined) return existing;
++    const promise = this.restore(state, id);
++    state.opening.set(id, promise);
++    try { return await promise; } finally { state.opening.delete(id); }
++  }
++  private async restore(state: WorkspaceState, id: string): Promise<ThreadState> {
++    const read = await state.connection.request("thread/read", { threadId: id, includeTurns: false });
++    if (resolve(string(object(read["thread"])["cwd"], "thread cwd", 4096)) !== state.cwd) throw new Error("Conversation belongs to another workspace");
++    const thread = this.remember(state, id);
++    try {
++      const resumed = await state.connection.request("thread/resume", { threadId: id, cwd: state.cwd, ...policy });
++      this.settings(thread, resumed);
++      for (const entry of array(object(resumed["thread"])["turns"])) {
++        const turn = object(entry);
++        for (const item of array(turn["items"])) this.item(thread, { ...object(item), turnId: turn["id"] ?? "", turnStatus: turn["status"] ?? "", turnDurationMs: turn["durationMs"] ?? null }, false);
++        if (turn["status"] === "inProgress") { thread.busy = true; thread.turnId = text(turn["id"]); thread.status = "inProgress"; }
++      }
++      thread.version++; this.notify(thread);
++      return thread;
++    } catch (error) {
++      state.threads.delete(id);
++      if (errorText(error).includes("already has an active writer")) {
++        throw new Error("This conversation is open in another Codex instance. Close it there before continuing here, or create a new conversation.", { cause: error });
++      }
++      throw error;
++    }
++  }
++  private item(thread: ThreadState, raw: RecordValue, replace = true): void {
++    const id = string(raw["id"]);
++    if (!replace && thread.items.has(id)) return;
++    const kind = text(raw["type"]);
++    const previous = thread.items.get(id);
++    const joined = (value: unknown): string => array(value).map((entry) => typeof entry === "string" ? entry : text(object(entry)["text"])).filter(Boolean).join("\n");
++    let body = text(raw["text"]);
++    const details: RecordValue = {};
++    if (kind === "userMessage") body = joined(raw["content"]);
++    else if (kind === "reasoning") {
++      details["summaryText"] = bounded(joined(raw["summary"]));
++      details["contentText"] = bounded(joined(raw["content"]));
++      body = text(details["summaryText"]) || text(details["contentText"]);
++    }
++    else if (kind === "commandExecution") {
++      details["command"] = bounded(text(raw["command"]));
++      details["output"] = bounded(text(raw["aggregatedOutput"]));
++      details["cwd"] = bounded(text(raw["cwd"]));
++      body = `${text(raw["command"])}\n${text(raw["aggregatedOutput"])}`;
++    } else if (kind === "fileChange") {
++      const changes = array(raw["changes"]).slice(0, 100).map((entry) => {
++        const change = object(entry);
++        return { path: bounded(text(change["path"]), 2048), diff: bounded(text(change["diff"])), kind: typeof change["kind"] === "string" ? change["kind"] : text(object(change["kind"] ?? {})["type"]) };
++      });
++      details["changes"] = changes;
++      body = changes.map((change) => `${change.path}\n${change.diff}`).join("\n\n");
++    } else if (["mcpToolCall", "dynamicToolCall", "collabAgentToolCall"].includes(kind)) {
++      details["title"] = bounded([text(raw["server"]), text(raw["tool"])].filter(Boolean).join(" / "), 200);
++      details["input"] = bounded(JSON.stringify(raw["arguments"] ?? raw["prompt"] ?? {}));
++      body = joined(object(raw["result"] ?? {})["content"]) || joined(raw["contentItems"]) || text(object(raw["error"] ?? {})["message"]);
++      if (!body && raw["result"] != null) body = JSON.stringify(raw["result"], null, 2);
++      if (raw["success"] === false) details["status"] = "failed";
++    } else if (kind === "webSearch") {
++      body = text(raw["query"]) || JSON.stringify(raw["action"] ?? {}, null, 2);
++    } else if (body === "" && !["agentMessage", "plan"].includes(kind)) body = JSON.stringify(raw, null, 2);
++    for (const key of ["exitCode", "durationMs", "turnDurationMs"]) {
++      if (typeof raw[key] === "number" && Number.isFinite(raw[key])) details[key] = raw[key];
++    }
++    const turnId = text(raw["turnId"]) || thread.turnId || text(previous?.["turnId"]);
++    const status = text(raw["status"]) || text(raw["turnStatus"]) || text(previous?.["status"]);
++    thread.items.set(id, { ...previous, id, kind, text: bounded(body), status,
++      ...(turnId ? { turnId } : {}), ...(typeof raw["phase"] === "string" ? { phase: raw["phase"] } : {}), ...details });
++    while (thread.items.size > 512) { const first = thread.items.keys().next().value; if (first !== undefined) thread.items.delete(first); }
++  }
++  private event(state: WorkspaceState, frame: RecordValue): void {
++    const params = object(frame["params"] ?? {});
++    const thread = state.threads.get(text(params["threadId"]));
++    const method = text(frame["method"]);
++    const requestId = frame["id"];
++    if (typeof requestId === "number" || typeof requestId === "string") {
++      if (thread !== undefined && ["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/tool/requestUserInput"].includes(method)) {
++        const id = JSON.stringify(requestId);
++        thread.approvals.set(id, { id, requestId, method, params });
++        thread.version++; this.notify(thread);
++      } else {
++        state.connection.reject(requestId, `Unsupported interaction in PI WEB: ${method}`);
++        if (thread !== undefined) { thread.error = `Unsupported interaction: ${method}`; thread.version++; this.notify(thread); }
++      }
++      return;
++    }
++    if (thread === undefined) return;
++    if (method === "thread/settings/updated") {
++      const settings = object(params["threadSettings"]);
++      this.settings(thread, { model: settings["model"] ?? null, reasoningEffort: settings["effort"] ?? null });
++    } else if (method === "turn/started" || method === "turn/completed") {
++      const turn = object(params["turn"]);
++      thread.turnId = text(turn["id"]);
++      thread.status = text(turn["status"]);
++      thread.busy = method === "turn/started";
++      if (!thread.busy) {
++        thread.approvals.clear();
++        for (const item of thread.items.values()) {
++          if (item["turnId"] !== thread.turnId) continue;
++          if (typeof turn["durationMs"] === "number") item["turnDurationMs"] = turn["durationMs"];
++          if (["inProgress", "running"].includes(text(item["status"]))) item["status"] = thread.status;
++        }
++      }
++      if (turn["error"] != null) thread.error = bounded(JSON.stringify(turn["error"]));
++    } else if (method === "item/started" || method === "item/completed") {
++      this.item(thread, { ...object(params["item"]), turnId: params["turnId"] ?? thread.turnId, status: object(params["item"])["status"] ?? (method === "item/started" ? "inProgress" : "completed") });
++    } else if (["item/agentMessage/delta", "item/commandExecution/outputDelta", "item/reasoning/summaryTextDelta", "item/reasoning/textDelta", "item/plan/delta"].includes(method)) {
++      const id = string(params["itemId"]);
++      const kind = method.includes("reasoning/") ? "reasoning" : method.includes("commandExecution/") ? "commandExecution" : method.includes("plan/") ? "plan" : "agentMessage";
++      const item = thread.items.get(id) ?? { id, kind, text: "", status: "inProgress", turnId: params["turnId"] ?? thread.turnId };
++      if (kind === "reasoning") {
++        const field = method.includes("summaryText") ? "summaryText" : "contentText";
++        item[field] = bounded(text(item[field]) + text(params["delta"]));
++        item["text"] = text(item["summaryText"]) || text(item["contentText"]);
++      } else item["text"] = bounded(text(item["text"]) + text(params["delta"]));
++      if (kind === "commandExecution") item["output"] = bounded(text(item["output"]) + text(params["delta"]));
++      thread.items.set(id, item);
++    } else if (method === "turn/plan/updated") {
++      const steps = array(params["plan"]).map((entry) => {
++        const step = object(entry);
++        const status = text(step["status"]);
++        return `- ${status === "completed" ? "[x]" : "[ ]"} ${text(step["step"])}${status === "inProgress" ? " (in progress)" : ""}`;
++      });
++      this.item(thread, { id: `plan:${text(params["turnId"])}`, type: "plan", text: [text(params["explanation"]), ...steps].filter(Boolean).join("\n"), turnId: params["turnId"] ?? thread.turnId });
++    } else if (method === "turn/diff/updated") {
++      this.item(thread, { id: `diff:${text(params["turnId"])}`, type: "diff", text: text(params["diff"]), turnId: params["turnId"] ?? thread.turnId });
++    } else if (method === "error") {
++      thread.error = bounded(JSON.stringify(params["error"] ?? params));
++    } else if (method === "serverRequest/resolved") {
++      thread.approvals.delete(JSON.stringify(params["requestId"]));
++    }
++    thread.version++; this.notify(thread);
++  }
++}
+diff --git a/pi-web-plugins/codex/server/protocol.ts b/pi-web-plugins/codex/server/protocol.ts
+new file mode 100644
+index 00000000..b1e9ff6f
+--- /dev/null
++++ b/pi-web-plugins/codex/server/protocol.ts
+@@ -0,0 +1,20 @@
++import type { JsonValue } from "@jmfederico/pi-web/server-plugin-api";
++
++export type RecordValue = Record<string, JsonValue>;
++function isObject(value: unknown): value is RecordValue { return typeof value === "object" && value !== null && !Array.isArray(value); }
++function isArray(value: unknown): value is JsonValue[] { return Array.isArray(value); }
++export function object(value: unknown): RecordValue {
++  if (!isObject(value)) throw new Error("Expected a JSON object");
++  // Values cross a JSON transport before reaching this boundary.
++  return value;
++}
++export function string(value: unknown, label = "value", max = 512): string {
++  if (typeof value !== "string" || value.trim() === "" || value.length > max) throw new Error(`Invalid ${label}`);
++  return value;
++}
++export function text(value: unknown): string { return typeof value === "string" ? value : ""; }
++export function array(value: unknown): JsonValue[] { return isArray(value) ? value : []; }
++export function errorText(error: unknown): string { return error instanceof Error ? error.message : String(error); }
++export function bounded(value: string, max = 16384): string {
++  return value.length > max ? `${value.slice(0, max)}\n[Display truncated]` : value;
++}
+diff --git a/pi-web-plugins/codex/server/server-plugin.ts b/pi-web-plugins/codex/server/server-plugin.ts
+new file mode 100644
+index 00000000..eba8e32d
+--- /dev/null
++++ b/pi-web-plugins/codex/server/server-plugin.ts
+@@ -0,0 +1,36 @@
++import type { PluginCapability, PiWebHostWorkspacesV1, PiWebServerPlugin } from "@jmfederico/pi-web/server-plugin-api";
++import { CodexService } from "./codexService.js";
++
++// Portable capability descriptor: bundled plugin package scopes cannot resolve
++// a runtime self-import of the host npm package. Only its public types are used.
++const workspacesCapability: PluginCapability<PiWebHostWorkspacesV1, 1> = {
++  pluginId: "pi-web.host", id: "workspaces", version: 1,
++  parse(value: unknown): PiWebHostWorkspacesV1 {
++    if (!isWorkspaces(value)) throw new Error("Invalid host workspaces capability");
++    return value;
++  },
++};
++function isWorkspaces(value: unknown): value is PiWebHostWorkspacesV1 {
++  return typeof value === "object" && value !== null && Reflect.get(value, "version") === 1 && typeof Reflect.get(value, "resolve") === "function";
++}
++
++const plugin: PiWebServerPlugin = {
++  apiVersion: 3,
++  name: "Codex",
++  requires: [workspacesCapability],
++  activate(context) {
++    let workspaces: PiWebHostWorkspacesV1 | undefined;
++    const service = new CodexService(undefined, async (selection) => {
++      if (workspaces === undefined) throw new Error("Codex workspace authority unavailable");
++      return workspaces.resolve(selection);
++    });
++    const dispose = (): void => { service.dispose(); };
++    context.lifetimeSignal.addEventListener("abort", dispose, { once: true });
++    return {
++      start: ({ capabilities }) => { workspaces = capabilities.resolve(workspacesCapability); },
++      peer: { request: (request) => service.request(request), openChannel: (request) => service.openChannel(request) },
++      dispose: () => { context.lifetimeSignal.removeEventListener("abort", dispose); dispose(); },
++    };
++  },
++};
++export default plugin;
+diff --git a/pi-web-plugins/pluginPublicApi.test.ts b/pi-web-plugins/pluginPublicApi.test.ts
+index 7f230bed..4338c847 100644
+--- a/pi-web-plugins/pluginPublicApi.test.ts
++++ b/pi-web-plugins/pluginPublicApi.test.ts
+@@ -25,6 +25,10 @@ describe("PI WEB plugin packages", () => {
+       for (const file of await pluginSourceFiles(root)) {
+         const content = await readFile(file, "utf8");
+         for (const { pattern, message } of forbiddenPatterns) {
++          // Codex app-server needs persistent bidirectional stdio. execFile is
++          // a bounded one-shot helper and cannot carry its RPC/approval protocol.
++          // Keep this exception confined to the bundled transport owner.
++          if (file === "pi-web-plugins/codex/server/codexProtocol.ts" && message === "bypasses the bounded server command helper") continue;
+           // A statically package-relative asset is not a PI WEB API call. Keep
+           // arbitrary fetches forbidden; browser API access uses capabilities.
+           const checked = message === "direct browser fetch" ? content.replace(/\bfetch\(new URL\((?:\/\* @vite-ignore \*\/ )?"\.\/[a-zA-Z0-9._/-]+", import\.meta\.url\)/gu, "packageAsset(") : content;
+diff --git a/scripts/build-plugins.mjs b/scripts/build-plugins.mjs
+index c70c1dcf..5795bf84 100644
+--- a/scripts/build-plugins.mjs
++++ b/scripts/build-plugins.mjs
+@@ -12,6 +12,8 @@ const filesPluginSourceDir = resolve(bundledPluginsSourceDir, "files");
+ const filesPluginOutputDir = resolve(bundledPluginsOutputDir, "files");
+ const terminalPluginSourceDir = resolve(bundledPluginsSourceDir, "terminal");
+ const terminalPluginOutputDir = resolve(bundledPluginsOutputDir, "terminal");
++const codexPluginSourceDir = resolve(bundledPluginsSourceDir, "codex");
++const codexPluginOutputDir = resolve(bundledPluginsOutputDir, "codex");
+ const mermaidPluginSourceDir = resolve(bundledPluginsSourceDir, "mermaid");
+ const mermaidPluginOutputDir = resolve(bundledPluginsOutputDir, "mermaid");
+ 
+@@ -20,8 +22,8 @@ const mermaidPluginOutputDir = resolve(bundledPluginsOutputDir, "mermaid");
+ // packages that ship alongside them without being discovered that way (for
+ // example a Pi package that is installed rather than scanned). They retain
+ // separate output roots so neither becomes a discovery root for the other.
+-// Files, Terminal, and Mermaid are exceptions to plain transpilation: each
+-// browser entry is replaced below by a self-contained bundle. Terminal also
++// Files, Terminal, Codex, and Mermaid are exceptions to plain transpilation: each
++// browser entry is replaced below by a self-contained bundle. Terminal and Codex also
+ // keeps a package-local transpiled server graph. Captain's Log likewise bundles
+ // its browser entry after transpiling its standalone package graph.
+ const buildTargets = [
+@@ -49,6 +51,7 @@ async function buildAll() {
+       ? new Set([
+           await realpath(filesPluginSourceDir),
+           await realpath(terminalPluginSourceDir),
++          await realpath(codexPluginSourceDir),
+           await realpath(mermaidPluginSourceDir),
+         ])
+       : new Set();
+@@ -58,6 +61,7 @@ async function buildAll() {
+     if (target.rootDir === bundledPluginsSourceDir) {
+       await buildFilesBrowserPackage(filesPluginSourceDir, filesPluginOutputDir);
+       await buildTerminalPackage(terminalPluginSourceDir, terminalPluginOutputDir);
++      await buildTerminalPackage(codexPluginSourceDir, codexPluginOutputDir);
+       await buildMermaidPackage(mermaidPluginSourceDir, mermaidPluginOutputDir);
+     } else {
+       await viteBuild({
+@@ -67,7 +71,7 @@ async function buildAll() {
+       });
+     }
+     const suffix = result.transpiled === 1 ? "file" : "files";
+-    const bundleSuffix = target.rootDir === bundledPluginsSourceDir ? " and the Files/Terminal/Mermaid browser bundles" : "";
++    const bundleSuffix = target.rootDir === bundledPluginsSourceDir ? " and the Files/Terminal/Codex/Mermaid browser bundles" : "";
+     console.log(`[plugins] built ${String(result.transpiled)} TypeScript ${target.label} ${suffix}${bundleSuffix} into ${relative(cwd, target.outDir)}`);
+   }
+   await writeFile(readyPath, "ready\n");
+diff --git a/scripts/build-plugins.test.mjs b/scripts/build-plugins.test.mjs
+index 1a147ccd..c0bb7d61 100644
+--- a/scripts/build-plugins.test.mjs
++++ b/scripts/build-plugins.test.mjs
+@@ -141,7 +141,7 @@ it("removes stale readiness when a rebuild fails", async () => {
+   await copyFile(join(repoRoot, "scripts/build-plugins.mjs"), join(tempDir, "scripts/build-plugins.mjs"));
+   await symlink(join(repoRoot, "node_modules"), join(tempDir, "node_modules"), process.platform === "win32" ? "junction" : "dir");
+   // Empty special-plugin directories reach the missing Files manifest before any bundle work.
+-  for (const plugin of ["files", "terminal", "mermaid"]) {
++  for (const plugin of ["files", "terminal", "mermaid", "codex"]) {
+     await mkdir(join(tempDir, "pi-web-plugins", plugin), { recursive: true });
+   }
+   const readyPath = join(tempDir, "dist/.plugins-ready");
+diff --git a/scripts/codex-plugin.artifact.mjs b/scripts/codex-plugin.artifact.mjs
+new file mode 100644
+index 00000000..d2a118a1
+--- /dev/null
++++ b/scripts/codex-plugin.artifact.mjs
+@@ -0,0 +1,34 @@
++import { readFile } from "node:fs/promises";
++import { resolve } from "node:path";
++import { pathToFileURL } from "node:url";
++import { Window } from "happy-dom";
++import { expect, it } from "vitest";
++
++it("loads the standalone Codex browser bundle and registers disposable machine-scoped panels", async () => {
++  const root = resolve("dist/pi-web-plugins/codex");
++  const metadata = JSON.parse(await readFile(resolve(root, "package.json"), "utf8"));
++  expect(metadata.piWeb.plugins[0]).toMatchObject({ id: "pi-web.codex", machineSpecific: true });
++  const browser = new Window({ url: "http://localhost/" });
++  const names = ["window", "document", "customElements", "HTMLElement", "Document", "CSSStyleSheet", "ShadowRoot", "Node", "localStorage"];
++  const original = new Map(names.map((name) => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
++  for (const name of names) Object.defineProperty(globalThis, name, { value: name === "window" ? browser : browser[name], configurable: true });
++  const activations = [];
++  try {
++    const { default: plugin } = await import(pathToFileURL(resolve(root, "browser/pi-web-plugin.js")).href);
++    const template = (strings, ...values) => ({ strings, values });
++    for (const machine of ["a", "b"]) {
++      const activation = await plugin.activate({ apiVersion: 4, pluginId: "pi-web.codex", runtimePluginId: `machine.${machine}.pi-web.codex`, html: template, svg: template, lifetimeSignal: new AbortController().signal });
++      activations.push(activation);
++      expect(activation.contributions.workspacePanels[0]).toMatchObject({ id: "workspace.codex", order: 31 });
++      const element = document.createElement(`pi-web-codex-machine-${machine}-pi-web-codex`);
++      document.body.append(element);
++      await element.updateComplete;
++      expect(element.shadowRoot.textContent).toContain("Select a workspace");
++    }
++    expect(customElements.get("pi-web-codex-machine-a-pi-web-codex")).not.toBe(customElements.get("pi-web-codex-machine-b-pi-web-codex"));
++  } finally {
++    for (const activation of activations) activation.dispose();
++    browser.happyDOM.abort();
++    for (const name of names) { const descriptor = original.get(name); if (descriptor === undefined) delete globalThis[name]; else Object.defineProperty(globalThis, name, descriptor); }
++  }
++});
+diff --git a/src/client/src/navigationPreferences.test.ts b/src/client/src/navigationPreferences.test.ts
+index a7d45004..d7f5c6ca 100644
+--- a/src/client/src/navigationPreferences.test.ts
++++ b/src/client/src/navigationPreferences.test.ts
+@@ -44,3 +44,14 @@ describe("navigation preferences", () => {
+     expect(() => { saveNavigationPreferences({ pinnedIds: [], mobileCollapsed: true }, blocked); }).not.toThrow();
+   });
+ });
++
++describe("new bundled panel preferences", () => {
++  it("inserts Codex beside pinned Terminal once and preserves a later unpin", () => {
++    let raw = JSON.stringify({ pinnedIds: ["chat", "machine.61.pi-web.terminal:workspace.terminal", "hidden:retained"], mobileCollapsed: true });
++    const storage = { getItem: () => raw, setItem: (_key: string, value: string) => { raw = value; } };
++    const migrated = loadNavigationPreferences(storage);
++    expect(migrated.pinnedIds).toEqual(["chat", "machine.61.pi-web.terminal:workspace.terminal", "machine.61.pi-web.codex:workspace.codex", "hidden:retained"]);
++    saveNavigationPreferences({ ...migrated, pinnedIds: migrated.pinnedIds.filter((id) => !id.includes("codex")) }, storage);
++    expect(loadNavigationPreferences(storage).pinnedIds).not.toContain("machine.61.pi-web.codex:workspace.codex");
++  });
++});
+diff --git a/src/client/src/navigationPreferences.ts b/src/client/src/navigationPreferences.ts
+index e3d2cfde..da2b59a6 100644
+--- a/src/client/src/navigationPreferences.ts
++++ b/src/client/src/navigationPreferences.ts
+@@ -13,15 +13,26 @@ function browserStorage(): Storage | undefined {
+   }
+ }
+ 
+-export function loadNavigationPreferences(storage: Pick<Storage, "getItem"> | undefined = browserStorage()): NavigationPreferences {
++export function loadNavigationPreferences(storage: (Pick<Storage, "getItem"> & Partial<Pick<Storage, "setItem">>) | undefined = browserStorage()): NavigationPreferences {
+   try {
+     const value: unknown = JSON.parse(storage?.getItem(storageKey) ?? "null");
+     if (typeof value === "object" && value !== null) {
+       const pins: unknown = "pinnedIds" in value ? value.pinnedIds : undefined;
+-      return {
++      const preferences = {
+         pinnedIds: Array.isArray(pins) ? [...new Set(pins.filter((id): id is string => typeof id === "string" && id.length > 0))] : [],
+         mobileCollapsed: "mobileCollapsed" in value && value.mobileCollapsed === true,
+       };
++      // One-time introduction of the bundled panel. Preserve hidden Terminal
++      // preferences and all existing order; subsequent unpin choices persist.
++      if (!("defaultsVersion" in value) || value.defaultsVersion !== 1) {
++        preferences.pinnedIds = preferences.pinnedIds.flatMap((id) => {
++          if (!id.endsWith("pi-web.terminal:workspace.terminal")) return [id];
++          const codexId = id.replace(/pi-web\.terminal:workspace\.terminal$/u, "pi-web.codex:workspace.codex");
++          return preferences.pinnedIds.includes(codexId) ? [id] : [id, codexId];
++        });
++        if (storage?.setItem !== undefined) saveNavigationPreferences(preferences, { setItem: storage.setItem.bind(storage) });
++      }
++      return preferences;
+     }
+   } catch {
+     // Layout preferences are optional when storage is blocked or malformed.
+@@ -31,7 +42,7 @@ export function loadNavigationPreferences(storage: Pick<Storage, "getItem"> | un
+ 
+ export function saveNavigationPreferences(preferences: NavigationPreferences, storage: Pick<Storage, "setItem"> | undefined = browserStorage()): void {
+   try {
+-    storage?.setItem(storageKey, JSON.stringify(preferences));
++    storage?.setItem(storageKey, JSON.stringify({ ...preferences, defaultsVersion: 1 }));
+   } catch {
+     // Ignore quota/privacy errors for this optional browser layout preference.
+   }

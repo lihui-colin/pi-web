@@ -72,3 +72,20 @@ test('port paths are validated and leading zeros select the same instance', () =
     assert.equal(existsSync(join(f.root, 'data/pi-web/08424')), false);
   } finally { f.cleanup(); }
 });
+
+// A background service must survive cleanup of its launching process group.
+test('Linux services run in separate sessions with detached stdin', { skip: process.platform !== 'linux' }, () => {
+  const f = fixture();
+  try {
+    const result = f.run('start', '8424');
+    assert.equal(result.status, 0, result.stderr);
+    for (const service of ['sessiond', 'server']) {
+      const pid = Number(readFileSync(join(f.root, 'data/pi-web/8424', `${service}.pid`), 'utf8'));
+      f.pids.push(pid);
+      const session = spawnSync('ps', ['-o', 'sid=', '-p', String(pid)], { encoding: 'utf8' });
+      assert.equal(Number(session.stdout.trim()), pid);
+      const stdin = spawnSync('readlink', [`/proc/${pid}/fd/0`], { encoding: 'utf8' });
+      assert.equal(stdin.stdout.trim(), '/dev/null');
+    }
+  } finally { f.cleanup(); }
+});

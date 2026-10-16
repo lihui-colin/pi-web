@@ -132,11 +132,17 @@ check_port_free() {
 start() {
     require_bins
     mkdir -p "$log_dir"
+    # nohup ignores SIGHUP, but does not detach the process group from an
+    # automation runner. Start a separate session where setsid is available.
+    local -a launcher=(nohup)
+    if command -v setsid >/dev/null 2>&1; then
+        launcher+=(setsid)
+    fi
 
     # 会话守护进程
     if [[ ! -f "$sessiond_pid" ]] || ! kill -0 "$(cat "$sessiond_pid")" 2>/dev/null; then
         echo "启动 pi-web-sessiond ..."
-        nohup pi-web-sessiond >"$sessiond_log" 2>&1 &
+        "${launcher[@]}" pi-web-sessiond </dev/null >"$sessiond_log" 2>&1 &
         echo $! > "$sessiond_pid"
     else
         echo "pi-web-sessiond 已在运行 (PID $(cat "$sessiond_pid"))"
@@ -148,10 +154,10 @@ start() {
         echo "启动 pi-web-server -> http://$PI_WEB_HOST:$PI_WEB_PORT"
         if [[ -n "$PI_WEB_PASSWORD" ]]; then
             PI_WEB_PASSWORD="$PI_WEB_PASSWORD" PI_WEB_PORT="$PI_WEB_PORT" PI_WEB_HOST="$PI_WEB_HOST" \
-            nohup pi-web-server >"$server_log" 2>&1 &
+            "${launcher[@]}" pi-web-server </dev/null >"$server_log" 2>&1 &
         else
             PI_WEB_PORT="$PI_WEB_PORT" PI_WEB_HOST="$PI_WEB_HOST" \
-            nohup pi-web-server >"$server_log" 2>&1 &
+            "${launcher[@]}" pi-web-server </dev/null >"$server_log" 2>&1 &
         fi
         echo $! > "$server_pid"
     else

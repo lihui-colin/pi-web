@@ -79,3 +79,5 @@ bash scripts/pi-web-run-jmfederico.sh update --pi-only    # 只更新 Pi Agent
 ```
 
 `update` 转交给 `scripts/install.sh update`，默认升级 Pi Agent、获取补丁绑定的上游提交并构建安装补丁版 pi-web；可用 `PI_VERSION` 指定 Agent 版本。`--no-restart` 跳过重启，`--restart` 在服务原先未运行时也启动，`--update-relay` 同步升级全局 relay skill。升级 pi-web 基线需同时维护 `patches/base-commit` 和补丁；更新命令不会自动跟随最新 `main`。
+
+新增独立 **Codex** 插件，可在 Terminal 后打开 Codex 对话、恢复历史并处理审批。安装前置条件和使用限制见 [Codex 插件说明](docs/codex-usage.md)。
