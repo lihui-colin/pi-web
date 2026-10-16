@@ -11,12 +11,12 @@ index 00000000..b864cc1c
 +Add an optional Codex workspace plugin with persistent conversations, streamed responses, tool output, approvals, and model selection using the workspace machine's Codex CLI. Restart sessiond after installing the plugin.
 diff --git a/pi-web-plugins/codex/CodexBrowserRuntime.ts b/pi-web-plugins/codex/CodexBrowserRuntime.ts
 new file mode 100644
-index 00000000..d681d310
+index 00000000..bb65a78a
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexBrowserRuntime.ts
-@@ -0,0 +1,286 @@
+@@ -0,0 +1,310 @@
 +import type { PluginPeerChannel, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
-+import { array, errorText, object, text, permissionMode, type PermissionMode, type RecordValue } from "./server/protocol.js";
++import { array, errorText, object, text, permissionMode, type PermissionMode, chatMode, type ChatMode, type RecordValue } from "./server/protocol.js";
 +
 +export interface CodexView {
 +  context: WorkspacePanelContext;
@@ -37,6 +37,8 @@ index 00000000..d681d310
 +  connected: boolean;
 +  pending: boolean;
 +  permissionMode: PermissionMode;
++  mode: ChatMode;
++  modeDirty: boolean;
 +  sending: boolean;
 +  offset: number;
 +  listeners: Set<() => void>;
@@ -58,7 +60,7 @@ index 00000000..d681d310
 +    let view = this.views.get(key);
 +    if (view === undefined) {
 +      const threadId = "";
-+      view = { context, key, threadId, draft: this.read(`${key}:${threadId}:draft`), references: this.readReferences(key, threadId), model: "", effort: "", models: [], defaultModel: "", defaultEffort: "", threads: [], cursor: "", snapshot: {}, error: "", notice: "", connected: false, pending: false, permissionMode: this.readPermissionMode(key), sending: false, offset: 0, listeners: new Set(), timer: undefined, polling: false, generation: 0 };
++      view = { context, key, threadId, draft: this.read(`${key}:${threadId}:draft`), references: this.readReferences(key, threadId), model: "", effort: "", models: [], defaultModel: "", defaultEffort: "", threads: [], cursor: "", snapshot: {}, error: "", notice: "", connected: false, pending: false, permissionMode: this.readPermissionMode(key), mode: this.readMode(key, threadId), modeDirty: this.read(`${key}:${threadId}:mode`) !== "", sending: false, offset: 0, listeners: new Set(), timer: undefined, polling: false, generation: 0 };
 +      this.views.set(key, view);
 +    }
 +    view.context = context;
@@ -112,12 +114,26 @@ index 00000000..d681d310
 +    view.effort = "";
 +    view.draft = this.read(`${view.key}:${id}:draft`);
 +    view.references = this.readReferences(view.key, id);
++    view.mode = this.readMode(view.key, id);
++    view.modeDirty = this.read(`${view.key}:${id}:mode`) !== "";
 +    view.snapshot = {};
 +    view.offset = 0;
 +    view.error = "";
 +    this.changed(view);
 +    this.schedule(view, 0);
 +    this.connect(view);
++  }
++  private readMode(key: string, threadId: string): ChatMode {
++    try { return chatMode(this.read(`${key}:${threadId}:mode`) || undefined); } catch { return "default"; }
++  }
++  private saveMode(view: CodexView, mode: ChatMode, dirty: boolean): void {
++    view.mode = mode; view.modeDirty = dirty;
++    this.write(`${view.key}:${view.threadId}:mode`, mode);
++    this.changed(view);
++  }
++  setMode(view: CodexView, mode: ChatMode): void {
++    if (view.pending || view.sending || view.snapshot["busy"] === true) return;
++    this.saveMode(view, mode, true);
 +  }
 +  private readPermissionMode(key: string): PermissionMode {
 +    try { return permissionMode(this.read(`${key}:permission-mode`) || undefined); } catch { return "full-access"; }
@@ -165,6 +181,7 @@ index 00000000..d681d310
 +    let threadId = view.threadId;
 +    const model = view.model;
 +    const effort = view.effort;
++    const mode = view.mode;
 +    view.sending = true; this.changed(view);
 +    try {
 +      if (threadId === "") {
@@ -175,11 +192,13 @@ index 00000000..d681d310
 +        view.snapshot = { model: text(result["model"]), effort: text(result["effort"]) };
 +        this.saveDraft(view, draft);
 +        this.saveReferences(view, references);
++        this.saveMode(view, mode, true);
 +        view.model = model; view.effort = effort;
 +        this.write(`${view.key}::draft`, "");
 +        this.write(`${view.key}::references`, "[]");
++        this.write(`${view.key}::mode`, "default");
 +      }
-+      await this.request(view, "send", { threadId, text: draft, ...this.permissionInput(view), ...(references.length > 0 ? { references } : {}), ...(view.model === "" ? {} : { model: view.model }), ...(view.effort === "" ? {} : { effort: view.effort }) });
++      const result = await this.request(view, "send", { threadId, text: draft, mode, ...this.permissionInput(view), ...(references.length > 0 ? { references } : {}), ...(view.model === "" ? {} : { model: view.model }), ...(view.effort === "" ? {} : { effort: view.effort }) });
 +      if (draft.trim() !== "") {
 +        const history = this.inputHistory(view, threadId);
 +        if (history.at(-1) !== draft) history.push(draft);
@@ -187,6 +206,7 @@ index 00000000..d681d310
 +        if (view.threadId === threadId) view.snapshot = { ...view.snapshot, inputHistory: history.slice(-100) };
 +      }
 +      if (view.threadId === threadId) {
++        this.saveMode(view, result["mode"] === "plan" || result["mode"] === "default" ? result["mode"] : mode, false);
 +        view.model = "";
 +        view.effort = "";
 +        if (view.draft === draft) this.saveDraft(view, "");
@@ -224,7 +244,11 @@ index 00000000..d681d310
 +      const snapshot = await this.request(view, "snapshot", { threadId: view.threadId, version: view.snapshot["version"] ?? -1, offset: view.offset });
 +      if (generation !== view.generation || this.isDisposed()) return;
 +      if (view.error === this.syncErrors.get(view)) { view.error = ""; this.syncErrors.delete(view); this.changed(view); }
-+      if (snapshot["changed"] === true) { view.snapshot = snapshot; this.changed(view); }
++      if (snapshot["changed"] === true) {
++        view.snapshot = snapshot;
++        if (!view.modeDirty && (snapshot["mode"] === "plan" || snapshot["mode"] === "default")) this.saveMode(view, snapshot["mode"], false);
++        this.changed(view);
++      }
 +    } catch (error) {
 +      if (generation === view.generation && !this.isDisposed()) { view.error = errorText(error); this.syncErrors.set(view, view.error); this.changed(view); }
 +      this.schedule(view, 4000);
@@ -303,10 +327,10 @@ index 00000000..d681d310
 +}
 diff --git a/pi-web-plugins/codex/CodexPanel.test.ts b/pi-web-plugins/codex/CodexPanel.test.ts
 new file mode 100644
-index 00000000..500aecea
+index 00000000..227212fa
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.test.ts
-@@ -0,0 +1,505 @@
+@@ -0,0 +1,667 @@
 +// @vitest-environment happy-dom
 +import { afterEach, describe, expect, it, vi } from "vitest";
 +import type { PluginPeerChannelOptions, FileTreeResponse, JsonValue, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
@@ -316,7 +340,7 @@ index 00000000..500aecea
 +
 +customElements.define("codex-panel-test", CodexPanel);
 +const runtimes: CodexBrowserRuntime[] = [];
-+afterEach(() => { for (const runtime of runtimes) runtime.dispose(); runtimes.length = 0; document.body.replaceChildren(); localStorage.clear(); vi.useRealTimers(); });
++afterEach(() => { for (const runtime of runtimes) runtime.dispose(); runtimes.length = 0; document.body.replaceChildren(); localStorage.clear(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 +function context(request: (operation: string, input: JsonValue) => Promise<JsonValue>, machine = "local"): WorkspacePanelContext {
 +  return {
 +    navigate: () => Promise.resolve(), machine: { id: machine, name: machine, kind: "local" },
@@ -340,24 +364,182 @@ index 00000000..500aecea
 +}
 +
 +describe("Codex panel", () => {
++  function mockVoice() {
++    class Recognition {
++      lang = ""; continuous = false; interimResults = false;
++      onresult: ((event: unknown) => void) | null = null;
++      onerror: ((event: { error: string }) => void) | null = null;
++      onend: (() => void) | null = null;
++      start = vi.fn(); stop = vi.fn(); abort = vi.fn();
++    }
++    const voice = new Recognition();
++    vi.stubGlobal("isSecureContext", true);
++    vi.stubGlobal("SpeechRecognition", class { constructor() { return voice; } });
++    return voice;
++  }
++  it("dictates into the draft without sending and keeps typed edits and final results", async () => {
++    const voice = mockVoice();
++    const { panel, view, runtime, request } = await fixture();
++    runtime.saveDraft(view, "Existing"); await panel.updateComplete;
++    const mic = panel.shadowRoot!.querySelector<HTMLButtonElement>(".voice-input")!;
++    expect(mic.previousElementSibling?.className).toBe("model-picker");
++    expect(mic.nextElementSibling?.className).toBe("primary");
++    mic.click(); await panel.updateComplete;
++    expect(voice.start).toHaveBeenCalledOnce();
++    expect(panel.shadowRoot!.querySelector<HTMLButtonElement>(".primary")!.disabled).toBe(true);
++    voice.onresult?.({ resultIndex: 0, results: [{ isFinal: false, 0: { transcript: "你好" } }] });
++    expect(view.draft).toBe("Existing");
++    runtime.saveDraft(view, "Edited");
++    const final = { resultIndex: 0, results: [{ isFinal: true, 0: { transcript: "你好" } }] };
++    voice.onresult?.(final); voice.onresult?.(final);
++    expect(view.draft).toBe("Edited 你好");
++    mic.click(); expect(voice.stop).toHaveBeenCalledOnce();
++    voice.onend?.(); await panel.updateComplete;
++    expect(mic.getAttribute("aria-pressed")).toBe("false");
++    expect(request.mock.calls.some(([op]) => op === "send")).toBe(false);
++  });
++  it("aborts voice on conversation switch and ignores late results", async () => {
++    const voice = mockVoice();
++    const { panel, view } = await fixture();
++    panel.shadowRoot!.querySelector<HTMLButtonElement>(".voice-input")!.click();
++    const late = voice.onresult;
++    view.threadId = "other"; view.draft = "Other draft"; panel.requestUpdate(); await panel.updateComplete;
++    expect(voice.abort).toHaveBeenCalledOnce();
++    late?.({ resultIndex: 0, results: [{ isFinal: true, 0: { transcript: "stale" } }] });
++    expect(view.draft).toBe("Other draft");
++  });
++  it("reports recognition errors, unsupported browsers and insecure origins", async () => {
++    const voice = mockVoice();
++    const { panel, view } = await fixture();
++    view.draft = "Keep";
++    const mic = panel.shadowRoot!.querySelector<HTMLButtonElement>(".voice-input")!;
++    mic.click(); voice.onerror?.({ error: "not-allowed" }); await panel.updateComplete;
++    expect(panel.shadowRoot!.textContent).toContain("Microphone access denied");
++    expect(view.draft).toBe("Keep");
++    vi.stubGlobal("SpeechRecognition", undefined); vi.stubGlobal("webkitSpeechRecognition", undefined);
++    mic.click(); await panel.updateComplete;
++    expect(panel.shadowRoot!.textContent).toContain("not supported by this browser");
++    vi.stubGlobal("isSecureContext", false); mic.click(); await panel.updateComplete;
++    expect(panel.shadowRoot!.textContent).toContain("requires HTTPS or localhost");
++  });
++  it("aborts microphone capture when the panel is removed", async () => {
++    const voice = mockVoice(); const { panel } = await fixture();
++    panel.shadowRoot!.querySelector<HTMLButtonElement>(".voice-input")!.click();
++    panel.remove(); expect(voice.abort).toHaveBeenCalledOnce(); expect(voice.onresult).toBeNull();
++  });
++
++  it("toggles Plan from Add and shows its inline indicator and placeholder", async () => {
++    const { panel, textarea, view, request } = await fixture();
++    const picker = panel.shadowRoot?.querySelector<HTMLDetailsElement>(".context-picker");
++    if (!picker) throw new Error("Expected Add menu");
++    picker.open = true;
++    const plan = panel.shadowRoot?.querySelector<HTMLButtonElement>(".add-plan");
++    expect(plan?.textContent).toContain("Turn plan mode on");
++    expect(panel.shadowRoot?.querySelector(".context-menu")).toBeNull();
++    plan?.click(); await panel.updateComplete;
++    expect(view.mode).toBe("plan"); expect(picker.open).toBe(false);
++    expect(textarea.placeholder).toBe("Describe your task to generate a plan...");
++    const badge = panel.shadowRoot?.querySelector<HTMLButtonElement>(".plan-toggle");
++    expect(badge?.previousElementSibling?.classList.contains("permission-picker")).toBe(true);
++    expect(badge?.querySelector("svg")).not.toBeNull();
++    expect(request).not.toHaveBeenCalledWith("send", expect.anything());
++    expect(panel.shadowRoot?.querySelector(".asking-question")).toBeNull();
++    picker.open = true; expect(plan?.getAttribute("aria-pressed")).toBe("true");
++    badge?.click(); await panel.updateComplete;
++    expect(view.mode).toBe("default"); expect(panel.shadowRoot?.querySelector(".plan-toggle")).toBeNull();
++    expect(textarea.placeholder).toBe("Ask for follow-up changes");
++    view.snapshot = { approvals: [{ id: "question", method: "item/tool/requestUserInput", params: { questions: [] } }] }; panel.requestUpdate(); await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelector(".asking-question")?.textContent).toBe("Asking question");
++  });
++  it("supports keyboard Add navigation and prevents Plan changes while generating", async () => {
++    const { panel, view, runtime } = await fixture();
++    const picker = panel.shadowRoot?.querySelector<HTMLDetailsElement>(".context-picker");
++    const summary = picker?.querySelector("summary");
++    const files = picker?.querySelector<HTMLButtonElement>(".add-files");
++    const plan = picker?.querySelector<HTMLButtonElement>(".add-plan");
++    if (!picker || !summary || !files || !plan) throw new Error("Expected Add items");
++    summary.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, composed: true }));
++    expect(picker.open).toBe(true); expect(panel.shadowRoot?.activeElement).toBe(files);
++    files.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, composed: true }));
++    expect(panel.shadowRoot?.activeElement).toBe(plan);
++    plan.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, composed: true }));
++    expect(picker.open).toBe(false); expect(panel.shadowRoot?.activeElement).toBe(summary);
++    runtime.setMode(view, "plan"); view.snapshot = { busy: true }; panel.requestUpdate(); await panel.updateComplete;
++    expect(plan.disabled).toBe(true); expect(panel.shadowRoot?.querySelector<HTMLButtonElement>(".plan-toggle")?.disabled).toBe(true);
++    runtime.setMode(view, "default"); expect(view.mode).toBe("plan");
++  });
++  it("persists Plan per conversation and transfers home mode without losing failed input", async () => {
++    const { runtime, view, request, scope } = await fixture();
++    runtime.setMode(view, "plan");
++    runtime.select(view, "other"); expect(view.mode).toBe("default");
++    runtime.select(view, "thread"); expect(view.mode).toBe("plan");
++    const recovered = new CodexBrowserRuntime(); runtimes.push(recovered);
++    recovered.select(recovered.view(scope), "thread"); expect(recovered.view(scope).mode).toBe("plan");
++    runtime.select(view, ""); runtime.setMode(view, "plan"); runtime.saveDraft(view, "make a plan"); runtime.saveReferences(view, ["src"]);
++    request.mockRejectedValueOnce(new Error("create failed")); await runtime.run(view, () => runtime.send(view));
++    expect(view.threadId).toBe(""); expect(view.mode).toBe("plan"); expect(view.draft).toBe("make a plan");
++    request.mockImplementation(async (operation) => { if (operation === "create") return { id: "created", model: "actual" }; if (operation === "send") throw new Error("send failed"); return { changed: false }; });
++    await runtime.run(view, () => runtime.send(view));
++    expect(view.threadId).toBe("created"); expect(view.mode).toBe("plan"); expect(view.draft).toBe("make a plan"); expect(view.references).toEqual(["src"]);
++    expect(request).toHaveBeenCalledWith("send", { threadId: "created", text: "make a plan", mode: "plan", references: ["src"] });
++    request.mockResolvedValue({ accepted: true, mode: "plan" }); await runtime.run(view, () => runtime.send(view));
++    expect(view.mode).toBe("plan"); expect(view.draft).toBe("");
++    view.snapshot = {}; runtime.setMode(view, "default"); runtime.saveDraft(view, "implement");
++    request.mockResolvedValue({ accepted: true, mode: "default" }); await runtime.send(view);
++    expect(request).toHaveBeenCalledWith("send", { threadId: "created", text: "implement", mode: "default" });
++    runtime.select(view, ""); expect(view.mode).toBe("default");
++  });
++  it("accepts backend mode changes without overwriting a pending local choice", async () => {
++    const { view, runtime, request } = await fixture();
++    request.mockResolvedValueOnce({ changed: true, mode: "plan" }); await runtime.refresh(view);
++    expect(view.mode).toBe("plan");
++    runtime.setMode(view, "default");
++    request.mockResolvedValueOnce({ changed: true, mode: "plan" }); await runtime.refresh(view);
++    expect(view.mode).toBe("default");
++  });
 +  it("selects and persists permission mode per workspace and locks it while busy", async () => {
 +    const { panel, view, runtime, request, scope } = await fixture();
-+    const select = panel.shadowRoot?.querySelector<HTMLSelectElement>('select[aria-label="Permission mode"]');
-+    if (!select) throw new Error("Expected permission selector");
-+    expect(select.value).toBe("full-access");
-+    expect([...select.options].map((option) => option.textContent)).toEqual(["Full access", "Ask for approval", "Approve for me"]);
-+    select.value = "approve-for-me"; select.dispatchEvent(new Event("change")); await panel.updateComplete;
-+    expect(view.permissionMode).toBe("approve-for-me");
++    const picker = panel.shadowRoot?.querySelector<HTMLDetailsElement>(".permission-picker");
++    const summary = picker?.querySelector("summary");
++    const options = picker?.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]');
++    if (!picker || !summary || !options) throw new Error("Expected permission picker");
++    expect(summary.textContent).toContain("Full access");
++    expect(summary.classList.contains("permission-warning")).toBe(true);
++    expect(summary.querySelector("svg path:last-child")?.namespaceURI).toBe("http://www.w3.org/2000/svg");
++    expect([...options].map((option) => option.querySelector(".permission-title")?.textContent)).toEqual(["Ask for approval", "Approve for me", "Full access"]);
++    expect(options[2]?.getAttribute("aria-checked")).toBe("true");
++    expect(options[2]?.querySelector(".permission-description")?.textContent).toContain("Unrestricted access");
++    picker.open = true; options[1]?.click(); await panel.updateComplete;
++    expect(view.permissionMode).toBe("approve-for-me"); expect(picker.open).toBe(false);
++    expect(summary.classList.contains("permission-warning")).toBe(false);
++    expect(options[1]?.getAttribute("aria-checked")).toBe("true");
 +    const recovered = new CodexBrowserRuntime(); runtimes.push(recovered);
 +    expect(recovered.view(scope).permissionMode).toBe("approve-for-me");
 +    expect(runtime.view(context(request, "remote")).permissionMode).toBe("full-access");
 +    runtime.select(view, "other"); expect(view.permissionMode).toBe("approve-for-me");
-+    view.snapshot = { busy: true }; panel.requestUpdate(); await panel.updateComplete;
-+    expect(select.disabled).toBe(true); runtime.setPermissionMode(view, "full-access"); expect(view.permissionMode).toBe("approve-for-me");
++    picker.open = true; view.snapshot = { busy: true }; panel.requestUpdate(); await panel.updateComplete;
++    expect(picker.open).toBe(false); expect(summary.getAttribute("aria-disabled")).toBe("true");
++    expect([...options].every((option) => option.disabled)).toBe(true);
++    runtime.setPermissionMode(view, "full-access"); expect(view.permissionMode).toBe("approve-for-me");
 +    view.snapshot = {}; view.pending = true; panel.requestUpdate(); await panel.updateComplete;
-+    expect(select.disabled).toBe(true); runtime.setPermissionMode(view, "full-access"); expect(view.permissionMode).toBe("approve-for-me");
++    expect(summary.getAttribute("aria-disabled")).toBe("true");
 +    view.pending = false; panel.requestUpdate(); await panel.updateComplete;
-+    expect(select.disabled).toBe(false);
++    expect(summary.getAttribute("aria-disabled")).toBe("false");
++  });
++  it("navigates the permissions menu by keyboard and dismisses outside or on Escape", async () => {
++    const { panel, textarea } = await fixture();
++    const picker = panel.shadowRoot?.querySelector<HTMLDetailsElement>(".permission-picker");
++    const summary = picker?.querySelector("summary");
++    const options = picker?.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]');
++    if (!picker || !summary || !options) throw new Error("Expected permission picker");
++    summary.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, composed: true }));
++    expect(picker.open).toBe(true); expect(panel.shadowRoot?.activeElement).toBe(options[2]);
++    options[2]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, composed: true }));
++    expect(panel.shadowRoot?.activeElement).toBe(options[0]);
++    options[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, composed: true }));
++    expect(picker.open).toBe(false); expect(panel.shadowRoot?.activeElement).toBe(summary);
++    picker.open = true; textarea.dispatchEvent(new Event("pointerdown", { bubbles: true, composed: true }));
++    expect(picker.open).toBe(false);
 +  });
 +  it("sends the selected permission mode on home creation and subsequent messages", async () => {
 +    const { view, runtime, request } = await fixture();
@@ -365,10 +547,10 @@ index 00000000..500aecea
 +    request.mockImplementation(async (operation) => operation === "create" ? { id: "new" } : { changed: false });
 +    await runtime.send(view);
 +    expect(request).toHaveBeenCalledWith("create", { permissionMode: "ask-for-approval" });
-+    expect(request).toHaveBeenCalledWith("send", { threadId: "new", text: "hello", permissionMode: "ask-for-approval" });
++    expect(request).toHaveBeenCalledWith("send", { mode: "default", threadId: "new", text: "hello", permissionMode: "ask-for-approval" });
 +    view.snapshot = {}; runtime.setPermissionMode(view, "approve-for-me"); runtime.saveDraft(view, "again");
 +    await runtime.send(view);
-+    expect(request).toHaveBeenCalledWith("send", { threadId: "new", text: "again", permissionMode: "approve-for-me" });
++    expect(request).toHaveBeenCalledWith("send", { mode: "default", threadId: "new", text: "again", permissionMode: "approve-for-me" });
 +  });
 +  it("shows backend defaults on home and keeps them separate from thread settings and overrides", async () => {
 +    const { view, runtime, request, panel } = await fixture();
@@ -394,7 +576,7 @@ index 00000000..500aecea
 +    expect(panel.shadowRoot?.querySelector<HTMLSelectElement>('select[aria-label="Reasoning effort"]')?.disabled).toBe(false);
 +    view.draft = "hello";
 +    await runtime.send(view);
-+    expect(request).toHaveBeenCalledWith("send", { threadId: "thread", text: "hello" });
++    expect(request).toHaveBeenCalledWith("send", { mode: "default", threadId: "thread", text: "hello" });
 +    view.model = "manual-model"; view.effort = "low";
 +    runtime.select(view, "other"); await panel.updateComplete;
 +    expect(view.model).toBe(""); expect(view.effort).toBe("");
@@ -411,7 +593,7 @@ index 00000000..500aecea
 +    textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
 +    textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
 +    await panel.updateComplete; await Promise.resolve(); await panel.updateComplete;
-+    expect(request.mock.calls.filter(([operation]) => operation === "send")).toEqual([["send", { threadId: "thread", text: "你好" }]]);
++    expect(request.mock.calls.filter(([operation]) => operation === "send")).toEqual([["send", { mode: "default", threadId: "thread", text: "你好" }]]);
 +    expect(view.draft).toBe("");
 +  });
 +  it("shows a spinner until send acknowledgement then shows stop, and restores send on failure", async () => {
@@ -448,10 +630,10 @@ index 00000000..500aecea
 +    textarea.value = "hello"; textarea.dispatchEvent(new Event("input")); await panel.updateComplete;
 +    expect(button.disabled).toBe(false); expect(button.getAttribute("aria-label")).toBe("Send message");
 +    button.click(); await panel.updateComplete; await Promise.resolve(); await panel.updateComplete;
-+    expect(request).toHaveBeenCalledWith("send", { threadId: "thread", text: "hello" });
++    expect(request).toHaveBeenCalledWith("send", { mode: "default", threadId: "thread", text: "hello" });
 +    expect(view.draft).toBe(""); await vi.waitFor(() => { expect(button.disabled).toBe(false); });
 +    expect(button.getAttribute("aria-label")).toBe("Stop response");
-+    expect(panel.shadowRoot?.querySelectorAll(".composer-controls>button")).toHaveLength(1);
++    expect(panel.shadowRoot?.querySelectorAll(".composer-controls>button.primary")).toHaveLength(1);
 +    expect(panel.shadowRoot?.querySelector(".primary")).toBe(button);
 +    view.pending = true; panel.requestUpdate(); await panel.updateComplete;
 +    expect(button.disabled).toBe(true);
@@ -562,7 +744,7 @@ index 00000000..500aecea
 +    textarea.value = "hello"; textarea.dispatchEvent(new Event("input"));
 +    textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
 +    await panel.updateComplete;
-+    expect(request).toHaveBeenCalledWith("send", { threadId: "thread", text: "hello", model: "test-model", effort: "high" });
++    expect(request).toHaveBeenCalledWith("send", { mode: "default", threadId: "thread", text: "hello", model: "test-model", effort: "high" });
 +  });
 +  it("opens and closes review without losing the draft and safely renders diff text", async () => {
 +    const { view, panel, textarea } = await fixture();
@@ -679,7 +861,7 @@ index 00000000..500aecea
 +    const button = panel.shadowRoot?.querySelector<HTMLButtonElement>(".primary");
 +    expect(button?.disabled).toBe(false); button?.click();
 +    await vi.waitFor(() => { expect(view.pending).toBe(false); expect(view.threadId).toBe("new"); });
-+    expect(request).toHaveBeenCalledWith("send", { threadId: "new", text: "new task", references: ["src"], model: "chosen", effort: "high" });
++    expect(request).toHaveBeenCalledWith("send", { mode: "default", threadId: "new", text: "new task", references: ["src"], model: "chosen", effort: "high" });
 +    expect(request.mock.calls.filter(([operation]) => operation === "create")).toHaveLength(1);
 +    expect(view.draft).toBe(""); expect(view.snapshot["busy"]).toBe(true);
 +    runtime.select(view, ""); expect(view.draft).toBe(""); expect(view.references).toEqual([]);
@@ -742,6 +924,7 @@ index 00000000..500aecea
 +    const picker = panel.shadowRoot?.querySelector<HTMLDetailsElement>(".context-picker");
 +    if (!picker) throw new Error("Expected context picker");
 +    picker.open = true; picker.dispatchEvent(new Event("toggle"));
++    panel.shadowRoot?.querySelector<HTMLButtonElement>(".add-files")?.click();
 +    await Promise.resolve(); await panel.updateComplete;
 +    expect(listFiles).toHaveBeenCalledWith("");
 +    panel.shadowRoot?.querySelector<HTMLButtonElement>('[aria-label="Add README.md"]')?.click(); await panel.updateComplete;
@@ -753,6 +936,9 @@ index 00000000..500aecea
 +    expect(view.references).toEqual(["README.md", "src"]);
 +    panel.shadowRoot?.querySelector<HTMLButtonElement>('[aria-label="Remove README.md"]')?.click(); await panel.updateComplete;
 +    expect(view.references).toEqual(["src"]);
++    panel.shadowRoot?.querySelector<HTMLButtonElement>('[aria-label="Back to Add"]')?.click(); await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelector(".add-plan")).not.toBeNull();
++    expect(panel.shadowRoot?.querySelector(".context-menu")).toBeNull();
 +    document.body.dispatchEvent(new Event("pointerdown", { bubbles: true, composed: true }));
 +    expect(picker.open).toBe(false);
 +    picker.open = true;
@@ -772,7 +958,7 @@ index 00000000..500aecea
 +    await runtime.run(view, () => runtime.send(view));
 +    expect(view.references).toEqual(["src", "README.md"]);
 +    await runtime.run(view, () => runtime.send(view));
-+    expect(request).toHaveBeenCalledWith("send", { threadId: "thread", text: "", references: ["src", "README.md"] });
++    expect(request).toHaveBeenCalledWith("send", { mode: "default", threadId: "thread", text: "", references: ["src", "README.md"] });
 +    expect(view.references).toEqual([]);
 +  });
 +
@@ -814,18 +1000,30 @@ index 00000000..500aecea
 +});
 diff --git a/pi-web-plugins/codex/CodexPanel.ts b/pi-web-plugins/codex/CodexPanel.ts
 new file mode 100644
-index 00000000..3e253fdd
+index 00000000..1dc9a3c6
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.ts
-@@ -0,0 +1,452 @@
-+import { LitElement, css, html, nothing } from "lit";
+@@ -0,0 +1,619 @@
++import { LitElement, css, html, svg, nothing } from "lit";
 +import { property } from "lit/decorators.js";
 +import { repeat } from "lit/directives/repeat.js";
 +import { unsafeHTML } from "lit/directives/unsafe-html.js";
 +import type { FileTreeEntry, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
 +import { CodexBrowserRuntime, type CodexView } from "./CodexBrowserRuntime.js";
-+import { array, errorText, object, text, type RecordValue } from "./server/protocol.js";
++import { array, errorText, object, text, type PermissionMode, type RecordValue } from "./server/protocol.js";
 +import { renderWorkspaceMarkdownHtml } from "./markdown.js";
++
++interface VoiceRecognition {
++  lang: string;
++  continuous: boolean;
++  interimResults: boolean;
++  onresult: ((event: { resultIndex: number; results: ArrayLike<{ isFinal: boolean; 0: { transcript: string } }> }) => void) | null;
++  onerror: ((event: { error: string }) => void) | null;
++  onend: (() => void) | null;
++  start(): void;
++  stop(): void;
++  abort(): void;
++}
 +
 +export class CodexPanel extends LitElement {
 +  @property({ attribute: false }) context: WorkspacePanelContext | undefined;
@@ -833,9 +1031,75 @@ index 00000000..3e253fdd
 +  private view: CodexView | undefined;
 +  private unsubscribe: (() => void) | undefined;
 +  private historyNavigation: { view: CodexView; generation: number; entries: string[]; index: number; draft: string; value: string } | undefined;
++  private voice: VoiceRecognition | undefined;
++  private voiceTarget: { view: CodexView; generation: number; threadId: string } | undefined;
++  private voiceStatus = "";
++  private voiceStopping = false;
++  private cancelVoice(): void {
++    const voice = this.voice;
++    this.voice = undefined; this.voiceTarget = undefined; this.voiceStopping = false; this.voiceStatus = "";
++    if (voice) { voice.onresult = null; voice.onerror = null; voice.onend = null; try { voice.abort(); } catch {} }
++  }
++  private toggleVoice(view: CodexView): void {
++    if (this.voice) {
++      if (!this.voiceStopping) {
++        this.voiceStopping = true; this.voiceStatus = "Finishing voice input…";
++        try { this.voice.stop(); } catch { this.cancelVoice(); }
++        this.requestUpdate();
++      }
++      return;
++    }
++    if (view.pending || view.sending || view.snapshot["busy"] === true) return;
++    const browser = window as unknown as { SpeechRecognition?: new () => VoiceRecognition; webkitSpeechRecognition?: new () => VoiceRecognition };
++    const Recognition = browser.SpeechRecognition ?? browser.webkitSpeechRecognition;
++    if (window.isSecureContext === false) {
++      this.voiceStatus = "Voice input requires HTTPS or localhost.";
++    } else if (!Recognition) {
++      this.voiceStatus = "Voice input is not supported by this browser. Try Chrome or Safari.";
++    } else {
++      try {
++        const voice = new Recognition(); this.voice = voice;
++        const target = { view, generation: view.generation, threadId: view.threadId }; this.voiceTarget = target;
++        const current = () => this.voice === voice && this.view === view && view.generation === target.generation && view.threadId === target.threadId && !view.pending && !view.sending && view.snapshot["busy"] !== true;
++        voice.lang = navigator.language || "zh-CN"; voice.continuous = true; voice.interimResults = true;
++        const committed = new Set<number>();
++        voice.onresult = (event) => {
++          if (!current()) return;
++          let interim = "";
++          for (let i = event.resultIndex; i < event.results.length; i++) {
++            const result = event.results[i]; if (!result) continue;
++            const transcript = result[0].transcript.trim();
++            if (result.isFinal && !committed.has(i)) {
++              committed.add(i);
++              if (transcript) { this.historyNavigation = undefined; this.runtime?.saveDraft(view, view.draft + (view.draft && !/\s$/.test(view.draft) ? " " : "") + transcript); }
++            } else if (!result.isFinal) interim += result[0].transcript;
++          }
++          this.voiceStatus = interim || "Listening… Click the microphone to stop."; this.requestUpdate();
++        };
++        voice.onerror = (event) => {
++          if (!current()) return;
++          const messages: Record<string, string> = {
++            "not-allowed": "Microphone access denied. Allow microphone access in browser settings.",
++            "service-not-allowed": "Speech recognition is unavailable or blocked by this browser.",
++            "audio-capture": "No microphone available. Check your microphone connection.",
++            "no-speech": "No speech detected. Click the microphone to try again.",
++            "network": "Speech recognition connection failed. Check your network and try again.",
++          };
++          this.cancelVoice(); this.voiceStatus = messages[event.error] ?? `Voice input failed: ${event.error}`; this.requestUpdate();
++        };
++        voice.onend = () => {
++          if (this.voice !== voice) return;
++          this.voice = undefined; this.voiceTarget = undefined; this.voiceStopping = false; this.voiceStatus = ""; this.requestUpdate();
++        };
++        this.voiceStatus = "Listening… Click the microphone to stop."; voice.start();
++      } catch (error) { this.cancelVoice(); this.voiceStatus = `Could not start voice input: ${errorText(error)}`; }
++    }
++    this.requestUpdate();
++  }
 +  private follow = true;
 +  private composing = false;
 +  private browsePath = "";
++  private addPage: "menu" | "files" = "menu";
 +  private browseEntries: FileTreeEntry[] = [];
 +  private browseLoading = false;
 +  private browseError = "";
@@ -847,17 +1111,18 @@ index 00000000..3e253fdd
 +  private readonly resizeObserver = new ResizeObserver(() => { this.requestUpdate(); });
 +  private readonly markdown = new Map<string, { text: string; html: string }>();
 +
-+  private closeMenus(restoreFocus = false, selector = ".model-picker, .context-picker"): void {
++  private closeMenus(restoreFocus = false, selector = ".model-picker, .context-picker, .permission-picker"): void {
 +    for (const menu of this.renderRoot.querySelectorAll<HTMLDetailsElement>(selector)) {
 +      if (!menu.open) continue;
 +      menu.open = false;
++      if (menu.classList.contains("context-picker")) this.addPage = "menu";
 +      if (restoreFocus) menu.querySelector("summary")?.focus();
 +    }
 +  }
 +  private readonly dismissMenus = (event: Event): void => {
 +    const path = event.composedPath();
-+    for (const menu of this.renderRoot.querySelectorAll<HTMLDetailsElement>(".model-picker, .context-picker")) {
-+      if (!path.includes(menu)) menu.open = false;
++    for (const menu of this.renderRoot.querySelectorAll<HTMLDetailsElement>(".model-picker, .context-picker, .permission-picker")) {
++      if (!path.includes(menu)) { menu.open = false; if (menu.classList.contains("context-picker")) this.addPage = "menu"; }
 +    }
 +  };
 +  private readonly onMenuKeydown = (event: KeyboardEvent): void => {
@@ -875,6 +1140,7 @@ index 00000000..3e253fdd
 +    this.ownerDocument.removeEventListener("pointerdown", this.dismissMenus, true);
 +    this.ownerDocument.removeEventListener("focusin", this.dismissMenus, true);
 +    this.ownerDocument.removeEventListener("keydown", this.onMenuKeydown);
++    this.cancelVoice();
 +    this.closeMenus();
 +    this.unsubscribe?.(); this.unsubscribe = undefined;
 +    this.resizeObserver.disconnect(); super.disconnectedCallback();
@@ -882,9 +1148,11 @@ index 00000000..3e253fdd
 +  protected override willUpdate(): void {
 +    if (this.context === undefined || this.runtime === undefined) return;
 +    const view = this.runtime.view(this.context);
++    if (this.voiceTarget && (this.voiceTarget.view !== view || this.voiceTarget.generation !== view.generation || this.voiceTarget.threadId !== view.threadId || view.pending || view.sending || view.snapshot["busy"] === true)) this.cancelVoice();
 +    if (view === this.view && this.unsubscribe !== undefined) return;
 +    this.unsubscribe?.();
 +    this.closeMenus();
++    this.addPage = "menu";
 +    this.browseRequest++; this.browsePath = ""; this.browseEntries = [];
 +    this.view = view;
 +    this.historyExpanded = false;
@@ -892,6 +1160,7 @@ index 00000000..3e253fdd
 +    this.unsubscribe = this.runtime.subscribe(view, () => { this.requestUpdate(); });
 +  }
 +  protected override updated(): void {
++    if (this.view?.pending || this.view?.sending || this.view?.snapshot["busy"] === true) this.closeMenus(false, ".permission-picker");
 +    const transcript = this.renderRoot.querySelector(".transcript");
 +    for (const pre of this.renderRoot.querySelectorAll(".markdown pre")) {
 +      if (pre.querySelector("button") !== null) continue;
@@ -968,16 +1237,73 @@ index 00000000..3e253fdd
 +    if (view.pending || view.references.length >= 20) return;
 +    this.runtime?.saveReferences(view, [...view.references, path || "."]);
 +  }
++  private planIcon() {
++    return html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 18h6m-5 3h4M8 15c-4-4-1-11 4-11s8 7 4 11c-1 1-1 2-1 3H9c0-1 0-2-1-3M12 1v1M3 4l2 2m14 0 2-2M1 11h2m18 0h2"/></svg>`;
++  }
++  private togglePlan(view: CodexView): void {
++    this.runtime?.setMode(view, view.mode === "plan" ? "default" : "plan");
++    this.closeMenus(true, ".context-picker");
++  }
++  private addKeydown(event: KeyboardEvent): void {
++    if (this.addPage !== "menu" || !["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
++    const picker = event.currentTarget;
++    if (!(picker instanceof HTMLDetailsElement) || this.view?.pending) return;
++    const buttons = [...picker.querySelectorAll<HTMLButtonElement>(".add-item")].filter((button) => !button.disabled);
++    if (buttons.length === 0) return;
++    event.preventDefault(); picker.open = true;
++    const current = buttons.findIndex((button) => button === event.target);
++    const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : current < 0 ? 0 : (current + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
++    buttons[next]?.focus();
++  }
 +  private renderContextPicker(view: CodexView) {
 +    const entries = this.browseEntries.filter((entry) => entry.name.toLowerCase().includes(this.browseFilter.toLowerCase()));
-+    return html`<details class="context-picker" @toggle=${(event: Event) => { if (event.currentTarget instanceof HTMLDetailsElement && event.currentTarget.open) void this.browse(this.browsePath); }}>
-+      <summary aria-label="Add workspace files or directories" title="Add workspace files or directories">+</summary>
-+      <div class="context-menu" aria-label="Workspace files and directories">
-+        <div class="context-heading"><strong>Workspace context</strong><button aria-label="Close workspace picker" @click=${() => { this.closeMenus(true, ".context-picker"); }}>×</button></div>
++    return html`<details class="context-picker" @keydown=${(event: KeyboardEvent) => { this.addKeydown(event); }} @toggle=${(event: Event) => { if (event.currentTarget instanceof HTMLDetailsElement && !event.currentTarget.open) { this.addPage = "menu"; this.requestUpdate(); } }}>
++      <summary aria-label="Add" title="Add files or change mode" aria-disabled=${view.pending} @click=${(event: Event) => { if (view.pending) event.preventDefault(); }}>+</summary>
++      <div class="add-menu" aria-label="Add">
++        ${this.addPage === "files" ? html`<div class="context-menu" aria-label="Workspace files and directories">
++        <div class="context-heading"><button aria-label="Back to Add" @click=${() => { this.addPage = "menu"; this.requestUpdate(); }}>←</button><strong>Files and folders</strong><button aria-label="Close workspace picker" @click=${() => { this.closeMenus(true, ".context-picker"); }}>×</button></div>
 +        <div class="context-navigation"><button aria-label="Parent directory" ?disabled=${this.browseLoading || this.browsePath === ""} @click=${() => { void this.browse(this.browsePath.split("/").slice(0, -1).join("/")); }}>↑</button><span title=${view.context.workspace.path}>${this.browsePath || view.context.workspace.label}</span><button ?disabled=${view.pending || this.browseLoading || this.browseError !== "" || view.references.length >= 20 || view.references.includes(this.browsePath || ".")} @click=${() => { this.addReference(view, this.browsePath); }}>Add directory</button></div>
 +        <input class="context-filter" aria-label="Filter workspace items" placeholder="Filter files and directories" .value=${this.browseFilter} @input=${(event: Event) => { if (event.target instanceof HTMLInputElement) { this.browseFilter = event.target.value; this.requestUpdate(); } }}>
 +        ${this.browseLoading ? html`<p role="status">Loading…</p>` : this.browseError !== "" ? html`<p class="error" role="alert">${this.browseError}</p><button @click=${() => { void this.browse(this.browsePath); }}>Retry</button>` : html`<div class="context-entries">${entries.map((entry) => html`<div class="context-entry"><button class="context-name" title=${entry.path} ?disabled=${entry.type === "symlink" || view.pending} @click=${() => { if (entry.type === "directory") void this.browse(entry.path); else this.addReference(view, entry.path); }}>${entry.type === "directory" ? "▸" : "·"} ${entry.name}</button><button aria-label=${`Add ${entry.path}`} ?disabled=${view.pending || entry.type === "symlink" || view.references.length >= 20 || view.references.includes(entry.path)} @click=${() => { this.addReference(view, entry.path); }}>${view.references.includes(entry.path) ? "Added" : entry.type === "symlink" ? "Link" : "Add"}</button></div>`)}</div>${entries.length === 0 ? html`<p>No matching files or directories.</p>` : nothing}${this.browseTruncated ? html`<p>Only part of this directory is listed. Add the directory to reference all its contents.</p>` : nothing}`}
 +        <div class="context-bottom"><small>Selected ${view.references.length} / 20 · Paths only</small><button @click=${() => { this.closeMenus(true, ".context-picker"); }}>Done</button></div>
++      </div>` : html`
++          <div class="add-heading">Add</div>
++          <button class="add-item add-files" ?disabled=${view.pending} @click=${() => { this.addPage = "files"; void this.browse(this.browsePath); }}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 15V6a4 4 0 0 1 8 0v10a6 6 0 0 1-12 0V7m8-1v10a2 2 0 0 1-4 0"/></svg><span>Files and folders</span></button>
++          <button class="add-item add-plan" aria-pressed=${view.mode === "plan"} ?disabled=${view.pending || view.sending || view.snapshot["busy"] === true} @click=${() => { this.togglePlan(view); }}>${this.planIcon()}<span>Plan mode</span><span class="add-description">${view.mode === "plan" ? "Turn plan mode off" : "Turn plan mode on"}</span>${view.mode === "plan" ? html`<span class="add-check" aria-hidden="true">✓</span>` : nothing}</button>
++        `}
++      </div>
++    </details>`;
++  }
++  private permissionIcon(mode: PermissionMode) {
++    if (mode === "ask-for-approval") return html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 12V5a1.5 1.5 0 0 1 3 0v6V3a1.5 1.5 0 0 1 3 0v8V5a1.5 1.5 0 0 1 3 0v7-4a1.5 1.5 0 0 1 3 0v6c0 5-3 8-7 8-3 0-5-2-7-5l-3-5a1.5 1.5 0 0 1 2.5-1.5L8 14"/></svg>`;
++    return html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 2 9 4v6c0 5-4 8-9 10-5-2-9-5-9-10V6z"/>${mode === "full-access" ? svg`<path d="M12 7v6m0 4h.01"/>` : svg`<path d="m8 9 3 3-3 3m6 0h3"/>`}</svg>`;
++  }
++  private permissionKeydown(event: KeyboardEvent): void {
++    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
++    const picker = event.currentTarget;
++    if (!(picker instanceof HTMLDetailsElement)) return;
++    const buttons = [...picker.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')].filter((button) => !button.disabled);
++    if (buttons.length === 0) return;
++    event.preventDefault(); picker.open = true;
++    const current = buttons.findIndex((button) => button === event.target);
++    const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : current < 0 ? Math.max(0, buttons.findIndex((button) => button.getAttribute("aria-checked") === "true")) : (current + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
++    buttons[next]?.focus();
++  }
++  private renderPermissionPicker(view: CodexView) {
++    const modes: { id: PermissionMode; label: string; description: string }[] = [
++      { id: "ask-for-approval", label: "Ask for approval", description: "Always ask to edit external files and use the internet" },
++      { id: "approve-for-me", label: "Approve for me", description: "Only ask for actions detected as potentially unsafe" },
++      { id: "full-access", label: "Full access", description: "Unrestricted access to the internet and any file on your computer" },
++    ];
++    const selected = modes.find((mode) => mode.id === view.permissionMode) ?? modes[2];
++    const disabled = view.pending || view.sending || view.snapshot["busy"] === true;
++    return html`<details class="permission-picker" @keydown=${(event: KeyboardEvent) => { this.permissionKeydown(event); }}>
++      <summary class=${view.permissionMode === "full-access" ? "permission-warning" : ""} aria-label="Permission mode" aria-haspopup="menu" aria-disabled=${disabled} title="Permission mode for the next message" @click=${(event: Event) => { if (disabled) event.preventDefault(); }}>${this.permissionIcon(view.permissionMode)}<span>${selected?.label}</span></summary>
++      <div class="permission-menu" role="menu" aria-label="How should Codex actions be approved?">
++        <div class="permission-heading"><span>How should Codex actions be approved?</span><a href="https://developers.openai.com/codex/security/" target="_blank" rel="noopener noreferrer">Learn more</a></div>
++        ${modes.map((mode) => html`<button class=${`permission-option ${mode.id === "full-access" ? "permission-warning" : ""}`} role="menuitemradio" aria-checked=${mode.id === view.permissionMode} ?disabled=${disabled} @click=${() => { this.runtime?.setPermissionMode(view, mode.id); this.closeMenus(true, ".permission-picker"); }}>
++          ${this.permissionIcon(mode.id)}<span class="permission-copy"><span class="permission-title">${mode.label}</span><span class="permission-description">${mode.description}</span></span><span class="permission-check" aria-hidden="true">${mode.id === view.permissionMode ? "✓" : ""}</span>
++        </button>`)}
 +      </div>
 +    </details>`;
 +  }
@@ -1057,14 +1383,15 @@ index 00000000..3e253fdd
 +        ${busy ? html`<div class="working" role="status"><span class="activity-dot"></span>Working…</div>` : nothing}
 +      </div>
 +      ${!this.follow || view.offset > 0 ? html`<button class="latest" @click=${() => { this.follow = true; view.offset = 0; view.snapshot = { ...view.snapshot, version: -1 }; this.requestUpdate(); void this.runtime?.refresh(view); }}>Jump to latest</button>` : nothing}
-+      <section aria-label="Pending requests">${array(snapshot["approvals"]).map((approval) => this.renderApproval(view, object(approval)))}</section>`}
-+      <footer>
++      <section aria-label="Pending requests">${array(snapshot["approvals"]).some((approval) => object(approval)["method"] === "item/tool/requestUserInput") ? html`<div class="asking-question" role="status">Asking question</div>` : nothing}${array(snapshot["approvals"]).map((approval) => this.renderApproval(view, object(approval)))}</section>`}
++      <footer ?data-plan=${view.mode === "plan"}>
 +        ${view.references.length > 0 ? html`<div class="context-tray" aria-label="Selected workspace context">${view.references.map((path) => html`<span title=${path}>${path}<button aria-label=${`Remove ${path}`} ?disabled=${view.pending} @click=${() => { this.runtime?.saveReferences(view, view.references.filter((entry) => entry !== path)); }}>×</button></span>`)}</div>` : nothing}
-+        <textarea aria-label="Message Codex" placeholder=${home ? "Ask Codex to start a new conversation" : "Ask for follow-up changes"} .value=${view.draft}
++        <textarea aria-label="Message Codex" placeholder=${view.mode === "plan" ? "Describe your task to generate a plan..." : home ? "Ask Codex to start a new conversation" : "Ask for follow-up changes"} .value=${view.draft}
 +          @input=${(event: Event) => { if (event.target instanceof HTMLTextAreaElement) { this.historyNavigation = undefined; this.runtime?.saveDraft(view, event.target.value); this.requestUpdate(); } }}
 +          @compositionstart=${() => { this.composing = true; }} @compositionend=${() => { this.composing = false; }}
-+          @keydown=${(event: KeyboardEvent) => { this.navigateInputHistory(event, view); if (event.key === "Enter" && !event.shiftKey && !event.isComposing && !this.composing) { event.preventDefault(); if (!view.pending && !busy && view.connected && (view.draft.trim() !== "" || view.references.length > 0)) this.action((runtime, state) => runtime.send(state)); } }}></textarea>
-+        <div class="composer-controls">${this.renderContextPicker(view)}<select class="policy" aria-label="Permission mode" title="Permission mode for the next message" .value=${view.permissionMode} ?disabled=${view.pending || view.sending || busy} @change=${(event: Event) => { if (event.target instanceof HTMLSelectElement) this.runtime?.setPermissionMode(view, event.target.value); }}><option value="full-access">Full access</option><option value="ask-for-approval">Ask for approval</option><option value="approve-for-me">Approve for me</option></select><details class="model-picker">
++          @keydown=${(event: KeyboardEvent) => { this.navigateInputHistory(event, view); if (event.key === "Enter" && !event.shiftKey && !event.isComposing && !this.composing) { event.preventDefault(); if (!this.voice && !view.pending && !busy && view.connected && (view.draft.trim() !== "" || view.references.length > 0)) this.action((runtime, state) => runtime.send(state)); } }}></textarea>
++        ${this.voiceStatus ? html`<div class="voice-status" role="status">${this.voiceStatus}</div>` : nothing}
++        <div class="composer-controls">${this.renderContextPicker(view)}${this.renderPermissionPicker(view)}${view.mode === "plan" ? html`<button class="plan-toggle" aria-label="Turn plan mode off" aria-pressed="true" title="Turn plan mode off" ?disabled=${view.pending || view.sending || busy} @click=${() => { this.togglePlan(view); }}>${this.planIcon()}<span>Plan</span></button>` : nothing}<span class="composer-spacer"></span><details class="model-picker">
 +          <summary aria-label="Model and reasoning settings">${text(selectedModel?.["displayName"]) || modelName || "Model unavailable"} <span>${view.effort || effectiveEffort || "Effort unspecified"}</span></summary>
 +          <div class="model-menu"><label>Model<select aria-label="Model" ?disabled=${view.pending || busy} .value=${view.model} @change=${(event: Event) => { if (event.target instanceof HTMLSelectElement) { view.model = event.target.value; view.effort = ""; this.requestUpdate(); } }}>
 +          <option value="">${currentModel || "Model unavailable"} (current)</option>${models.map((model) => html`<option value=${text(model["model"])}>${text(model["displayName"]) || text(model["model"])}</option>`)}
@@ -1072,8 +1399,8 @@ index 00000000..3e253fdd
 +        <label>Reasoning effort<select aria-label="Reasoning effort" ?disabled=${view.pending || busy || selectedModel === undefined} .value=${view.effort} @change=${(event: Event) => { if (event.target instanceof HTMLSelectElement) { view.effort = event.target.value; this.requestUpdate(); } }}>
 +          <option value="">${effectiveEffort || "Unspecified"} (current)</option>${array(selectedModel?.["supportedReasoningEfforts"]).map((entry) => html`<option value=${text(object(entry)["reasoningEffort"])}>${text(object(entry)["reasoningEffort"])}</option>`)}
 +        </select></label></div></details>
-+          <span class="composer-spacer"></span>
-+          <button class="primary" aria-label=${view.sending ? "Sending message" : busy ? "Stop response" : "Send message"} title=${view.sending ? "Sending message" : busy ? "Stop response" : "Send message"} aria-busy=${view.sending} ?disabled=${view.pending || view.sending || !view.connected || (!busy && view.draft.trim() === "" && view.references.length === 0)} @click=${() => { this.action((runtime, state) => busy ? runtime.request(state, "stop", { threadId: state.threadId }) : runtime.send(state)); }}>${view.sending ? html`<span class="send-spinner" aria-hidden="true"></span>` : busy ? html`<span class="stop-icon" aria-hidden="true"></span>` : "↑"}</button>
++          <button class="voice-input" aria-label=${this.voice ? "Stop voice input" : "Start voice input"} title=${this.voice ? "Stop voice input" : "Voice input"} aria-pressed=${!!this.voice} ?disabled=${this.voiceStopping || view.pending || view.sending || busy} @click=${() => { this.toggleVoice(view); }}><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2" width="6" height="13" rx="3"></rect><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"></path></svg></button>
++          <button class="primary" aria-label=${view.sending ? "Sending message" : busy ? "Stop response" : "Send message"} title=${view.sending ? "Sending message" : busy ? "Stop response" : "Send message"} aria-busy=${view.sending} ?disabled=${!!this.voice || view.pending || view.sending || !view.connected || (!busy && view.draft.trim() === "" && view.references.length === 0)} @click=${() => { this.action((runtime, state) => busy ? runtime.request(state, "stop", { threadId: state.threadId }) : runtime.send(state)); }}>${view.sending ? html`<span class="send-spinner" aria-hidden="true"></span>` : busy ? html`<span class="stop-icon" aria-hidden="true"></span>` : "↑"}</button>
 +        </div>
 +      </footer>
 +      <div class="connection-status" role="status">${view.pending ? "Working…" : text(snapshot["status"]) || (view.connected ? "Ready" : "Connecting…")}</div>
@@ -1212,22 +1539,45 @@ index 00000000..3e253fdd
 +    pre { white-space:pre-wrap; overflow-wrap:anywhere; margin:0; font:12px/1.6 monospace; } .userMessage pre { font:inherit; }
 +    .transcript details { margin:12px 0; color:var(--pi-muted,#777); } .transcript details pre { padding:12px; background:var(--pi-surface,#f7f7f7); border-radius:8px; }
 +    summary { padding:6px; } .markdown { overflow-wrap:anywhere; } .markdown p { margin:0 0 12px; } .markdown pre { padding:12px; overflow:auto; background:var(--pi-surface,#f7f7f7); border-radius:8px; } .markdown a { color:var(--pi-accent,#4569ae); } .markdown table { border-collapse:collapse; display:block; overflow:auto; } .markdown td,.markdown th { border:1px solid var(--pi-border,#ddd); padding:4px; }
-+    footer { flex:none; margin:12px 16px 0; padding:12px 8px 7px; background:var(--pi-surface,#f7f7f7); border:1px solid var(--pi-border-muted,#e4e4e4); border-radius:22px; box-shadow:0 4px 18px #00000005; }
++    footer { position:relative; flex:none; margin:12px 16px 0; padding:12px 8px 7px; background:var(--pi-surface,#f7f7f7); border:1px solid var(--pi-border-muted,#e4e4e4); border-radius:22px; box-shadow:0 4px 18px #00000005; }
 +    textarea { display:block; width:100%; resize:vertical; min-height:70px; max-height:180px; padding:3px 7px 12px; border:0; background:transparent; }
 +    textarea::placeholder { color:var(--pi-muted,#858585); } .composer-controls { display:flex; align-items:center; gap:2px; flex-wrap:wrap; } .composer-controls select { font-size:12px; max-width:180px; min-width:0; padding:4px; color:var(--pi-muted,#707070); } .composer-spacer { flex:1; }
++    .voice-input { display:flex; align-items:center; justify-content:center; flex:none; width:32px; height:32px; color:var(--pi-muted,#707070); }
++    .voice-input svg { width:20px; height:20px; fill:none; stroke:currentColor; stroke-width:1.7; stroke-linecap:round; stroke-linejoin:round; }
++    .voice-input[aria-pressed="true"] { color:var(--pi-danger,#c33); background:var(--pi-surface-hover,#ededed); border-radius:50%; }
++    .voice-status { font-size:12px; color:var(--pi-muted,#707070); padding:4px 7px; overflow-wrap:anywhere; }
 +    .send-spinner { width:14px; height:14px; border:2px solid currentColor; border-right-color:transparent; border-radius:50%; animation:send-spin .7s linear infinite; } @keyframes send-spin { to { transform:rotate(360deg); } } @media(prefers-reduced-motion:reduce) { .send-spinner { animation:none; } }
-+    .composer-controls>.policy { max-width:180px; width:auto; min-height:28px; border-color:transparent; font-size:12px; padding:4px 6px; color:var(--pi-muted,#707070); } .primary { display:grid; place-items:center; flex:none; width:28px; height:28px; padding:0; border-radius:50%; background:var(--pi-text,#171717); color:var(--pi-bg,#fff); font-size:18px; line-height:1; } .primary:hover { background:var(--pi-muted,#666); } .stop-icon { width:10px; height:10px; border-radius:2px; background:currentColor; }
++    .permission-picker { position:relative; flex:none; --permission-warning:light-dark(#806400,#e6c800); }
++    .permission-picker>summary { display:flex; align-items:center; gap:6px; width:fit-content; padding:5px 9px; border-radius:20px; list-style:none; background:var(--pi-surface-hover,#ededed); color:var(--pi-muted,#707070); font-size:12px; }
++    .permission-picker>summary::-webkit-details-marker { display:none; } .permission-picker>summary[aria-disabled="true"] { opacity:.45; cursor:default; }
++    .permission-picker svg { display:block; width:20px; height:20px; flex:none; fill:none; stroke:currentColor; stroke-width:1.7; stroke-linecap:round; stroke-linejoin:round; }
++    .permission-menu { position:absolute; z-index:6; bottom:calc(100% + 8px); left:0; width:min(560px,calc(100cqw - 48px)); max-height:min(340px,65cqh); overflow:auto; padding:10px; border:1px solid var(--pi-border,#ddd); border-radius:18px; background:var(--pi-surface,#fff); box-shadow:0 8px 24px var(--pi-shadow,#0002); }
++    .permission-heading { display:flex; align-items:baseline; justify-content:space-between; gap:12px; padding:2px 8px 8px; color:var(--pi-muted,#888); font-size:13px; }
++    .permission-heading a { flex:none; color:inherit; text-decoration:underline; }
++    .permission-option { display:flex; align-items:center; gap:10px; width:100%; padding:8px; text-align:left; border-radius:9px; }
++    .permission-copy { flex:1; min-width:0; } .permission-title { display:block; font-size:14px; } .permission-description { display:block; margin-top:2px; font-size:12px; line-height:1.4; color:var(--pi-muted,#888); }
++    .permission-check { flex:none; width:20px; text-align:center; font-size:20px; }
++    .permission-picker .permission-warning,.permission-warning .permission-description { color:var(--permission-warning); }
++    .primary { display:grid; place-items:center; flex:none; width:28px; height:28px; padding:0; border-radius:50%; background:var(--pi-text,#171717); color:var(--pi-bg,#fff); font-size:18px; line-height:1; } .primary:hover { background:var(--pi-muted,#666); } .stop-icon { width:10px; height:10px; border-radius:2px; background:currentColor; }
 +    .message-actions { height:24px; opacity:0; display:flex; gap:4px; font-size:11px; color:var(--pi-muted,#777); } article:hover .message-actions,article:focus-within .message-actions { opacity:1; } .userMessage { position:relative; margin-bottom:32px; } .userMessage .message-actions { position:absolute; top:100%; right:4px; } .commentary { margin-bottom:12px; }
 +    .transcript .activity-group { border:0; padding:0; margin:12px 0 20px; } .activity-group>summary { display:flex; align-items:center; gap:8px; list-style:none; } .activity-group>summary::before { content:"›"; } .activity-group[open]>summary::before { transform:rotate(90deg); } .activity-group>summary>span:nth-of-type(2) { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .activity-group small { margin-left:auto; }
 +    .activity-items { border-left:1px solid var(--pi-border-muted,#e5e5e5); margin:6px 0 0 12px; padding-left:12px; } .transcript .activity-item { margin:4px 0 8px; } .activity-item>summary { display:flex; align-items:center; gap:8px; list-style:none; } .activity-item>summary::before { content:"›"; } .activity-item[open]>summary::before { transform:rotate(90deg); } .activity-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .activity-status { flex:none; font-size:11px; color:var(--pi-muted,#888); } .failed>summary,.failed .activity-status { color:var(--pi-danger,#c33); }
 +    .command-shell { border:1px solid var(--pi-border-muted,#e5e5e5); border-radius:10px; overflow:hidden; margin:8px 0; background:var(--pi-surface,#f7f7f7); color:var(--pi-text,#171717); } .command-line { display:flex; gap:10px; padding:12px; font:12px/1.6 monospace; } .command-line code { white-space:pre-wrap; overflow-wrap:anywhere; } .command-line>span { color:var(--pi-muted,#888); } .transcript .command-shell pre { padding:0 12px 12px; border-radius:0; max-height:320px; overflow:auto; } .command-footer { border-top:1px solid var(--pi-border-muted,#e5e5e5); padding:7px 12px; font-size:11px; display:flex; gap:12px; } .command-footer>span { margin-left:auto; max-width:60%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 +    .changed-file { margin:8px 0; border:1px solid var(--pi-border-muted,#e5e5e5); border-radius:8px; overflow:hidden; } .file-heading { padding:8px 10px; overflow-wrap:anywhere; font:12px/1.5 monospace; display:flex; gap:8px; } .file-heading small { margin-left:auto; } .transcript .changed-file .diff { padding:0; margin:0; border-radius:0; background:transparent; } .reasoning-body { padding:8px 12px; color:var(--pi-muted,#777); } .tool-output { max-height:320px; overflow:auto; } .tool-actions { display:flex; justify-content:flex-end; font-size:11px; } .worked-divider { display:flex; align-items:center; gap:10px; margin:20px 0; color:var(--pi-muted,#777); } .worked-divider>span { height:1px; flex:1; background:var(--pi-border-muted,#e5e5e5); }
 +    .working { display:flex; align-items:center; gap:8px; margin:16px 0; color:var(--pi-muted,#777); } .activity-dot { display:inline-block; width:7px; height:7px; flex:none; border-radius:50%; background:currentColor; animation:activity-pulse 1.4s ease-in-out infinite; } @keyframes activity-pulse { 50% { opacity:.3; } } @media(prefers-reduced-motion:reduce) { .activity-dot { animation:none; } } @media(hover:none) { .message-actions { opacity:1; } }
-+    .context-picker { position:relative; flex:none; } .context-picker>summary { display:grid; place-items:center; width:28px; height:28px; border:1px solid var(--pi-border-muted,#ddd); border-radius:50%; padding:0; list-style:none; font-size:20px; line-height:1; } .context-picker>summary::-webkit-details-marker { display:none; }
-+    .context-menu { position:absolute; z-index:5; bottom:36px; left:0; width:min(360px,calc(100cqw - 40px)); max-height:min(440px,65cqh); overflow:auto; padding:10px; border:1px solid var(--pi-border,#ddd); border-radius:12px; background:var(--pi-surface,#fff); box-shadow:0 8px 24px var(--pi-shadow,#0002); } .context-heading,.context-navigation,.context-bottom,.context-entry { display:flex; align-items:center; gap:6px; } .context-heading strong,.context-navigation>span,.context-bottom small { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .context-navigation { margin:6px 0; font-size:11px; } .context-filter { width:100%; border-color:var(--pi-border-muted,#ddd); margin-bottom:8px; } .context-entries { max-height:230px; overflow:auto; } .context-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-align:left; } .context-entry>button:last-child { font-size:11px; } .context-menu p { font-size:12px; margin:10px 0; } .context-bottom { margin-top:8px; border-top:1px solid var(--pi-border-muted,#ddd); padding-top:6px; }
++    .context-picker { position:static; flex:none; } .context-picker>summary { display:grid; place-items:center; width:28px; height:28px; border:1px solid var(--pi-border-muted,#ddd); border-radius:50%; padding:0; list-style:none; font-size:20px; line-height:1; } .context-picker>summary::-webkit-details-marker { display:none; }
++    .add-menu { position:absolute; z-index:5; left:0; right:0; bottom:calc(100% + 8px); max-height:min(420px,55dvh); overflow:auto; padding:10px; border:1px solid var(--pi-border,#ddd); border-radius:18px; background:var(--pi-surface,#fff); box-shadow:0 8px 24px var(--pi-shadow,#0002); }
++    .add-heading { padding:3px 8px 8px; color:var(--pi-muted,#888); font-size:13px; }
++    .add-item { display:flex; align-items:center; gap:10px; width:100%; min-height:38px; padding:7px 10px; border-radius:20px; text-align:left; }
++    .add-item svg,.plan-toggle svg { flex:none; width:20px; height:20px; fill:none; stroke:currentColor; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }
++    .add-description { color:var(--pi-muted,#888); } .add-check { margin-left:auto; }
++    .plan-toggle { display:flex; align-items:center; gap:5px; padding:5px 8px; color:var(--pi-muted,#888); white-space:nowrap; }
++    .asking-question { padding:6px 16px; color:var(--pi-muted,#888); }
++    .context-picker>summary[aria-disabled="true"] { opacity:.45; cursor:default; }
++    .context-menu { padding:0; } .context-heading,.context-navigation,.context-bottom,.context-entry { display:flex; align-items:center; gap:6px; } .context-heading strong,.context-navigation>span,.context-bottom small { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .context-navigation { margin:6px 0; font-size:11px; } .context-filter { width:100%; border-color:var(--pi-border-muted,#ddd); margin-bottom:8px; } .context-entries { max-height:230px; overflow:auto; } .context-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-align:left; } .context-entry>button:last-child { font-size:11px; } .context-menu p { font-size:12px; margin:10px 0; } .context-bottom { margin-top:8px; border-top:1px solid var(--pi-border-muted,#ddd); padding-top:6px; }
 +    .context-tray { display:flex; flex-wrap:wrap; gap:6px; padding:0 6px 8px; max-height:100px; overflow:auto; } .context-tray>span { display:flex; align-items:center; gap:4px; border:1px solid var(--pi-border-muted,#ddd); border-radius:8px; padding-left:8px; max-width:100%; overflow-wrap:anywhere; font-size:11px; } .context-tray button { flex:none; }
 +    .model-picker { position:relative; min-width:0; max-width:65%; } .model-picker>summary { font-size:13px; color:var(--pi-muted,#707070); padding:4px 5px; border-radius:7px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; list-style:none; } .model-picker>summary::-webkit-details-marker { display:none; } .model-picker>summary::after { content:"⌄"; margin-left:6px; } .model-picker>summary span { margin-left:5px; }
-+    .model-menu { position:absolute; z-index:4; left:0; bottom:36px; width:224px; max-height:min(320px,50vh); overflow:auto; padding:12px; border:1px solid var(--pi-border,#e4e4e4); border-radius:10px; background:var(--pi-surface,#fff); box-shadow:0 8px 24px var(--pi-shadow,#0002); } .model-menu label { font-size:11px; color:var(--pi-muted,#777); margin-bottom:8px; } .model-menu select { max-width:100%; width:100%; margin-top:4px; color:var(--pi-text,#171717); }
++    .model-menu { position:absolute; z-index:4; right:0; bottom:36px; width:224px; max-height:min(320px,50vh); overflow:auto; padding:12px; border:1px solid var(--pi-border,#e4e4e4); border-radius:10px; background:var(--pi-surface,#fff); box-shadow:0 8px 24px var(--pi-shadow,#0002); } .model-menu label { font-size:11px; color:var(--pi-muted,#777); margin-bottom:8px; } .model-menu select { max-width:100%; width:100%; margin-top:4px; color:var(--pi-text,#171717); }
 +    .connection-status { padding:3px 20px; min-height:22px; font-size:10px; color:var(--pi-muted,#888); }
 +    .latest { align-self:center; font-size:11px; border-color:var(--pi-border-muted,#eee); } section { flex-shrink:0; max-height:35%; overflow:auto; }
 +    .approval { margin:8px 16px; padding:12px; border:1px solid var(--pi-accent,#8ab4ff); border-radius:10px; } .approval strong,small { overflow-wrap:anywhere; } small { display:block; font-size:11px; color:var(--pi-muted,#777); } .approval pre { margin:8px 0; } label { display:block; } label input,label select { display:block; width:100%; border-color:var(--pi-border,#ddd); }
@@ -1251,14 +1601,17 @@ index 00000000..3e253fdd
 +      footer { position:relative; margin:6px 8px 0; padding:10px 8px 4px; border-radius:16px; }
 +      textarea { min-height:56px; max-height:min(120px,24dvh); font-size:16px; resize:none; }
 +      input,select,.composer-controls select { font-size:16px; min-height:44px; }
-+      .composer-controls { display:grid; grid-template-columns:44px minmax(0,1fr) auto; gap:2px; }
-+      .composer-controls>.policy { grid-column:1 / -1; grid-row:2; font-size:11px; padding:2px 4px; }
++      .composer-controls { display:grid; grid-template-columns:44px minmax(0,1fr) 36px 32px; gap:2px; }
++      .composer-controls>.permission-picker { grid-column:1 / span 2; grid-row:2; position:static; width:fit-content; }
++      .composer-controls>.plan-toggle { grid-column:3 / span 2; grid-row:2; min-height:32px; padding:4px 6px; } .add-item { flex-wrap:wrap; } .add-description { font-size:12px; }
++      .permission-menu { left:0; right:0; bottom:calc(100% + 8px); width:auto; max-height:55dvh; } .permission-heading { flex-wrap:wrap; gap:4px 12px; }
 +      .composer-spacer { display:none; }
 +      .context-picker,.model-picker { position:static; max-width:100%; }
 +      .context-picker>summary { width:44px; height:44px; } .composer-controls>.primary { width:32px; height:32px; min-height:32px; align-self:center; }
-+      .model-picker>summary { padding:10px 5px; min-height:44px; font-size:12px; }
++      .voice-input { width:36px; min-height:44px; }
++      .model-picker>summary { text-align:right; padding:10px 5px; min-height:44px; font-size:12px; }
 +      .composer-controls>button { min-height:44px; }
-+      .model-menu,.context-menu { left:0; right:0; bottom:calc(100% + 8px); width:auto; max-height:min(360px,50dvh); overscroll-behavior:contain; }
++      .model-menu { left:0; right:0; bottom:calc(100% + 8px); width:auto; max-height:min(360px,50dvh); overscroll-behavior:contain; }
 +      .model-menu select { max-width:100%; }
 +      .context-menu button { min-height:44px; }
 +      .context-entries { max-height:25dvh; }
@@ -1508,10 +1861,10 @@ index 00000000..d3d0bcbd
 +export const createCodexConnection: ConnectionFactory = (cwd, event, exited) => new CodexProcess(cwd, event, exited);
 diff --git a/pi-web-plugins/codex/server/codexService.test.ts b/pi-web-plugins/codex/server/codexService.test.ts
 new file mode 100644
-index 00000000..10bbe2e2
+index 00000000..db5382b2
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/codexService.test.ts
-@@ -0,0 +1,268 @@
+@@ -0,0 +1,294 @@
 +import { mkdtemp, mkdir, writeFile, symlink, rm } from "node:fs/promises";
 +import { join } from "node:path";
 +import { tmpdir } from "node:os";
@@ -1552,6 +1905,32 @@ index 00000000..10bbe2e2
 +}
 +
 +describe("Codex workspace service", () => {
++  it("applies native Plan and exits to default while retaining model, effort and permissions", async () => {
++    const f = fixture(); const original = f.request.getMockImplementation();
++    if (!original) throw new Error("Expected request fixture");
++    f.request.mockImplementation(async (method, params) => {
++      const result = await original(method, params);
++      return method === "thread/start" ? { ...result, model: "actual-model", reasoningEffort: "high" } : result;
++    });
++    await f.call("create");
++    expect(await f.call("send", { threadId: "new", text: "plan it", mode: "plan", permissionMode: "approve-for-me" })).toMatchObject({ accepted: true, mode: "plan" });
++    expect(f.request).toHaveBeenCalledWith("turn/start", expect.objectContaining({ approvalsReviewer: "auto_review", collaborationMode: { mode: "plan", settings: { model: "actual-model", reasoning_effort: "high", developer_instructions: null } } }));
++    expect(await f.call("snapshot", { threadId: "new" })).toMatchObject({ mode: "plan" });
++    f.emit({ method: "turn/completed", params: { threadId: "new", turn: { id: "turn", status: "completed" } } });
++    await f.call("send", { threadId: "new", text: "implement", mode: "default", model: "chosen", effort: "low" });
++    const starts = f.request.mock.calls.filter(([method]) => method === "turn/start");
++    expect(starts.at(-1)?.[1]).toMatchObject({ collaborationMode: { mode: "default", settings: { model: "chosen", reasoning_effort: "low", developer_instructions: null } } });
++    f.emit({ method: "thread/settings/updated", params: { threadId: "new", threadSettings: { model: "actual-model", effort: "high", collaborationMode: { mode: "plan" } } } });
++    expect(await f.call("snapshot", { threadId: "new" })).toMatchObject({ mode: "plan" });
++  });
++  it("rejects unsupported modes and fails clearly when Codex has not returned a model", async () => {
++    const f = fixture();
++    await expect(f.call("send", { threadId: "new", text: "hi", mode: "invalid" })).rejects.toThrow("Invalid collaboration mode");
++    expect(f.request).not.toHaveBeenCalled();
++    await f.call("create");
++    await expect(f.call("send", { threadId: "new", text: "plan", mode: "plan" })).rejects.toThrow("Codex model is unavailable");
++    expect(f.request).not.toHaveBeenCalledWith("turn/start", expect.anything());
++  });
 +  it.each([
 +    ["full-access", "never", "danger-full-access", "user", "dangerFullAccess"],
 +    ["ask-for-approval", "on-request", "workspace-write", "user", "workspaceWrite"],
@@ -1782,15 +2161,15 @@ index 00000000..10bbe2e2
 +});
 diff --git a/pi-web-plugins/codex/server/codexService.ts b/pi-web-plugins/codex/server/codexService.ts
 new file mode 100644
-index 00000000..ee35ec6e
+index 00000000..383f1448
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/codexService.ts
-@@ -0,0 +1,467 @@
+@@ -0,0 +1,481 @@
 +import { isAbsolute, relative, resolve, sep } from "node:path";
 +import { realpath, stat } from "node:fs/promises";
 +import type { JsonValue, ServerPluginPeerRequestContext, ServerPluginPeerChannelOpenContext, ServerPluginPeerChannel } from "@jmfederico/pi-web/server-plugin-api";
 +import { createCodexConnection, type CodexConnection, type ConnectionFactory } from "./codexProtocol.js";
-+import { array, bounded, errorText, object, string, text, permissionMode, type PermissionMode, type RecordValue } from "./protocol.js";
++import { array, bounded, errorText, object, string, text, permissionMode, type PermissionMode, chatMode, type ChatMode, type RecordValue } from "./protocol.js";
 +
 +interface ThreadState {
 +  id: string;
@@ -1805,6 +2184,7 @@ index 00000000..ee35ec6e
 +  inputHistory: Map<string, string>;
 +  approvals: Map<string, RecordValue>;
 +  policy: RecordValue | null;
++  mode: ChatMode | null;
 +}
 +interface WorkspaceState {
 +  cwd: string;
@@ -1901,6 +2281,7 @@ index 00000000..ee35ec6e
 +    if (!supported.has(context.operation)) throw new Error("Unsupported Codex operation");
 +    const input = object(context.input);
 +    const selectedPolicy = policies[permissionMode(input["permissionMode"])];
++    const mode = input["mode"] === undefined ? undefined : chatMode(input["mode"]);
 +    const state = this.workspace(context);
 +    const rpc = (method: string, params: RecordValue) => state.connection.request(method, params);
 +    switch (context.operation) {
@@ -1946,7 +2327,7 @@ index 00000000..ee35ec6e
 +      if (input["version"] === thread.version) return { changed: false };
 +      const offset = typeof input["offset"] === "number" ? Math.max(0, Math.min(512, Math.floor(input["offset"]))) : 0;
 +      const end = Math.max(0, thread.items.size - offset);
-+      return { changed: true, id, model: thread.model, effort: thread.effort, version: thread.version, status: thread.status, busy: thread.busy, error: thread.error,
++      return { changed: true, id, mode: thread.mode, model: thread.model, effort: thread.effort, version: thread.version, status: thread.status, busy: thread.busy, error: thread.error,
 +        inputHistory: [...thread.inputHistory.values()], items: [...thread.items.values()].slice(Math.max(0, end - 40), end), offset, total: thread.items.size, approvals: [...thread.approvals.values()], policy: thread.policy };
 +    }
 +    if (context.operation === "send") {
@@ -1980,6 +2361,15 @@ index 00000000..ee35ec6e
 +      };
 +      if (input["model"] !== undefined) options["model"] = string(input["model"], "model");
 +      if (input["effort"] !== undefined) options["effort"] = string(input["effort"], "reasoning effort", 32);
++      if (mode !== undefined) {
++        const model = text(options["model"]) || thread.model;
++        if (model === "") throw new Error("Codex model is unavailable. Reconnect before changing collaboration mode.");
++        options["collaborationMode"] = { mode, settings: {
++          model,
++          reasoning_effort: input["effort"] !== undefined ? text(options["effort"]) : input["model"] !== undefined ? null : thread.effort || null,
++          developer_instructions: null,
++        } };
++      }
 +      thread.busy = true;
 +      thread.status = "starting";
 +      thread.error = "";
@@ -1987,6 +2377,7 @@ index 00000000..ee35ec6e
 +      try {
 +        const result = await rpc("turn/start", { threadId: id, input: [{ type: "text", text: prompt, text_elements: [] }], ...options });
 +        thread.policy = selectedPolicy;
++        if (mode !== undefined) thread.mode = mode;
 +        // Settings come from Codex, not from the requested override (which may be normalized).
 +        try {
 +          const current = object((await rpc("thread/read", { threadId: id, includeTurns: false }))["thread"]);
@@ -1996,7 +2387,7 @@ index 00000000..ee35ec6e
 +        thread.turnId = string(turn["id"]);
 +        // A fast turn may have completed before the response arrives.
 +        this.started(thread);
-+        return { accepted: true };
++        return { accepted: true, ...(thread.mode === null ? {} : { mode: thread.mode }) };
 +      } catch (error) {
 +        thread.busy = false;
 +        thread.status = "failed";
@@ -2049,6 +2440,8 @@ index 00000000..ee35ec6e
 +  private settings(thread: ThreadState, result: RecordValue): void {
 +    thread.model = text(result["model"]);
 +    thread.effort = text(result["reasoningEffort"]);
++    const mode = object(result["collaborationMode"] ?? {})["mode"];
++    if (mode === "plan" || mode === "default") thread.mode = mode;
 +  }
 +  private started(thread: ThreadState): void { if (thread.status === "starting") thread.status = "inProgress"; }
 +  private active(state: WorkspaceState): boolean {
@@ -2085,7 +2478,7 @@ index 00000000..ee35ec6e
 +      if (idle === undefined) throw new Error("Too many active Codex conversations");
 +      state.threads.delete(idle.id);
 +    }
-+    const thread: ThreadState = { id, model: "", effort: "", version: 0, turnId: "", status: "idle", error: "", busy: false, items: new Map(), inputHistory: new Map(), approvals: new Map(), policy: null };
++    const thread: ThreadState = { id, model: "", effort: "", version: 0, turnId: "", status: "idle", error: "", busy: false, items: new Map(), inputHistory: new Map(), approvals: new Map(), policy: null, mode: null };
 +    state.threads.set(id, thread);
 +    return thread;
 +  }
@@ -2098,7 +2491,7 @@ index 00000000..ee35ec6e
 +    const read = await state.connection.request("thread/read", { threadId: id, includeTurns: true });
 +    const saved = object(read["thread"]);
 +    if (resolve(string(saved["cwd"], "thread cwd", 4096)) !== state.cwd) throw new Error("Conversation belongs to another workspace");
-+    const thread: ThreadState = { id, model: text(saved["model"]), effort: text(saved["reasoningEffort"]), version: --this.historyVersion, turnId: "", status: "Stored history", error: "", busy: false, items: new Map(), inputHistory: new Map(), approvals: new Map(), policy: null };
++    const thread: ThreadState = { id, model: text(saved["model"]), effort: text(saved["reasoningEffort"]), version: --this.historyVersion, turnId: "", status: "Stored history", error: "", busy: false, items: new Map(), inputHistory: new Map(), approvals: new Map(), policy: null, mode: null };
 +    for (const entry of array(saved["turns"])) {
 +      const turn = object(entry);
 +      for (const item of array(turn["items"])) this.item(thread, { ...object(item), turnId: turn["id"] ?? "", turnStatus: turn["status"] ?? "", turnDurationMs: turn["durationMs"] ?? null });
@@ -2208,7 +2601,7 @@ index 00000000..ee35ec6e
 +    if (thread === undefined) return;
 +    if (method === "thread/settings/updated") {
 +      const settings = object(params["threadSettings"]);
-+      this.settings(thread, { model: settings["model"] ?? null, reasoningEffort: settings["effort"] ?? null });
++      this.settings(thread, { model: settings["model"] ?? null, reasoningEffort: settings["effort"] ?? null, collaborationMode: settings["collaborationMode"] ?? null });
 +    } else if (method === "turn/started" || method === "turn/completed") {
 +      const turn = object(params["turn"]);
 +      thread.turnId = text(turn["id"]);
@@ -2255,10 +2648,10 @@ index 00000000..ee35ec6e
 +}
 diff --git a/pi-web-plugins/codex/server/protocol.ts b/pi-web-plugins/codex/server/protocol.ts
 new file mode 100644
-index 00000000..7a903f08
+index 00000000..d4ea9ed4
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/protocol.ts
-@@ -0,0 +1,27 @@
+@@ -0,0 +1,34 @@
 +import type { JsonValue } from "@jmfederico/pi-web/server-plugin-api";
 +
 +export type RecordValue = Record<string, JsonValue>;
@@ -2285,6 +2678,13 @@ index 00000000..7a903f08
 +  if (value === undefined) return "full-access";
 +  if (value === "full-access" || value === "ask-for-approval" || value === "approve-for-me") return value;
 +  throw new Error("Invalid permission mode");
++}
++
++export type ChatMode = "default" | "plan";
++export function chatMode(value: unknown): ChatMode {
++  if (value === undefined || value === "default") return "default";
++  if (value === "plan") return "plan";
++  throw new Error("Invalid collaboration mode");
 +}
 diff --git a/pi-web-plugins/codex/server/server-plugin.ts b/pi-web-plugins/codex/server/server-plugin.ts
 new file mode 100644
