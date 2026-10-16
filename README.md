@@ -35,7 +35,7 @@ bash scripts/pi-web-run-jmfederico.sh start               # 启动，默认端�
 bash scripts/pi-web-run-jmfederico.sh status              # 查看进程和 HTTP 状态
 bash scripts/pi-web-run-jmfederico.sh logs                # 跟随日志，Ctrl+C 退出查看
 bash scripts/pi-web-run-jmfederico.sh stop                # 停止两个服务
-bash scripts/pi-web-run-jmfederico.sh restart --port 8080 # 重启并使用指定端口
+bash scripts/pi-web-run-jmfederico.sh restart --port 8080 # 重启 8080 实例
 bash scripts/pi-web-run-jmfederico.sh status --port 8080  # 探测指定端口
 bash scripts/pi-web-run-jmfederico.sh --help              # 查看完整帮助
 ```
@@ -46,6 +46,9 @@ bash scripts/pi-web-run-jmfederico.sh --help              # 查看完整帮助
 | --- | --- |
 | `PI_WEB_HOST` | 绑定地址，默认 `0.0.0.0`；仅供本机访问可设为 `127.0.0.1` |
 | `PI_WEB_PORT` | 监听端口，默认 `8024`；命令行 `--port` 优先 |
+| `PI_WEB_DATA_DIR` | 状态目录，默认仓库 `data/pi-web/<port>/state` |
+| `PI_WEB_RUN_DIR` | 日志和 PID 目录，默认仓库 `data/pi-web/<port>` |
+| `PI_WEB_SESSIOND_SOCKET` | 默认 `<状态目录>/sessiond.sock` |
 | `PI_WEB_PASSWORD` | 传给服务的访问密码，是否生效取决于所安装版本的支持情况 |
 
 ```bash
@@ -54,7 +57,17 @@ PI_WEB_HOST=127.0.0.1 PI_WEB_PORT=8080 bash scripts/pi-web-run-jmfederico.sh sta
 
 配置不会自动保存；后续 `restart`、`status` 和涉及重启的 `update` 命令应传入相同配置，或提前 `export` 环境变量。服务运行时修改配置需要执行 `restart`。
 
-日志和 PID 文件保存在仓库的 `data/pi-web/` 目录。`logs` 默认跟随 `server.log`，不存在时跟随 `sessiond.log`；排查会话守护进程可直接查看 `data/pi-web/sessiond.log`。每次启动对应进程时会覆盖其日志。
+默认按端口隔离实例，状态、socket、日志和 PID 文件全部保存在仓库 `data/pi-web/<port>/` 下，不再使用 `~/.pi-web/`。例如可以同时运行：
+
+```bash
+bash scripts/pi-web-run-jmfederico.sh start --port 8424
+bash scripts/pi-web-run-jmfederico.sh start --port 8425
+bash scripts/pi-web-run-jmfederico.sh stop --port 8424  # 只停止 8424
+```
+
+`start`、`stop`、`restart`、`status`、`logs` 和 `update` 都按端口选择实例；不传端口时选择 `PI_WEB_PORT` 或默认的 8024。`restart --port 8425` 重启的是 8425 实例，不会将 8424 迁移到新端口。显式设置状态或端点环境变量会覆盖隔离默认值，因此多实例时不要让这些变量指向同一目录或端点（包括 `PI_WEB_SESSIOND_PORT` 和 `PI_WEB_SESSIOND_URL`）。
+
+`logs` 默认跟随实例目录中的 `server.log`，不存在时跟随 `sessiond.log`；每次启动对应进程时会覆盖其日志。原先的 `~/.pi-web/` 状态和 `data/pi-web/*.pid` 不会自动迁移或接管，旧实例需通过原管理方式停止。更新会替换全局程序版本，但只管理所选端口实例的重启。
 
 该脚本也可调用统一更新入口：
 

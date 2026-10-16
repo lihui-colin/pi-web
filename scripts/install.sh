@@ -104,7 +104,13 @@ esac
 script_file="$(readlink -f "${BASH_SOURCE[0]}")"
 project_root="$(cd "$(dirname "$script_file")/.." && pwd)"
 run_script="$project_root/scripts/pi-web-run-jmfederico.sh"
-pid_dir="$project_root/data/pi-web"
+service_port="${PI_WEB_PORT:-8024}"
+if [[ ! "$service_port" =~ ^[0-9]{1,5}$ ]] || (( 10#$service_port < 1 || 10#$service_port > 65535 )); then
+    err "PI_WEB_PORT 必须是 1–65535 的整数"
+    exit 2
+fi
+export PI_WEB_PORT="$((10#$service_port))"
+pid_dir="${PI_WEB_RUN_DIR:-$project_root/data/pi-web/$PI_WEB_PORT}"
 
 PI_PKG="@earendil-works/pi-coding-agent"
 PI_VERSION="${PI_VERSION:-latest}"

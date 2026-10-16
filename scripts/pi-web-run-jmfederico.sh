@@ -58,6 +58,9 @@ PI WEB (jmfederico) 手动运行管理脚本
   PI_WEB_HOST      绑定地址，默认 0.0.0.0
   PI_WEB_PORT      监听端口，默认 8024
   PI_WEB_PASSWORD  设置后（若支持）开启访问保护
+  PI_WEB_DATA_DIR  状态目录，默认 data/pi-web/<port>/state
+  PI_WEB_RUN_DIR   日志和 PID 目录，默认 data/pi-web/<port>
+  PI_WEB_SESSIOND_SOCKET  默认 <状态目录>/sessiond.sock
   PI_VERSION       update 使用的 pi 目标版本，默认 latest
   PI_WEB_VERSION   update 使用的 pi-web 目标版本，默认 latest
 EOF
@@ -95,7 +98,17 @@ done
 
 script_file="$(readlink -f "${BASH_SOURCE[0]}")"
 project_root="$(cd "$(dirname "$script_file")/.." && pwd)"
-log_dir="$project_root/data/pi-web"
+# 端口同时作为实例标识，避免不同 Web 服务共享 daemon 状态和 PID。
+if [[ ! "$PI_WEB_PORT" =~ ^[0-9]{1,5}$ ]] || (( 10#$PI_WEB_PORT < 1 || 10#$PI_WEB_PORT > 65535 )); then
+    echo "错误：--port 必须是 1–65535 的整数" >&2
+    exit 2
+fi
+PI_WEB_PORT="$((10#$PI_WEB_PORT))"
+instance_dir="$project_root/data/pi-web/$PI_WEB_PORT"
+export PI_WEB_DATA_DIR="${PI_WEB_DATA_DIR:-$instance_dir/state}"
+export PI_WEB_SESSIOND_SOCKET="${PI_WEB_SESSIOND_SOCKET:-$PI_WEB_DATA_DIR/sessiond.sock}"
+export PI_WEB_RUN_DIR="${PI_WEB_RUN_DIR:-$instance_dir}"
+log_dir="$PI_WEB_RUN_DIR"
 server_log="$log_dir/server.log"
 sessiond_log="$log_dir/sessiond.log"
 server_pid="$log_dir/server.pid"
