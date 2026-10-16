@@ -11,12 +11,12 @@ index 00000000..b864cc1c
 +Add an optional Codex workspace plugin with persistent conversations, streamed responses, tool output, approvals, and model selection using the workspace machine's Codex CLI. Restart sessiond after installing the plugin.
 diff --git a/pi-web-plugins/codex/CodexBrowserRuntime.ts b/pi-web-plugins/codex/CodexBrowserRuntime.ts
 new file mode 100644
-index 00000000..15f4419a
+index 00000000..d681d310
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexBrowserRuntime.ts
-@@ -0,0 +1,273 @@
+@@ -0,0 +1,286 @@
 +import type { PluginPeerChannel, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
-+import { array, errorText, object, text, type RecordValue } from "./server/protocol.js";
++import { array, errorText, object, text, permissionMode, type PermissionMode, type RecordValue } from "./server/protocol.js";
 +
 +export interface CodexView {
 +  context: WorkspacePanelContext;
@@ -36,6 +36,7 @@ index 00000000..15f4419a
 +  notice: string;
 +  connected: boolean;
 +  pending: boolean;
++  permissionMode: PermissionMode;
 +  sending: boolean;
 +  offset: number;
 +  listeners: Set<() => void>;
@@ -57,7 +58,7 @@ index 00000000..15f4419a
 +    let view = this.views.get(key);
 +    if (view === undefined) {
 +      const threadId = "";
-+      view = { context, key, threadId, draft: this.read(`${key}:${threadId}:draft`), references: this.readReferences(key, threadId), model: "", effort: "", models: [], defaultModel: "", defaultEffort: "", threads: [], cursor: "", snapshot: {}, error: "", notice: "", connected: false, pending: false, sending: false, offset: 0, listeners: new Set(), timer: undefined, polling: false, generation: 0 };
++      view = { context, key, threadId, draft: this.read(`${key}:${threadId}:draft`), references: this.readReferences(key, threadId), model: "", effort: "", models: [], defaultModel: "", defaultEffort: "", threads: [], cursor: "", snapshot: {}, error: "", notice: "", connected: false, pending: false, permissionMode: this.readPermissionMode(key), sending: false, offset: 0, listeners: new Set(), timer: undefined, polling: false, generation: 0 };
 +      this.views.set(key, view);
 +    }
 +    view.context = context;
@@ -118,6 +119,18 @@ index 00000000..15f4419a
 +    this.schedule(view, 0);
 +    this.connect(view);
 +  }
++  private readPermissionMode(key: string): PermissionMode {
++    try { return permissionMode(this.read(`${key}:permission-mode`) || undefined); } catch { return "full-access"; }
++  }
++  setPermissionMode(view: CodexView, value: string): void {
++    if (view.pending || view.sending || view.snapshot["busy"] === true) return;
++    view.permissionMode = permissionMode(value);
++    this.write(`${view.key}:permission-mode`, view.permissionMode);
++    this.changed(view);
++  }
++  private permissionInput(view: CodexView): RecordValue {
++    return view.permissionMode === "full-access" ? {} : { permissionMode: view.permissionMode };
++  }
 +  saveDraft(view: CodexView, draft: string): void {
 +    view.draft = draft;
 +    this.write(`${view.key}:${view.threadId}:draft`, draft);
@@ -141,7 +154,7 @@ index 00000000..15f4419a
 +    } catch { return []; }
 +  }
 +  async create(view: CodexView): Promise<void> {
-+    const result = await this.request(view, "create");
++    const result = await this.request(view, "create", this.permissionInput(view));
 +    this.select(view, text(result["id"]));
 +    view.snapshot = { model: text(result["model"]), effort: text(result["effort"]) };
 +    await this.list(view);
@@ -155,7 +168,7 @@ index 00000000..15f4419a
 +    view.sending = true; this.changed(view);
 +    try {
 +      if (threadId === "") {
-+        const result = await this.request(view, "create");
++        const result = await this.request(view, "create", this.permissionInput(view));
 +        threadId = text(result["id"]);
 +        if (threadId === "") throw new Error("Codex did not return a conversation ID");
 +        this.select(view, threadId);
@@ -166,7 +179,7 @@ index 00000000..15f4419a
 +        this.write(`${view.key}::draft`, "");
 +        this.write(`${view.key}::references`, "[]");
 +      }
-+      await this.request(view, "send", { threadId, text: draft, ...(references.length > 0 ? { references } : {}), ...(view.model === "" ? {} : { model: view.model }), ...(view.effort === "" ? {} : { effort: view.effort }) });
++      await this.request(view, "send", { threadId, text: draft, ...this.permissionInput(view), ...(references.length > 0 ? { references } : {}), ...(view.model === "" ? {} : { model: view.model }), ...(view.effort === "" ? {} : { effort: view.effort }) });
 +      if (draft.trim() !== "") {
 +        const history = this.inputHistory(view, threadId);
 +        if (history.at(-1) !== draft) history.push(draft);
@@ -290,10 +303,10 @@ index 00000000..15f4419a
 +}
 diff --git a/pi-web-plugins/codex/CodexPanel.test.ts b/pi-web-plugins/codex/CodexPanel.test.ts
 new file mode 100644
-index 00000000..3f244ad9
+index 00000000..500aecea
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.test.ts
-@@ -0,0 +1,475 @@
+@@ -0,0 +1,505 @@
 +// @vitest-environment happy-dom
 +import { afterEach, describe, expect, it, vi } from "vitest";
 +import type { PluginPeerChannelOptions, FileTreeResponse, JsonValue, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
@@ -327,6 +340,36 @@ index 00000000..3f244ad9
 +}
 +
 +describe("Codex panel", () => {
++  it("selects and persists permission mode per workspace and locks it while busy", async () => {
++    const { panel, view, runtime, request, scope } = await fixture();
++    const select = panel.shadowRoot?.querySelector<HTMLSelectElement>('select[aria-label="Permission mode"]');
++    if (!select) throw new Error("Expected permission selector");
++    expect(select.value).toBe("full-access");
++    expect([...select.options].map((option) => option.textContent)).toEqual(["Full access", "Ask for approval", "Approve for me"]);
++    select.value = "approve-for-me"; select.dispatchEvent(new Event("change")); await panel.updateComplete;
++    expect(view.permissionMode).toBe("approve-for-me");
++    const recovered = new CodexBrowserRuntime(); runtimes.push(recovered);
++    expect(recovered.view(scope).permissionMode).toBe("approve-for-me");
++    expect(runtime.view(context(request, "remote")).permissionMode).toBe("full-access");
++    runtime.select(view, "other"); expect(view.permissionMode).toBe("approve-for-me");
++    view.snapshot = { busy: true }; panel.requestUpdate(); await panel.updateComplete;
++    expect(select.disabled).toBe(true); runtime.setPermissionMode(view, "full-access"); expect(view.permissionMode).toBe("approve-for-me");
++    view.snapshot = {}; view.pending = true; panel.requestUpdate(); await panel.updateComplete;
++    expect(select.disabled).toBe(true); runtime.setPermissionMode(view, "full-access"); expect(view.permissionMode).toBe("approve-for-me");
++    view.pending = false; panel.requestUpdate(); await panel.updateComplete;
++    expect(select.disabled).toBe(false);
++  });
++  it("sends the selected permission mode on home creation and subsequent messages", async () => {
++    const { view, runtime, request } = await fixture();
++    runtime.select(view, ""); runtime.setPermissionMode(view, "ask-for-approval"); runtime.saveDraft(view, "hello");
++    request.mockImplementation(async (operation) => operation === "create" ? { id: "new" } : { changed: false });
++    await runtime.send(view);
++    expect(request).toHaveBeenCalledWith("create", { permissionMode: "ask-for-approval" });
++    expect(request).toHaveBeenCalledWith("send", { threadId: "new", text: "hello", permissionMode: "ask-for-approval" });
++    view.snapshot = {}; runtime.setPermissionMode(view, "approve-for-me"); runtime.saveDraft(view, "again");
++    await runtime.send(view);
++    expect(request).toHaveBeenCalledWith("send", { threadId: "new", text: "again", permissionMode: "approve-for-me" });
++  });
 +  it("shows backend defaults on home and keeps them separate from thread settings and overrides", async () => {
 +    const { view, runtime, request, panel } = await fixture();
 +    runtime.select(view, "");
@@ -771,7 +814,7 @@ index 00000000..3f244ad9
 +});
 diff --git a/pi-web-plugins/codex/CodexPanel.ts b/pi-web-plugins/codex/CodexPanel.ts
 new file mode 100644
-index 00000000..da029f44
+index 00000000..3e253fdd
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.ts
 @@ -0,0 +1,452 @@
@@ -1021,7 +1064,7 @@ index 00000000..da029f44
 +          @input=${(event: Event) => { if (event.target instanceof HTMLTextAreaElement) { this.historyNavigation = undefined; this.runtime?.saveDraft(view, event.target.value); this.requestUpdate(); } }}
 +          @compositionstart=${() => { this.composing = true; }} @compositionend=${() => { this.composing = false; }}
 +          @keydown=${(event: KeyboardEvent) => { this.navigateInputHistory(event, view); if (event.key === "Enter" && !event.shiftKey && !event.isComposing && !this.composing) { event.preventDefault(); if (!view.pending && !busy && view.connected && (view.draft.trim() !== "" || view.references.length > 0)) this.action((runtime, state) => runtime.send(state)); } }}></textarea>
-+        <div class="composer-controls">${this.renderContextPicker(view)}<span class="policy" title="Full access · no approval prompts">YOLO</span><details class="model-picker">
++        <div class="composer-controls">${this.renderContextPicker(view)}<select class="policy" aria-label="Permission mode" title="Permission mode for the next message" .value=${view.permissionMode} ?disabled=${view.pending || view.sending || busy} @change=${(event: Event) => { if (event.target instanceof HTMLSelectElement) this.runtime?.setPermissionMode(view, event.target.value); }}><option value="full-access">Full access</option><option value="ask-for-approval">Ask for approval</option><option value="approve-for-me">Approve for me</option></select><details class="model-picker">
 +          <summary aria-label="Model and reasoning settings">${text(selectedModel?.["displayName"]) || modelName || "Model unavailable"} <span>${view.effort || effectiveEffort || "Effort unspecified"}</span></summary>
 +          <div class="model-menu"><label>Model<select aria-label="Model" ?disabled=${view.pending || busy} .value=${view.model} @change=${(event: Event) => { if (event.target instanceof HTMLSelectElement) { view.model = event.target.value; view.effort = ""; this.requestUpdate(); } }}>
 +          <option value="">${currentModel || "Model unavailable"} (current)</option>${models.map((model) => html`<option value=${text(model["model"])}>${text(model["displayName"]) || text(model["model"])}</option>`)}
@@ -1173,7 +1216,7 @@ index 00000000..da029f44
 +    textarea { display:block; width:100%; resize:vertical; min-height:70px; max-height:180px; padding:3px 7px 12px; border:0; background:transparent; }
 +    textarea::placeholder { color:var(--pi-muted,#858585); } .composer-controls { display:flex; align-items:center; gap:2px; flex-wrap:wrap; } .composer-controls select { font-size:12px; max-width:180px; min-width:0; padding:4px; color:var(--pi-muted,#707070); } .composer-spacer { flex:1; }
 +    .send-spinner { width:14px; height:14px; border:2px solid currentColor; border-right-color:transparent; border-radius:50%; animation:send-spin .7s linear infinite; } @keyframes send-spin { to { transform:rotate(360deg); } } @media(prefers-reduced-motion:reduce) { .send-spinner { animation:none; } }
-+    .policy { font-size:12px; padding:4px 6px; color:var(--pi-muted,#707070); } .primary { display:grid; place-items:center; flex:none; width:28px; height:28px; padding:0; border-radius:50%; background:var(--pi-text,#171717); color:var(--pi-bg,#fff); font-size:18px; line-height:1; } .primary:hover { background:var(--pi-muted,#666); } .stop-icon { width:10px; height:10px; border-radius:2px; background:currentColor; }
++    .composer-controls>.policy { max-width:180px; width:auto; min-height:28px; border-color:transparent; font-size:12px; padding:4px 6px; color:var(--pi-muted,#707070); } .primary { display:grid; place-items:center; flex:none; width:28px; height:28px; padding:0; border-radius:50%; background:var(--pi-text,#171717); color:var(--pi-bg,#fff); font-size:18px; line-height:1; } .primary:hover { background:var(--pi-muted,#666); } .stop-icon { width:10px; height:10px; border-radius:2px; background:currentColor; }
 +    .message-actions { height:24px; opacity:0; display:flex; gap:4px; font-size:11px; color:var(--pi-muted,#777); } article:hover .message-actions,article:focus-within .message-actions { opacity:1; } .userMessage { position:relative; margin-bottom:32px; } .userMessage .message-actions { position:absolute; top:100%; right:4px; } .commentary { margin-bottom:12px; }
 +    .transcript .activity-group { border:0; padding:0; margin:12px 0 20px; } .activity-group>summary { display:flex; align-items:center; gap:8px; list-style:none; } .activity-group>summary::before { content:"›"; } .activity-group[open]>summary::before { transform:rotate(90deg); } .activity-group>summary>span:nth-of-type(2) { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .activity-group small { margin-left:auto; }
 +    .activity-items { border-left:1px solid var(--pi-border-muted,#e5e5e5); margin:6px 0 0 12px; padding-left:12px; } .transcript .activity-item { margin:4px 0 8px; } .activity-item>summary { display:flex; align-items:center; gap:8px; list-style:none; } .activity-item>summary::before { content:"›"; } .activity-item[open]>summary::before { transform:rotate(90deg); } .activity-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .activity-status { flex:none; font-size:11px; color:var(--pi-muted,#888); } .failed>summary,.failed .activity-status { color:var(--pi-danger,#c33); }
@@ -1465,10 +1508,10 @@ index 00000000..d3d0bcbd
 +export const createCodexConnection: ConnectionFactory = (cwd, event, exited) => new CodexProcess(cwd, event, exited);
 diff --git a/pi-web-plugins/codex/server/codexService.test.ts b/pi-web-plugins/codex/server/codexService.test.ts
 new file mode 100644
-index 00000000..de2a0f49
+index 00000000..10bbe2e2
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/codexService.test.ts
-@@ -0,0 +1,243 @@
+@@ -0,0 +1,268 @@
 +import { mkdtemp, mkdir, writeFile, symlink, rm } from "node:fs/promises";
 +import { join } from "node:path";
 +import { tmpdir } from "node:os";
@@ -1509,6 +1552,31 @@ index 00000000..de2a0f49
 +}
 +
 +describe("Codex workspace service", () => {
++  it.each([
++    ["full-access", "never", "danger-full-access", "user", "dangerFullAccess"],
++    ["ask-for-approval", "on-request", "workspace-write", "user", "workspaceWrite"],
++    ["approve-for-me", "on-request", "workspace-write", "auto_review", "workspaceWrite"],
++  ])("applies %s when creating, resuming and sending", async (mode, approvalPolicy, sandbox, approvalsReviewer, sandboxType) => {
++    const f = fixture();
++    await f.call("create", { permissionMode: mode });
++    expect(f.request).toHaveBeenCalledWith("thread/start", { cwd: "/work/one", approvalPolicy, sandbox, approvalsReviewer });
++    await f.call("send", { threadId: "saved", text: "hello", permissionMode: mode });
++    expect(f.request).toHaveBeenCalledWith("thread/resume", { threadId: "saved", cwd: "/work/one", approvalPolicy, sandbox, approvalsReviewer });
++    expect(f.request).toHaveBeenCalledWith("turn/start", expect.objectContaining({ approvalPolicy, approvalsReviewer, sandboxPolicy: expect.objectContaining({ type: sandboxType }) }));
++    expect(await f.call("snapshot", { threadId: "saved" })).toMatchObject({ policy: { approvalPolicy, sandbox, approvalsReviewer } });
++    f.emit({ method: "turn/completed", params: { threadId: "saved", turn: { id: "turn", status: "completed" } } });
++    await f.call("send", { threadId: "saved", text: "switch mode", permissionMode: "ask-for-approval" });
++    expect(f.request).toHaveBeenLastCalledWith("thread/read", { threadId: "saved", includeTurns: false });
++    const starts = f.request.mock.calls.filter(([method]) => method === "turn/start");
++    expect(starts.at(-1)?.[1]).toMatchObject({ approvalPolicy: "on-request", approvalsReviewer: "user", sandboxPolicy: { type: "workspaceWrite", writableRoots: ["/work/one"], networkAccess: false } });
++    expect(f.request.mock.calls.filter(([method]) => method === "thread/resume")).toHaveLength(1);
++  });
++  it("rejects unknown permission modes before creating or resuming a thread", async () => {
++    const f = fixture();
++    await expect(f.call("create", { permissionMode: "unexpected" })).rejects.toThrow("Invalid permission mode");
++    await expect(f.call("send", { threadId: "saved", text: "hello", permissionMode: "unexpected" })).rejects.toThrow("Invalid permission mode");
++    expect(f.request).not.toHaveBeenCalled();
++  });
 +  it("returns workspace configured defaults instead of the catalog default", async () => {
 +    const f = fixture();
 +    f.request.mockImplementation(async (method) => {
@@ -1714,15 +1782,15 @@ index 00000000..de2a0f49
 +});
 diff --git a/pi-web-plugins/codex/server/codexService.ts b/pi-web-plugins/codex/server/codexService.ts
 new file mode 100644
-index 00000000..88fe3191
+index 00000000..ee35ec6e
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/codexService.ts
-@@ -0,0 +1,450 @@
+@@ -0,0 +1,467 @@
 +import { isAbsolute, relative, resolve, sep } from "node:path";
 +import { realpath, stat } from "node:fs/promises";
 +import type { JsonValue, ServerPluginPeerRequestContext, ServerPluginPeerChannelOpenContext, ServerPluginPeerChannel } from "@jmfederico/pi-web/server-plugin-api";
 +import { createCodexConnection, type CodexConnection, type ConnectionFactory } from "./codexProtocol.js";
-+import { array, bounded, errorText, object, string, text, type RecordValue } from "./protocol.js";
++import { array, bounded, errorText, object, string, text, permissionMode, type PermissionMode, type RecordValue } from "./protocol.js";
 +
 +interface ThreadState {
 +  id: string;
@@ -1736,6 +1804,7 @@ index 00000000..88fe3191
 +  items: Map<string, RecordValue>;
 +  inputHistory: Map<string, string>;
 +  approvals: Map<string, RecordValue>;
++  policy: RecordValue | null;
 +}
 +interface WorkspaceState {
 +  cwd: string;
@@ -1747,7 +1816,12 @@ index 00000000..88fe3191
 +  error: string;
 +  touched: number;
 +}
-+const policy = { approvalPolicy: "never", sandbox: "danger-full-access", approvalsReviewer: "user" };
++const policies: Record<PermissionMode, RecordValue> = {
++  "full-access": { approvalPolicy: "never", sandbox: "danger-full-access", approvalsReviewer: "user" },
++  "ask-for-approval": { approvalPolicy: "on-request", sandbox: "workspace-write", approvalsReviewer: "user" },
++  "approve-for-me": { approvalPolicy: "on-request", sandbox: "workspace-write", approvalsReviewer: "auto_review" },
++};
++const policy = policies["full-access"];
 +
 +export class CodexService {
 +  private readonly workspaces = new Map<string, WorkspaceState>();
@@ -1826,6 +1900,7 @@ index 00000000..88fe3191
 +    const supported = new Set(["status", "list", "models", "create", "snapshot", "send", "stop", "answer"]);
 +    if (!supported.has(context.operation)) throw new Error("Unsupported Codex operation");
 +    const input = object(context.input);
++    const selectedPolicy = policies[permissionMode(input["permissionMode"])];
 +    const state = this.workspace(context);
 +    const rpc = (method: string, params: RecordValue) => state.connection.request(method, params);
 +    switch (context.operation) {
@@ -1854,23 +1929,25 @@ index 00000000..88fe3191
 +        }), nextCursor: result["nextCursor"] ?? null };
 +      }
 +      case "create": {
-+        const result = await rpc("thread/start", { cwd: state.cwd, ...policy });
++        const result = await rpc("thread/start", { cwd: state.cwd, ...selectedPolicy });
 +        const thread = object(result["thread"]);
 +        const id = string(thread["id"]);
-+        this.settings(this.remember(state, id), result);
++        const createdThread = this.remember(state, id);
++        createdThread.policy = selectedPolicy;
++        this.settings(createdThread, result);
 +        return { id, model: text(result["model"]), effort: text(result["reasoningEffort"]) };
 +      }
 +      default: break;
 +    }
 +    const id = string(input["threadId"], "threadId");
-+    const thread = context.operation === "snapshot" ? await this.readSnapshot(state, id) : await this.load(state, id);
++    const thread = context.operation === "snapshot" ? await this.readSnapshot(state, id) : await this.load(state, id, selectedPolicy);
 +    context.signal.throwIfAborted();
 +    if (context.operation === "snapshot") {
 +      if (input["version"] === thread.version) return { changed: false };
 +      const offset = typeof input["offset"] === "number" ? Math.max(0, Math.min(512, Math.floor(input["offset"]))) : 0;
 +      const end = Math.max(0, thread.items.size - offset);
 +      return { changed: true, id, model: thread.model, effort: thread.effort, version: thread.version, status: thread.status, busy: thread.busy, error: thread.error,
-+        inputHistory: [...thread.inputHistory.values()], items: [...thread.items.values()].slice(Math.max(0, end - 40), end), offset, total: thread.items.size, approvals: [...thread.approvals.values()], policy };
++        inputHistory: [...thread.inputHistory.values()], items: [...thread.items.values()].slice(Math.max(0, end - 40), end), offset, total: thread.items.size, approvals: [...thread.approvals.values()], policy: thread.policy };
 +    }
 +    if (context.operation === "send") {
 +      let prompt = text(input["text"]);
@@ -1894,7 +1971,13 @@ index 00000000..88fe3191
 +      }
 +      if (prompt.trim() === "") throw new Error("Enter a message or select workspace context");
 +      if (thread.busy) throw new Error("This conversation already has an active turn");
-+      const options: RecordValue = {};
++      const options: RecordValue = {
++        approvalPolicy: selectedPolicy["approvalPolicy"] ?? "never",
++        approvalsReviewer: selectedPolicy["approvalsReviewer"] ?? "user",
++        sandboxPolicy: selectedPolicy["sandbox"] === "danger-full-access" ? { type: "dangerFullAccess" } : {
++          type: "workspaceWrite", writableRoots: [state.cwd], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false,
++        },
++      };
 +      if (input["model"] !== undefined) options["model"] = string(input["model"], "model");
 +      if (input["effort"] !== undefined) options["effort"] = string(input["effort"], "reasoning effort", 32);
 +      thread.busy = true;
@@ -1903,6 +1986,7 @@ index 00000000..88fe3191
 +      thread.version++; this.notify(thread);
 +      try {
 +        const result = await rpc("turn/start", { threadId: id, input: [{ type: "text", text: prompt, text_elements: [] }], ...options });
++        thread.policy = selectedPolicy;
 +        // Settings come from Codex, not from the requested override (which may be normalized).
 +        try {
 +          const current = object((await rpc("thread/read", { threadId: id, includeTurns: false }))["thread"]);
@@ -2001,7 +2085,7 @@ index 00000000..88fe3191
 +      if (idle === undefined) throw new Error("Too many active Codex conversations");
 +      state.threads.delete(idle.id);
 +    }
-+    const thread: ThreadState = { id, model: "", effort: "", version: 0, turnId: "", status: "idle", error: "", busy: false, items: new Map(), inputHistory: new Map(), approvals: new Map() };
++    const thread: ThreadState = { id, model: "", effort: "", version: 0, turnId: "", status: "idle", error: "", busy: false, items: new Map(), inputHistory: new Map(), approvals: new Map(), policy: null };
 +    state.threads.set(id, thread);
 +    return thread;
 +  }
@@ -2014,7 +2098,7 @@ index 00000000..88fe3191
 +    const read = await state.connection.request("thread/read", { threadId: id, includeTurns: true });
 +    const saved = object(read["thread"]);
 +    if (resolve(string(saved["cwd"], "thread cwd", 4096)) !== state.cwd) throw new Error("Conversation belongs to another workspace");
-+    const thread: ThreadState = { id, model: text(saved["model"]), effort: text(saved["reasoningEffort"]), version: --this.historyVersion, turnId: "", status: "Stored history", error: "", busy: false, items: new Map(), inputHistory: new Map(), approvals: new Map() };
++    const thread: ThreadState = { id, model: text(saved["model"]), effort: text(saved["reasoningEffort"]), version: --this.historyVersion, turnId: "", status: "Stored history", error: "", busy: false, items: new Map(), inputHistory: new Map(), approvals: new Map(), policy: null };
 +    for (const entry of array(saved["turns"])) {
 +      const turn = object(entry);
 +      for (const item of array(turn["items"])) this.item(thread, { ...object(item), turnId: turn["id"] ?? "", turnStatus: turn["status"] ?? "", turnDurationMs: turn["durationMs"] ?? null });
@@ -2022,21 +2106,22 @@ index 00000000..88fe3191
 +    // Do not cache external history: its owner can persist more items between polls.
 +    return thread;
 +  }
-+  private async load(state: WorkspaceState, id: string): Promise<ThreadState> {
++  private async load(state: WorkspaceState, id: string, selectedPolicy: RecordValue = policy): Promise<ThreadState> {
 +    const opening = state.opening.get(id);
 +    if (opening !== undefined) return opening;
 +    const existing = state.threads.get(id);
 +    if (existing !== undefined) return existing;
-+    const promise = this.restore(state, id);
++    const promise = this.restore(state, id, selectedPolicy);
 +    state.opening.set(id, promise);
 +    try { return await promise; } finally { state.opening.delete(id); }
 +  }
-+  private async restore(state: WorkspaceState, id: string): Promise<ThreadState> {
++  private async restore(state: WorkspaceState, id: string, selectedPolicy: RecordValue): Promise<ThreadState> {
 +    const read = await state.connection.request("thread/read", { threadId: id, includeTurns: false });
 +    if (resolve(string(object(read["thread"])["cwd"], "thread cwd", 4096)) !== state.cwd) throw new Error("Conversation belongs to another workspace");
 +    const thread = this.remember(state, id);
 +    try {
-+      const resumed = await state.connection.request("thread/resume", { threadId: id, cwd: state.cwd, ...policy });
++      const resumed = await state.connection.request("thread/resume", { threadId: id, cwd: state.cwd, ...selectedPolicy });
++      thread.policy = selectedPolicy;
 +      this.settings(thread, resumed);
 +      for (const entry of array(object(resumed["thread"])["turns"])) {
 +        const turn = object(entry);
@@ -2170,10 +2255,10 @@ index 00000000..88fe3191
 +}
 diff --git a/pi-web-plugins/codex/server/protocol.ts b/pi-web-plugins/codex/server/protocol.ts
 new file mode 100644
-index 00000000..b1e9ff6f
+index 00000000..7a903f08
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/protocol.ts
-@@ -0,0 +1,20 @@
+@@ -0,0 +1,27 @@
 +import type { JsonValue } from "@jmfederico/pi-web/server-plugin-api";
 +
 +export type RecordValue = Record<string, JsonValue>;
@@ -2193,6 +2278,13 @@ index 00000000..b1e9ff6f
 +export function errorText(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 +export function bounded(value: string, max = 16384): string {
 +  return value.length > max ? `${value.slice(0, max)}\n[Display truncated]` : value;
++}
++
++export type PermissionMode = "full-access" | "ask-for-approval" | "approve-for-me";
++export function permissionMode(value: unknown): PermissionMode {
++  if (value === undefined) return "full-access";
++  if (value === "full-access" || value === "ask-for-approval" || value === "approve-for-me") return value;
++  throw new Error("Invalid permission mode");
 +}
 diff --git a/pi-web-plugins/codex/server/server-plugin.ts b/pi-web-plugins/codex/server/server-plugin.ts
 new file mode 100644
