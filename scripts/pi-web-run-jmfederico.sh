@@ -160,6 +160,11 @@ start() {
         launcher+=(setsid)
     fi
 
+    # Check before creating either process, so a busy port cannot leave a new daemon behind.
+    if [[ ! -f "$server_pid" ]] || ! kill -0 "$(cat "$server_pid")" 2>/dev/null; then
+        check_port_free
+    fi
+
     # 会话守护进程
     if [[ ! -f "$sessiond_pid" ]] || ! kill -0 "$(cat "$sessiond_pid")" 2>/dev/null; then
         echo "启动 pi-web-sessiond ..."
@@ -171,7 +176,6 @@ start() {
 
     # Web/API 服务
     if [[ ! -f "$server_pid" ]] || ! kill -0 "$(cat "$server_pid")" 2>/dev/null; then
-        check_port_free
         echo "启动 pi-web-server -> http://$PI_WEB_HOST:$PI_WEB_PORT"
         if [[ -n "$PI_WEB_PASSWORD" ]]; then
             PI_WEB_PASSWORD="$PI_WEB_PASSWORD" PI_WEB_PORT="$PI_WEB_PORT" PI_WEB_HOST="$PI_WEB_HOST" \
@@ -195,18 +199,78 @@ start() {
     status
 }
 
+# Match both executable identity and this instance's run directory before recovering a PID.
+is_instance_process() {
+    local pid="$1" name="$2" arg entry matched=0
+    [[ "$pid" =~ ^[1-9][0-9]*$ && "$pid" -gt 1 ]] || return 1
+    [[ -r "/proc/$pid/cmdline" && -r "/proc/$pid/environ" ]] || return 1
+    while IFS= read -r -d '' arg; do
+        if [[ "${arg##*/}" == "$name" ]]; then matched=1; fi
+    done < "/proc/$pid/cmdline"
+    [[ $matched -eq 1 ]] || return 1
+    while IFS= read -r -d '' entry; do
+        [[ "$entry" == "PI_WEB_RUN_DIR=$log_dir" ]] && return 0
+    done < "/proc/$pid/environ"
+    return 1
+}
+
+process_running() {
+    local pid="$1" stat rest
+    kill -0 "$pid" 2>/dev/null || return 1
+    # A zombie has exited and released its sockets; only its parent can reap it.
+    if [[ -r "/proc/$pid/stat" ]]; then
+        stat=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
+        rest="${stat##*) }"
+        [[ "${rest%% *}" == Z ]] && return 1
+    fi
+    return 0
+}
+
 stop_pid() {
-    local name="$1" pidfile="$2"
+    local name="$1" pidfile="$2" pid candidate attempt recorded="" failed=0
+    local -a pids=()
     if [[ -f "$pidfile" ]]; then
-        local pid; pid="$(cat "$pidfile")"
-        if kill -0 "$pid" 2>/dev/null; then
-            kill "$pid" 2>/dev/null || true
-            sleep 1
+        recorded=$(cat "$pidfile")
+        if [[ "$recorded" =~ ^[1-9][0-9]*$ && "$recorded" -gt 1 ]] && process_running "$recorded"; then
+            if [[ ! -d /proc ]] || is_instance_process "$recorded" "$name"; then
+                pids+=("$recorded")
+            else
+                echo "忽略不属于本实例的过期 PID: $recorded ($name)" >&2
+            fi
+        fi
+    fi
+    # PID files can disappear or contain the PID of an exited launcher.
+    for candidate in /proc/[0-9]*/cmdline; do
+        pid="${candidate%/cmdline}"; pid="${pid##*/}"
+        [[ "$pid" == "$recorded" ]] && continue
+        if is_instance_process "$pid" "$name" && process_running "$pid"; then
+            pids+=("$pid")
+            echo "找到本实例遗留进程: $name (PID $pid)"
+        fi
+    done
+    for pid in "${pids[@]}"; do
+        kill "$pid" 2>/dev/null || true
+        for ((attempt=0; attempt<30; attempt++)); do
+            process_running "$pid" || break
+            sleep 0.1
+        done
+        if process_running "$pid"; then
             kill -9 "$pid" 2>/dev/null || true
+            for ((attempt=0; attempt<20; attempt++)); do
+                process_running "$pid" || break
+                sleep 0.1
+            done
+        fi
+        if process_running "$pid"; then
+            echo "错误：无法停止 $name (PID $pid)，保留 PID 文件" >&2
+            printf '%s\n' "$pid" > "$pidfile"
+            failed=1
+        else
             echo "已停止 $name (PID $pid)"
         fi
-        rm -f "$pidfile"
-    fi
+    done
+    [[ $failed -eq 0 ]] || return 1
+    rm -f "$pidfile"
 }
 
 stop() {

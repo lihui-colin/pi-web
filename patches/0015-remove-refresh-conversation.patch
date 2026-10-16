@@ -1,0 +1,33 @@
+diff --git a/pi-web-plugins/codex/CodexBrowserRuntime.ts b/pi-web-plugins/codex/CodexBrowserRuntime.ts
+index 148fcdb2..0b502fb5 100644
+--- a/pi-web-plugins/codex/CodexBrowserRuntime.ts
++++ b/pi-web-plugins/codex/CodexBrowserRuntime.ts
+@@ -276,7 +276,7 @@ export class CodexBrowserRuntime {
+     const peer = view.context.peer;
+     if (this.disposed || !view.connected || view.threadId === "" || this.channels.has(view) || (view.listeners.size === 0 && view.snapshot["busy"] !== true)) return;
+     if (peer?.openChannel === undefined) {
+-      if (view.notice === "") { view.notice = "Live updates unavailable. Update the host or use Refresh conversation."; this.changed(view); }
++      if (view.notice === "") { view.notice = "Live updates unavailable. Update the host or use Reconnect."; this.changed(view); }
+       return;
+     }
+     const connection: { abort: AbortController; channel?: PluginPeerChannel; retry?: ReturnType<typeof setTimeout> } = { abort: new AbortController() };
+diff --git a/pi-web-plugins/codex/CodexPanel.ts b/pi-web-plugins/codex/CodexPanel.ts
+index 5b712a14..b639c864 100644
+--- a/pi-web-plugins/codex/CodexPanel.ts
++++ b/pi-web-plugins/codex/CodexPanel.ts
+@@ -410,7 +410,6 @@ export class CodexPanel extends LitElement {
+       ${view.notice === "" ? nothing : html`<p role="status">${view.notice}</p>`}
+       ${view.error === "" && text(snapshot["error"]) === "" ? nothing : html`<p class="error" role="alert">${view.error || text(snapshot["error"])}</p>`}
+       ${home ? this.renderConversationHome(view) : html`<div class="transcript" @scroll=${(event: Event) => { const target = event.target; if (target instanceof HTMLElement) { const follow = target.scrollHeight - target.scrollTop - target.clientHeight < 60; if (follow !== this.follow) { this.follow = follow; this.requestUpdate(); } } }}>
+-        <div class="transcript-toolbar"><button ?disabled=${view.pending} @click=${() => { void this.runtime?.refresh(view); }}>Refresh conversation</button></div>
+         ${typeof snapshot["total"] === "number" && snapshot["total"] > items.length + view.offset ? html`<button @click=${() => { view.offset = Math.min(512, view.offset + 40); view.snapshot = { ...view.snapshot, version: -1 }; this.requestUpdate(); void this.runtime?.refresh(view); }}>Earlier messages</button>` : nothing}
+         ${view.offset > 0 ? html`<button @click=${() => { view.offset = Math.max(0, view.offset - 40); view.snapshot = { ...view.snapshot, version: -1 }; this.requestUpdate(); void this.runtime?.refresh(view); }}>Newer messages</button>` : nothing}
+         ${snapshot["total"] === 512 ? html`<p>Showing the most recent 512 items. Older history remains available in Codex CLI.</p>` : nothing}
+@@ -572,7 +571,6 @@ export class CodexPanel extends LitElement {
+     .home-empty { color:var(--pi-muted,#888); padding:20px 6px; }
+     .more-conversations { display:flex; justify-content:space-between; align-items:center; width:100%; padding:5px 6px; text-align:left; border-radius:0; border-bottom:1px solid var(--pi-border-muted,#e5e5e5); color:var(--pi-muted,#888); font-size:12px; }
+     .more-count { font-size:11px; } .load-conversations { align-self:flex-start; margin:6px; font-size:12px; color:var(--pi-muted,#888); }
+-    .transcript-toolbar { display:flex; justify-content:flex-end; max-width:820px; margin:0 auto 12px; color:var(--pi-muted,#888); font-size:11px; }
+     .transcript { flex:1; min-height:0; overflow:auto; padding:30px 32px 16px; overflow-anchor:none; }
+     article { margin:0 auto 20px; max-width:820px; } .userMessage { width:fit-content; max-width:85%; margin-left:auto; margin-right:0; padding:9px 14px; background:var(--pi-surface,#f3f3f3); border-radius:20px; }
+     .agentMessage { padding:0; } .user-text { white-space:pre-wrap; overflow-wrap:anywhere; } .label { display:flex; justify-content:flex-end; height:0; overflow:hidden; } article:hover .label,article:focus-within .label { height:auto; } .label button { font-size:11px; color:var(--pi-muted,#777); }

@@ -13,7 +13,10 @@ function fixture() {
   copyFileSync('scripts/pi-web-run-jmfederico.sh', join(root, 'scripts/run.sh'));
   const script = (name, body) => writeFileSync(join(bin, name), `#!/bin/bash\n${body}\n`, { mode: 0o755 });
   for (const name of ['pi-web-sessiond', 'pi-web-server']) {
-    script(name, 'printf "%s\\n" "$PI_WEB_DATA_DIR" "$PI_WEB_SESSIOND_SOCKET" "$PI_WEB_RUN_DIR"\nexec /bin/sleep 120');
+    writeFileSync(join(bin, name), `#!${process.execPath}
+console.log([process.env.PI_WEB_DATA_DIR, process.env.PI_WEB_SESSIOND_SOCKET, process.env.PI_WEB_RUN_DIR].join('\\n'));
+setInterval(() => {}, 1000);
+`, { mode: 0o755 });
   }
   script('curl', '/bin/sleep 0.05; exit 0');
   script('ss', 'exit 0');
@@ -105,6 +108,59 @@ for (const [name, ports, port, overrides, target] of [
     } finally { f.cleanup(); }
   });
 }
+
+for (const missing of [true, false]) {
+  test(`stop recovers live processes with ${missing ? 'missing' : 'stale'} PID files`, () => {
+    const f = fixture();
+    try {
+      assert.equal(f.run('start', '8425').status, 0);
+      const dir = join(f.root, 'data/pi-web/8425');
+      for (const service of ['server', 'sessiond']) {
+        const pidfile = join(dir, `${service}.pid`);
+        f.pids.push(Number(readFileSync(pidfile, 'utf8')));
+        if (missing) rmSync(pidfile);
+        else writeFileSync(pidfile, String(process.pid));
+      }
+      const result = f.run('stop', '8425');
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /遗留进程/);
+      for (const pid of f.pids) {
+        const stat = spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' });
+        assert.ok(stat.status !== 0 || stat.stdout.trim().startsWith('Z'), `PID ${pid} is still alive`);
+      }
+      for (const service of ['server', 'sessiond']) assert.equal(existsSync(join(dir, `${service}.pid`)), false);
+      assert.equal(f.run('start', '8425').status, 0);
+      for (const service of ['server', 'sessiond']) f.pids.push(Number(readFileSync(join(dir, `${service}.pid`), 'utf8')));
+    } finally { f.cleanup(); }
+  });
+}
+
+test('stop failure preserves PID files and returns an error', () => {
+  const f = fixture();
+  try {
+    assert.equal(f.run('start', '8425').status, 0);
+    const dir = join(f.root, 'data/pi-web/8425');
+    for (const service of ['server', 'sessiond']) f.pids.push(Number(readFileSync(join(dir, `${service}.pid`), 'utf8')));
+    const shellEnv = join(f.root, 'deny-signals.sh');
+    writeFileSync(shellEnv, 'kill() { if [[ "$1" == -0 ]]; then builtin kill "$@"; else return 1; fi; }\n');
+    const result = f.run('stop', '8425', { BASH_ENV: shellEnv });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /无法停止.*保留 PID 文件/);
+    for (const service of ['server', 'sessiond']) assert.equal(existsSync(join(dir, `${service}.pid`)), true);
+    for (const pid of f.pids) process.kill(pid, 0);
+  } finally { f.cleanup(); }
+});
+
+test('a busy port does not start sessiond or write PID files', () => {
+  const f = fixture();
+  try {
+    writeFileSync(join(f.root, 'bin/ss'), '#!/bin/sh\necho "LISTEN 0 511 0.0.0.0:8425 0.0.0.0:*"\n', { mode: 0o755 });
+    const result = f.run('start', '8425');
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /端口 8425 已被占用/);
+    for (const service of ['server', 'sessiond']) assert.equal(existsSync(join(f.root, 'data/pi-web/8425', `${service}.pid`)), false);
+  } finally { f.cleanup(); }
+});
 
 test('explicit directory and socket overrides reach both processes', () => {
   const f = fixture();

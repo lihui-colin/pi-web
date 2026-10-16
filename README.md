@@ -68,6 +68,8 @@ bash scripts/pi-web-run-jmfederico.sh stop --port 8424  # 只停止 8424
 
 `start`、`stop`、`status`、`logs` 和 `update` 都按端口选择实例；不传端口时选择 `PI_WEB_PORT` 或默认的 8024。例外：`stop` 未指定 `--port`、`PI_WEB_PORT` 或 `PI_WEB_RUN_DIR` 时，若 `data/pi-web` 下只有一个有效端口实例目录，就自动停止该实例；没有或存在多个实例时仍使用默认 8024。`stop --port 8425` 只停止 8425 实例。显式设置状态或端点环境变量会覆盖隔离默认值，因此多实例时不要让这些变量指向同一目录或端点（包括 `PI_WEB_SESSIOND_PORT` 和 `PI_WEB_SESSIOND_URL`）。
 
+`stop` 会等待进程退出，必要时强制结束，确认退出后才删除 PID 文件；停止失败会保留 PID 文件并报错。Linux 下即使 PID 文件丢失或过期，也会按服务命令及 `PI_WEB_RUN_DIR` 找回本实例的遗留进程。`start` 会先检查端口，端口被占用时不会启动新的 sessiond。
+
 `logs` 默认跟随实例目录中的 `server.log`，不存在时跟随 `sessiond.log`；每次启动对应进程时会覆盖其日志。原先的 `~/.pi-web/` 状态和 `data/pi-web/*.pid` 不会自动迁移或接管，旧实例需通过原管理方式停止。更新会替换全局程序版本；运行脚本的 update 不启停服务。
 
 该脚本也负责更新：
