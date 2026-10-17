@@ -316,6 +316,42 @@ index 45a3ea64c268478a76202ab5326ea607fa692234..ffeb66a4ca6e204a877bd6e221d93c66
      .terminal-stage { position: relative; flex: 1 1 auto; min-height: 0; overflow: hidden; background: var(--pi-terminal-bg); }
      .terminal-host { position: absolute; inset: 0; padding: 6px; box-sizing: border-box; overflow: hidden; }
      .terminal-host.copying { visibility: hidden; pointer-events: none; }
+diff --git a/pi-web-plugins/terminal/clipboard.ts b/pi-web-plugins/terminal/clipboard.ts
+index 1feccb2619ea487d438384ed8411ae6755c7b8d7..b1c388e2e1f6fa543f79c398ce50e428179e399b 100644
+--- a/pi-web-plugins/terminal/clipboard.ts
++++ b/pi-web-plugins/terminal/clipboard.ts
+@@ -31,15 +31,18 @@ function browserIsSecureContext(): boolean {
+   return typeof window !== "undefined" && window.isSecureContext;
+ }
+ 
+-function browserClipboardWriteText(): ((text: string) => Promise<void>) | undefined {
+-  if (typeof navigator === "undefined" || !("clipboard" in navigator)) return undefined;
+-  return navigator.clipboard.writeText.bind(navigator.clipboard);
++function browserClipboardWriteText(browserNavigator: Partial<Navigator> | undefined = typeof navigator === "undefined" ? undefined : navigator): ((text: string) => Promise<void>) | undefined {
++  const clipboard = browserNavigator?.clipboard;
++  if (typeof clipboard?.writeText !== "function") return undefined;
++  return clipboard.writeText.bind(clipboard);
+ }
+ 
+ function writeClipboardTextWithSelectionFallback(text: string): boolean {
+   if (typeof document === "undefined") return false;
+ 
+-  const activeElement = document.activeElement;
++  // document.activeElement is only the outer host for editors in shadow DOM.
++  let activeElement = document.activeElement;
++  while (activeElement?.shadowRoot?.activeElement) activeElement = activeElement.shadowRoot.activeElement;
+   const selection = document.getSelection();
+   const selectedRanges = selection === null ? [] : selectionRanges(selection);
+   const textarea = document.createElement("textarea");
+@@ -57,7 +60,7 @@ function writeClipboardTextWithSelectionFallback(text: string): boolean {
+   textarea.style.pointerEvents = "none";
+ 
+   document.body.append(textarea);
+-  textarea.focus();
++  textarea.focus({ preventScroll: true });
+   textarea.select();
+   textarea.setSelectionRange(0, textarea.value.length);
+ 
 diff --git a/pi-web-plugins/terminal/terminalClipboard.ts b/pi-web-plugins/terminal/terminalClipboard.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..839cbd4e9d7542a1de627d3e1a334b13e2940573
@@ -363,21 +399,95 @@ index 0000000000000000000000000000000000000000..839cbd4e9d7542a1de627d3e1a334b13
 +    return undefined;
 +  }
 +}
-diff --git a/pi-web-plugins/terminal/clipboard.ts b/pi-web-plugins/terminal/clipboard.ts
-index 1feccb2619ea487d438384ed8411ae6755c7b8d7..e9a4c5b8cd53ab0e53d66f562f267fb83a050da0 100644
---- a/pi-web-plugins/terminal/clipboard.ts
-+++ b/pi-web-plugins/terminal/clipboard.ts
-@@ -31,9 +31,10 @@ function browserIsSecureContext(): boolean {
-   return typeof window !== "undefined" && window.isSecureContext;
+diff --git a/src/client/src/clipboard.focus.test.ts b/src/client/src/clipboard.focus.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..f531bc991f0ad76a2e6a247be79ec482facc0eee
+--- /dev/null
++++ b/src/client/src/clipboard.focus.test.ts
+@@ -0,0 +1,52 @@
++// @vitest-environment happy-dom
++
++import { afterEach, describe, expect, it, vi } from "vitest";
++import { writeClipboardText } from "./clipboard";
++import { writeClipboardText as writeTerminalClipboardText } from "../../../pi-web-plugins/terminal/clipboard";
++
++const originalExecCommand = Object.getOwnPropertyDescriptor(document, "execCommand");
++afterEach(() => {
++  document.body.replaceChildren();
++  if (originalExecCommand) Object.defineProperty(document, "execCommand", originalExecCommand);
++  else Reflect.deleteProperty(document, "execCommand");
++  vi.restoreAllMocks();
++  vi.unstubAllGlobals();
++});
++
++describe.each([["host", writeClipboardText], ["terminal", writeTerminalClipboardText]] as const)("%s clipboard DOM boundary", (_name, writeText) => {
++  it.each([true, false, "throws"])("restores the focused editor through nested shadow roots after fallback copy (%s)", async (result) => {
++    const app = document.createElement("div");
++    const panel = document.createElement("div");
++    const editor = document.createElement("textarea");
++    app.attachShadow({ mode: "open" }).append(panel);
++    const shadow = panel.attachShadow({ mode: "open" });
++    shadow.append(editor);
++    document.body.append(app);
++    editor.value = "unfinished draft";
++    editor.focus();
++    editor.setSelectionRange(3, 8, "backward");
++    vi.stubGlobal("isSecureContext", false);
++    const copy = vi.fn(() => {
++      expect(document.activeElement).toBeInstanceOf(HTMLTextAreaElement);
++      if (result === "throws") throw new Error("Copy denied");
++      return result;
++    });
++    Object.defineProperty(document, "execCommand", { configurable: true, value: copy });
++
++    expect(await writeText("copied output")).toBe(result === true);
++    expect(copy).toHaveBeenCalledExactlyOnceWith("copy");
++    expect(shadow.activeElement).toBe(editor);
++    expect(editor.value).toBe("unfinished draft");
++    expect([editor.selectionStart, editor.selectionEnd, editor.selectionDirection]).toEqual([3, 8, "backward"]);
++    expect(document.body.children).toHaveLength(1);
++  });
++
++  it.each([undefined, null, {}])("uses fallback when the browser exposes an unusable clipboard API (%s)", async (clipboard) => {
++    vi.stubGlobal("isSecureContext", true);
++    vi.stubGlobal("navigator", { clipboard });
++    const copy = vi.fn(() => true);
++    Object.defineProperty(document, "execCommand", { configurable: true, value: copy });
++    expect(await writeText("copied output")).toBe(true);
++    expect(copy).toHaveBeenCalledExactlyOnceWith("copy");
++  });
++});
+diff --git a/src/client/src/clipboard.ts b/src/client/src/clipboard.ts
+index 1feccb2619ea487d438384ed8411ae6755c7b8d7..ec16a725c9c628128d5415a1c6a77825e292cd29 100644
+--- a/src/client/src/clipboard.ts
++++ b/src/client/src/clipboard.ts
+@@ -32,14 +32,17 @@ function browserIsSecureContext(): boolean {
  }
  
--function browserClipboardWriteText(): ((text: string) => Promise<void>) | undefined {
+ function browserClipboardWriteText(): ((text: string) => Promise<void>) | undefined {
 -  if (typeof navigator === "undefined" || !("clipboard" in navigator)) return undefined;
 -  return navigator.clipboard.writeText.bind(navigator.clipboard);
-+function browserClipboardWriteText(browserNavigator: Partial<Navigator> | undefined = typeof navigator === "undefined" ? undefined : navigator): ((text: string) => Promise<void>) | undefined {
-+  const clipboard = browserNavigator?.clipboard;
++  const clipboard = typeof navigator === "undefined" ? undefined : navigator.clipboard;
 +  if (typeof clipboard?.writeText !== "function") return undefined;
 +  return clipboard.writeText.bind(clipboard);
  }
  
  function writeClipboardTextWithSelectionFallback(text: string): boolean {
+   if (typeof document === "undefined") return false;
+ 
+-  const activeElement = document.activeElement;
++  // document.activeElement is only the outer host for editors in shadow DOM.
++  let activeElement = document.activeElement;
++  while (activeElement?.shadowRoot?.activeElement) activeElement = activeElement.shadowRoot.activeElement;
+   const selection = document.getSelection();
+   const selectedRanges = selection === null ? [] : selectionRanges(selection);
+   const textarea = document.createElement("textarea");
+@@ -57,7 +60,7 @@ function writeClipboardTextWithSelectionFallback(text: string): boolean {
+   textarea.style.pointerEvents = "none";
+ 
+   document.body.append(textarea);
+-  textarea.focus();
++  textarea.focus({ preventScroll: true });
+   textarea.select();
+   textarea.setSelectionRange(0, textarea.value.length);
+ 

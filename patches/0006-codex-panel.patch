@@ -3030,10 +3030,10 @@ index 0000000000000000000000000000000000000000..d3d0bcbd7c51804463cb85883b66abf1
 +export const createCodexConnection: ConnectionFactory = (cwd, event, exited) => new CodexProcess(cwd, event, exited);
 diff --git a/pi-web-plugins/codex/server/codexService.test.ts b/pi-web-plugins/codex/server/codexService.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..0d7c3b563c5aa9107a0c8391fc6674eda3e72750
+index 0000000000000000000000000000000000000000..9e4e9042610f54d1ba7e3f5738c2dbd938704c93
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/codexService.test.ts
-@@ -0,0 +1,578 @@
+@@ -0,0 +1,633 @@
 +import { mkdtemp, mkdir, writeFile, symlink, rm } from "node:fs/promises";
 +import { join } from "node:path";
 +import { tmpdir } from "node:os";
@@ -3075,6 +3075,61 @@ index 0000000000000000000000000000000000000000..0d7c3b563c5aa9107a0c8391fc6674ed
 +}
 +
 +describe("Codex workspace service", () => {
++  it("blocks new turns and duplicate archives while archival is awaiting acknowledgement", async () => {
++    const f = fixture(); await f.call("create");
++    const original = f.request.getMockImplementation();
++    if (!original) throw new Error("Expected request fixture");
++    let finish!: (value: RecordValue) => void;
++    const archived = new Promise<RecordValue>((resolve) => { finish = resolve; });
++    f.request.mockImplementation((method, params) => method === "thread/archive" ? archived : original(method, params));
++    const archiving = f.call("archive", { threadId: "new" });
++    await vi.waitFor(() => { expect(f.request).toHaveBeenCalledWith("thread/archive", { threadId: "new" }); });
++    await expect(f.call("send", { threadId: "new", text: "Do not lose this task" })).rejects.toThrow("being archived");
++    await expect(f.call("archive", { threadId: "new" })).rejects.toThrow("being archived");
++    expect(f.request.mock.calls.filter(([method]) => method === "thread/archive")).toHaveLength(1);
++    expect(f.request).not.toHaveBeenCalledWith("turn/start", expect.anything());
++    finish({});
++    await expect(archiving).resolves.toEqual({ archived: true });
++  });
++
++  it("does not archive a conversation while its writer is being resumed", async () => {
++    const f = fixture();
++    const original = f.request.getMockImplementation();
++    if (!original) throw new Error("Expected request fixture");
++    let finish!: (value: RecordValue) => void;
++    const resumed = new Promise<RecordValue>((resolve) => { finish = resolve; });
++    f.request.mockImplementation((method, params) => method === "thread/resume" ? resumed : original(method, params));
++    const sending = f.call("send", { threadId: "saved", text: "Continue working" });
++    await vi.waitFor(() => { expect(f.request).toHaveBeenCalledWith("thread/resume", expect.anything()); });
++    await expect(f.call("archive", { threadId: "saved" })).rejects.toThrow("being opened");
++    expect(f.request).not.toHaveBeenCalledWith("thread/archive", expect.anything());
++    finish({ thread: { id: "saved", turns: [] } });
++    await sending;
++    expect(await f.call("activity")).toEqual({ busyThreadIds: ["saved"] });
++  });
++
++  it("keeps a turn started during archive validation and rejects the archive", async () => {
++    const f = fixture(); await f.call("create");
++    let finish!: (value: RecordValue) => void;
++    f.request.mockImplementationOnce(() => new Promise<RecordValue>((resolve) => { finish = resolve; }));
++    const archiving = f.call("archive", { threadId: "new" });
++    await f.call("send", { threadId: "new", text: "Continue working" });
++    finish({ thread: { id: "new", cwd: "/work/one" } });
++    await expect(archiving).rejects.toThrow("Stop the response");
++    expect(f.request).not.toHaveBeenCalledWith("thread/archive", expect.anything());
++    expect(await f.call("activity")).toEqual({ busyThreadIds: ["new"] });
++  });
++
++  it("releases the archive reservation after a failed archive so sending can be retried", async () => {
++    const f = fixture(); await f.call("create");
++    const original = f.request.getMockImplementation();
++    if (!original) throw new Error("Expected request fixture");
++    f.request.mockImplementation((method, params) => method === "thread/archive" ? Promise.reject(new Error("Archive failed")) : original(method, params));
++    await expect(f.call("archive", { threadId: "new" })).rejects.toThrow("Archive failed");
++    await expect(f.call("send", { threadId: "new", text: "Continue working" })).resolves.toEqual({ accepted: true });
++    expect(await f.call("activity")).toEqual({ busyThreadIds: ["new"] });
++  });
++
 +  it("keeps an approval retryable when the transport cannot write its answer", async () => {
 +    const f = fixture();
 +    await f.call("create");
@@ -3614,10 +3669,10 @@ index 0000000000000000000000000000000000000000..0d7c3b563c5aa9107a0c8391fc6674ed
 +});
 diff --git a/pi-web-plugins/codex/server/codexService.ts b/pi-web-plugins/codex/server/codexService.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..033af4fb23e2ccc1d0c11b736aaeabd240d36808
+index 0000000000000000000000000000000000000000..879b35c9b20ff060de33562fed04404cf4795166
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/codexService.ts
-@@ -0,0 +1,694 @@
+@@ -0,0 +1,704 @@
 +import { randomUUID } from "node:crypto";
 +import { isAbsolute, relative, resolve, sep } from "node:path";
 +import { realpath, stat } from "node:fs/promises";
@@ -3661,6 +3716,7 @@ index 0000000000000000000000000000000000000000..033af4fb23e2ccc1d0c11b736aaeabd2
 +  connection: CodexConnection;
 +  threads: Map<string, ThreadState>;
 +  opening: Map<string, Promise<ThreadState>>;
++  archiving: Set<string>;
 +  error: string;
 +  touched: number;
 +}
@@ -3782,11 +3838,18 @@ index 0000000000000000000000000000000000000000..033af4fb23e2ccc1d0c11b736aaeabd2
 +        const id = string(input["threadId"], "threadId");
 +        const read = await rpc("thread/read", { threadId: id, includeTurns: false });
 +        if (resolve(string(object(read["thread"])["cwd"], "thread cwd", 4096)) !== state.cwd) throw new Error("Conversation belongs to another workspace");
++        if (state.archiving.has(id)) throw new Error("Conversation is being archived");
++        if (state.opening.has(id)) throw new Error("Conversation is being opened. Wait before archiving it.");
 +        const cached = state.threads.get(id);
 +        if (cached !== undefined && (cached.busy || cached.sending || cached.queue.length > 0)) throw new Error("Stop the response and clear queued messages before archiving this conversation");
-+        await rpc("thread/archive", { threadId: id });
-+        state.threads.delete(id);
-+        return { archived: true };
++        // Reserve after read-only validation, before sending the archive RPC.
++        // Another client must not start a turn whose tracked state we then remove.
++        state.archiving.add(id);
++        try {
++          await rpc("thread/archive", { threadId: id });
++          state.threads.delete(id);
++          return { archived: true };
++        } finally { state.archiving.delete(id); }
 +      }
 +      case "create": {
 +        const result = await rpc("thread/start", { cwd: state.cwd, ...selectedPolicy });
@@ -3800,10 +3863,12 @@ index 0000000000000000000000000000000000000000..033af4fb23e2ccc1d0c11b736aaeabd2
 +      default: break;
 +    }
 +    const id = string(input["threadId"], "threadId");
++    if (context.operation !== "snapshot" && state.archiving.has(id)) throw new Error("Conversation is being archived");
 +    const localQueueAction = context.operation === "steer" || context.operation === "removeQueued";
 +    const thread = localQueueAction ? state.threads.get(id) : context.operation === "snapshot" ? await this.readSnapshot(state, id) : await this.load(state, id, selectedPolicy);
 +    if (thread === undefined) throw new Error("No queued messages for this conversation in the current workspace");
 +    context.signal.throwIfAborted();
++    if (context.operation !== "snapshot" && state.archiving.has(id)) throw new Error("Conversation is being archived");
 +    if (context.operation === "snapshot") {
 +      if (input["version"] === thread.version) return { changed: false };
 +      const offset = typeof input["offset"] === "number" ? Math.max(0, Math.min(512, Math.floor(input["offset"]))) : 0;
@@ -4079,7 +4144,7 @@ index 0000000000000000000000000000000000000000..033af4fb23e2ccc1d0c11b736aaeabd2
 +        created.error = message;
 +        for (const thread of threads.values()) { thread.busy = false; thread.status = "interrupted"; thread.queuePaused = true; thread.error = message; thread.approvals.clear(); thread.version++; this.notify(thread); }
 +      });
-+      const created: WorkspaceState = { cwd, projectId: context.project.id, workspaceId: context.workspace.id, threads, opening: new Map(), error: "", touched: Date.now(), connection };
++      const created: WorkspaceState = { cwd, projectId: context.project.id, workspaceId: context.workspace.id, threads, opening: new Map(), archiving: new Set(), error: "", touched: Date.now(), connection };
 +      state = created;
 +      this.workspaces.set(key, state);
 +    }
