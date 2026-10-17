@@ -11,10 +11,10 @@ index 0000000000000000000000000000000000000000..b864cc1c7375582254410edbe397fcf2
 +Add an optional Codex workspace plugin with persistent conversations, streamed responses, tool output, approvals, and model selection using the workspace machine's Codex CLI. Restart sessiond after installing the plugin.
 diff --git a/pi-web-plugins/codex/CodexBrowserRuntime.ts b/pi-web-plugins/codex/CodexBrowserRuntime.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..0b502fb51e57c77aa0c45a8be1715e335451d2eb
+index 0000000000000000000000000000000000000000..f014f4798729eb43524f9631a8ee94ce9d70beaf
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexBrowserRuntime.ts
-@@ -0,0 +1,325 @@
+@@ -0,0 +1,326 @@
 +import type { PluginPeerChannel, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
 +import { array, errorText, object, text, permissionMode, type PermissionMode, chatMode, type ChatMode, type RecordValue } from "./server/protocol.js";
 +
@@ -186,7 +186,7 @@ index 0000000000000000000000000000000000000000..0b502fb51e57c77aa0c45a8be1715e33
 +    const references = [...view.references];
 +    let threadId = view.threadId;
 +    const model = view.model;
-+    const effort = view.effort;
++    const effort = view.effort || (model === "" ? "" : text(view.models.find((entry) => text(entry["model"]) === model)?.["defaultReasoningEffort"]));
 +    const mode = view.mode;
 +    view.sending = true; this.changed(view);
 +    try {
@@ -194,9 +194,10 @@ index 0000000000000000000000000000000000000000..0b502fb51e57c77aa0c45a8be1715e33
 +        const result = await this.request(view, "create", this.permissionInput(view));
 +        threadId = text(result["id"]);
 +        if (threadId === "") throw new Error("Codex did not return a conversation ID");
++        const currentDraft = view.draft;
 +        this.select(view, threadId);
 +        view.snapshot = { model: text(result["model"]), effort: text(result["effort"]) };
-+        this.saveDraft(view, draft);
++        this.saveDraft(view, currentDraft);
 +        this.saveReferences(view, references);
 +        this.saveMode(view, mode, true);
 +        view.model = model; view.effort = effort;
@@ -204,7 +205,7 @@ index 0000000000000000000000000000000000000000..0b502fb51e57c77aa0c45a8be1715e33
 +        this.write(`${view.key}::references`, "[]");
 +        this.write(`${view.key}::mode`, "default");
 +      }
-+      const result = await this.request(view, "send", { threadId, text: draft, mode, ...this.permissionInput(view), ...(references.length > 0 ? { references } : {}), ...(view.model === "" ? {} : { model: view.model }), ...(view.effort === "" ? {} : { effort: view.effort }) });
++      const result = await this.request(view, "send", { threadId, text: draft, mode, ...this.permissionInput(view), ...(references.length > 0 ? { references } : {}), ...(model === "" ? {} : { model }), ...(effort === "" ? {} : { effort }) });
 +      if (draft.trim() !== "") {
 +        const history = this.inputHistory(view, threadId);
 +        if (history.at(-1) !== draft) history.push(draft);
@@ -342,10 +343,10 @@ index 0000000000000000000000000000000000000000..0b502fb51e57c77aa0c45a8be1715e33
 +}
 diff --git a/pi-web-plugins/codex/CodexPanel.test.ts b/pi-web-plugins/codex/CodexPanel.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..c0edf6c9c8762f31282dc48f600e8b074801ef6e
+index 0000000000000000000000000000000000000000..a25e4d4c4ac1d795794059027e2ac80736829fbf
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.test.ts
-@@ -0,0 +1,999 @@
+@@ -0,0 +1,1077 @@
 +// @vitest-environment happy-dom
 +import { afterEach, describe, expect, it, vi } from "vitest";
 +import type { PluginPeerChannelOptions, FileTreeResponse, JsonValue, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
@@ -388,6 +389,62 @@ index 0000000000000000000000000000000000000000..c0edf6c9c8762f31282dc48f600e8b07
 +}
 +
 +describe("Codex panel", () => {
++  it("does not reuse an unsent custom answer for a different approval", async () => {
++    const { panel, view } = await fixture();
++    const approval = (id: string) => ({ id, method: "item/tool/requestUserInput", params: { questions: [{ id: "q", question: "Choose", isOther: true, options: [{ label: "A" }] }] } });
++    view.snapshot = { approvals: [approval("first")] };
++    panel.requestUpdate(); await panel.updateComplete;
++    panel.shadowRoot!.querySelector<HTMLInputElement>(".other-answer")!.value = "private answer for first question";
++    view.snapshot = { approvals: [approval("second")] };
++    panel.requestUpdate(); await panel.updateComplete;
++    expect(panel.shadowRoot!.querySelector<HTMLInputElement>(".other-answer")!.value).toBe("");
++  });
++  it.each([true, false])("submits custom or selected answers when Other is allowed (custom=%s)", async (custom) => {
++    const { panel, view, request } = await fixture();
++    view.snapshot = { approvals: [{ id: "question", method: "item/tool/requestUserInput", params: { questions: [
++      { id: "q", question: "Choose", isOther: true, isSecret: true, options: [{ label: "A", description: "First" }, { label: "B", description: "Second" }] },
++      { id: "fixed", question: "Fixed", isOther: false, options: [{ label: "Only", description: "Fixed answer" }] },
++    ] } }] };
++    panel.requestUpdate(); await panel.updateComplete;
++    const form = panel.shadowRoot!.querySelector<HTMLFormElement>("form.approval")!;
++    const input = form.querySelector<HTMLInputElement>(".other-answer")!;
++    expect(form.querySelectorAll(".other-answer")).toHaveLength(1);
++    expect(input.type).toBe("password");
++    const select = form.querySelector<HTMLSelectElement>("select")!;
++    select.value = "B";
++    input.value = custom ? "My own approach" : "";
++    // A background update should preserve the unsent answer.
++    panel.requestUpdate(); await panel.updateComplete;
++    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
++    await vi.waitFor(() => expect(request).toHaveBeenCalledWith("answer", { threadId: "thread", approvalId: "question", answers: { q: custom ? "My own approach" : "B", fixed: "Only" } }));
++  });
++
++  it.each([false, true])("preserves edits during first conversation creation (send fails=%s)", async (fail) => {
++    const { runtime, view, request } = await fixture();
++    runtime.select(view, "");
++    runtime.saveDraft(view, "original message");
++    let created!: (value: JsonValue) => void;
++    request.mockImplementation(async (operation) => {
++      if (operation === "create") return new Promise<JsonValue>((resolve) => { created = resolve; });
++      if (operation === "send") {
++        if (fail) throw new Error("send failed");
++        return { accepted: true };
++      }
++      return { changed: false };
++    });
++    const sending = runtime.send(view);
++    runtime.saveDraft(view, "new draft typed while waiting");
++    created({ id: "created", model: "model", effort: "medium" });
++    if (fail) await expect(sending).rejects.toThrow("send failed");
++    else await sending;
++    expect(request).toHaveBeenCalledWith("send", expect.objectContaining({ text: "original message", threadId: "created" }));
++    expect(view.draft).toBe("new draft typed while waiting");
++    runtime.select(view, "");
++    expect(view.draft).toBe("");
++    runtime.select(view, "created");
++    expect(view.draft).toBe("new draft typed while waiting");
++  });
++
 +  it("shows Codex turn times beside copy, with message-specific order and no invented dates", async () => {
 +    const { panel, view } = await fixture();
 +    view.snapshot = { items: [
@@ -985,6 +1042,28 @@ index 0000000000000000000000000000000000000000..c0edf6c9c8762f31282dc48f600e8b07
 +    await panel.updateComplete;
 +    expect(request).toHaveBeenCalledWith("send", { mode: "default", threadId: "thread", text: "hello", model: "test-model", effort: "high" });
 +  });
++  it.each([
++    ["", "default", false], ["", "plan", false], ["thread", "default", false], ["thread", "plan", false],
++    ["", "default", true], ["", "plan", true], ["thread", "default", true], ["thread", "plan", true],
++  ] as const)("sends the displayed model and effort for thread=%s mode=%s explicit=%s", async (id, mode, explicit) => {
++    const { view, runtime, panel, request } = await fixture();
++    runtime.select(view, id);
++    view.snapshot = { model: "previous", effort: "low" };
++    view.models = [{ model: "chosen", displayName: "Chosen model", defaultReasoningEffort: "high", supportedReasoningEfforts: [{ reasoningEffort: "high" }, { reasoningEffort: "xhigh" }] }];
++    view.mode = mode;
++    panel.requestUpdate(); await panel.updateComplete;
++    await chooseModel(panel, "chosen");
++    if (explicit) {
++      const slider = panel.shadowRoot?.querySelector<HTMLInputElement>('input[aria-label="Reasoning effort"]');
++      if (!slider) throw new Error("Expected effort slider");
++      slider.value = "1"; slider.dispatchEvent(new Event("input")); await panel.updateComplete;
++    }
++    expect(panel.shadowRoot?.querySelector(".model-picker summary")?.textContent).toContain(explicit ? "Chosen model Extra high" : "Chosen model High");
++    request.mockImplementation(async (operation) => operation === "create" ? { id: "created", model: "previous", effort: "low" } : operation === "send" ? { accepted: true, mode } : { changed: false });
++    view.draft = "hello";
++    await runtime.send(view);
++    expect(request).toHaveBeenCalledWith("send", expect.objectContaining({ threadId: id || "created", mode, model: "chosen", effort: explicit ? "xhigh" : "high" }));
++  });
 +  it("uses supported effort stops, resets overrides, and disables changes while running", async () => {
 +    const { view, panel } = await fixture();
 +    view.snapshot = { model: "astra", effort: "medium" };
@@ -1347,10 +1426,10 @@ index 0000000000000000000000000000000000000000..c0edf6c9c8762f31282dc48f600e8b07
 +});
 diff --git a/pi-web-plugins/codex/CodexPanel.ts b/pi-web-plugins/codex/CodexPanel.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..7345f5ec7814a49deb47a358e45504b7b0ec1d65
+index 0000000000000000000000000000000000000000..dbc8704228e1f7fd58d755f634a591ebd4412725
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.ts
-@@ -0,0 +1,817 @@
+@@ -0,0 +1,832 @@
 +import { LitElement, css, html, svg, nothing } from "lit";
 +import { property } from "lit/decorators.js";
 +import { repeat } from "lit/directives/repeat.js";
@@ -1647,7 +1726,7 @@ index 0000000000000000000000000000000000000000..7345f5ec7814a49deb47a358e45504b7
 +    return width > 0 && width <= 520;
 +  }
 +  private renderPlanStatus(view: CodexView) {
-+    return html`${view.mode === "plan" ? html`<button class="plan-toggle" aria-label="Turn plan mode off" aria-pressed="true" title="Turn plan mode off" ?disabled=${view.pending || view.sending || view.snapshot["busy"] === true} @click=${() => { this.togglePlan(view); }}>${this.planIcon()}<span>Plan</span></button>` : nothing}`;
++    return html`${view.mode === "plan" ? html`<button class="plan-toggle" aria-label="Turn plan mode off" aria-pressed="true" title="Turn plan mode off" ?disabled=${view.pending || view.sending || view.snapshot["busy"] === true} @click=${() => { this.togglePlan(view); }}>${this.planIcon()}<svg class="plan-close-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m9 9 6 6m0-6-6 6"/></svg><span>Plan</span></button>` : nothing}`;
 +  }
 +  private effortLabel(effort: string): string {
 +    const labels: Record<string, string> = { none: "None", minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max" };
@@ -1854,7 +1933,7 @@ index 0000000000000000000000000000000000000000..7345f5ec7814a49deb47a358e45504b7
 +        ${busy ? html`<div class="working" role="status"><span class="activity-dot"></span>Working…</div>` : nothing}
 +      </div>
 +      ${!this.follow || view.offset > 0 ? html`<button class="latest" @click=${() => { this.follow = true; view.offset = 0; view.snapshot = { ...view.snapshot, version: -1 }; this.requestUpdate(); void this.runtime?.refresh(view); }}>Jump to latest</button>` : nothing}
-+      <section aria-label="Pending requests">${array(snapshot["approvals"]).some((approval) => object(approval)["method"] === "item/tool/requestUserInput") ? html`<div class="asking-question" role="status">Asking question</div>` : nothing}${array(snapshot["approvals"]).map((approval) => this.renderApproval(view, object(approval)))}</section>`}
++      <section aria-label="Pending requests">${array(snapshot["approvals"]).some((approval) => object(approval)["method"] === "item/tool/requestUserInput") ? html`<div class="asking-question" role="status">Asking question</div>` : nothing}${repeat(array(snapshot["approvals"]), (approval) => JSON.stringify([view.key, view.threadId, text(object(approval)["id"])]), (approval) => this.renderApproval(view, object(approval)))}</section>`}
 +      <footer ?data-plan=${view.mode === "plan"}>
 +        ${view.references.length > 0 ? html`<div class="context-tray" aria-label="Selected workspace context">${view.references.map((path) => html`<span title=${path}>${path}<button aria-label=${`Remove ${path}`} ?disabled=${view.pending} @click=${() => { this.runtime?.saveReferences(view, view.references.filter((entry) => entry !== path)); }}>×</button></span>`)}</div>` : nothing}
 +        <textarea aria-label="Message Codex" placeholder=${view.mode === "plan" ? "Describe your task to generate a plan..." : home ? "Ask Codex to start a new conversation" : "Ask for follow-up changes"} .value=${view.draft}
@@ -1864,7 +1943,7 @@ index 0000000000000000000000000000000000000000..7345f5ec7814a49deb47a358e45504b7
 +        ${this.voiceStatus ? html`<div class="voice-status" role="status">${this.voiceStatus}</div>` : nothing}
 +        <div class="composer-controls">${this.renderContextPicker(view)}${this.isMobileComposer() ? html`<div class="composer-spacer plan-status mobile-model-controls">${this.renderPlanStatus(view)}${this.renderModelPicker(view)}</div>` : this.renderComposerSettings(view)}
 +          <button class="voice-input" aria-label=${this.voice ? "Stop voice input" : "Start voice input"} title=${this.voice ? "Stop voice input" : "Voice input"} aria-pressed=${!!this.voice} ?disabled=${this.voiceStopping || view.pending || view.sending || busy} @click=${() => { this.toggleVoice(view); }}><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2" width="6" height="13" rx="3"></rect><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"></path></svg></button>
-+          <button class="primary" aria-label=${view.sending ? "Sending message" : busy ? "Stop response" : "Send message"} title=${view.sending ? "Sending message" : busy ? "Stop response" : "Send message"} aria-busy=${view.sending} ?disabled=${!!this.voice || view.pending || view.sending || !view.connected || (!busy && view.draft.trim() === "" && view.references.length === 0)} @click=${() => { this.action((runtime, state) => busy ? runtime.request(state, "stop", { threadId: state.threadId }) : runtime.send(state)); }}>${view.sending ? html`<span class="send-spinner" aria-hidden="true"></span>` : busy ? html`<span class="stop-icon" aria-hidden="true"></span>` : "↑"}</button>
++          <button class="primary" aria-label=${view.sending ? "Sending message" : busy ? "Stop response" : "Send message"} title=${view.sending ? "Sending message" : busy ? "Stop response" : "Send message"} aria-busy=${view.sending} ?disabled=${!!this.voice || view.pending || view.sending || !view.connected || (!busy && view.draft.trim() === "" && view.references.length === 0)} @click=${() => { this.action((runtime, state) => busy ? runtime.request(state, "stop", { threadId: state.threadId }) : runtime.send(state)); }}>${view.sending ? html`<span class="send-spinner" aria-hidden="true"></span>` : busy ? html`<span class="stop-icon" aria-hidden="true"></span>` : html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20V4m-7 7 7-7 7 7"></path></svg>`}</button>
 +        </div>
 +      </footer>
 +      <div class="connection-status" role="status">${view.pending ? "Working…" : text(snapshot["status"]) || (view.connected ? "Ready" : "Connecting…")}</div>
@@ -1963,15 +2042,21 @@ index 0000000000000000000000000000000000000000..7345f5ec7814a49deb47a358e45504b7
 +      event.preventDefault();
 +      if (!(event.target instanceof HTMLFormElement)) return;
 +      const form = new FormData(event.target);
-+      answer({ answers: Object.fromEntries(questions.map((question) => { const key = text(object(question)["id"]); return [key, text(form.get(key))]; })) });
++      const fields = event.target.querySelectorAll(".approval-question");
++      answer({ answers: Object.fromEntries(questions.map((question, index) => {
++        const key = text(object(question)["id"]);
++        const custom = fields[index]?.querySelector<HTMLInputElement>(".other-answer")?.value ?? "";
++        return [key, custom.trim() !== "" ? custom : text(form.get(key))];
++      })) });
 +    }}><strong>${text(approval["method"])}</strong>
 +      <small>${view.context.machine.id} / ${view.context.workspace.label} / ${view.threadId}</small>
 +      <pre>${[text(params["command"]), text(params["cwd"]), text(params["reason"]), text(params["grantRoot"])].filter((value) => value !== "").join("\n") || "Review the associated tool changes before approving."}</pre>
 +      ${questions.length > 0 ? html`${questions.map((entry) => {
 +        const question = object(entry); const options = array(question["options"]);
-+        return html`<label>${text(question["question"])}${options.length > 0
++        return html`<div class="approval-question"><label>${text(question["question"])}${options.length > 0
 +          ? html`<select name=${text(question["id"])} required>${options.map((option) => html`<option value=${text(object(option)["label"])}>${text(object(option)["label"])} — ${text(object(option)["description"])}</option>`)}</select>`
-+          : html`<input name=${text(question["id"])} type=${question["isSecret"] === true ? "password" : "text"} required maxlength="4000">`}</label>`;
++          : html`<input name=${text(question["id"])} type=${question["isSecret"] === true ? "password" : "text"} required maxlength="4000">`}</label>
++          ${options.length > 0 && question["isOther"] === true ? html`<label>Other answer (optional)<input class="other-answer" type=${question["isSecret"] === true ? "password" : "text"} maxlength="4000" placeholder="Enter a custom answer instead of the selected option"></label>` : nothing}</div>`;
 +      })}<button type="submit" ?disabled=${view.pending}>Submit answers</button>` : html`
 +        <button type="button" ?disabled=${view.pending} @click=${() => { answer({ decision: "accept" }); }}>Allow once</button>
 +        <button type="button" ?disabled=${view.pending} @click=${() => { answer({ decision: "decline" }); }}>Deny</button>
@@ -2041,7 +2126,7 @@ index 0000000000000000000000000000000000000000..7345f5ec7814a49deb47a358e45504b7
 +    .permission-copy { flex:1; min-width:0; } .permission-title { display:block; font-size:14px; } .permission-description { display:block; margin-top:2px; font-size:12px; line-height:1.4; color:var(--pi-muted,#888); }
 +    .permission-check { flex:none; width:20px; text-align:center; font-size:20px; }
 +    .permission-picker .permission-warning,.permission-warning .permission-description { color:var(--permission-warning); }
-+    .primary { display:grid; place-items:center; flex:none; width:28px; height:28px; padding:0; border-radius:50%; background:var(--pi-text,#171717); color:var(--pi-bg,#fff); font-size:18px; line-height:1; } .primary:hover { background:var(--pi-muted,#666); } .stop-icon { width:10px; height:10px; border-radius:2px; background:currentColor; }
++    .primary { display:grid; place-items:center; flex:none; width:28px; height:28px; padding:0; border-radius:50%; background:light-dark(#dededb,#c4c4c1); color:#242424; line-height:1; } .primary:hover:not(:disabled) { background:light-dark(#cececb,#d6d6d3); } .primary svg { width:18px; height:18px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; } .stop-icon { width:10px; height:10px; border-radius:2px; background:currentColor; }
 +    .message-time { white-space:nowrap; font-size:12px; }
 +    .copy-button { display:inline-flex; align-items:center; justify-content:center; width:28px; height:24px; padding:3px; border-radius:50%; }
 +    .copy-button svg { width:18px; height:18px; fill:none; stroke:currentColor; stroke-width:1.5; }
@@ -2063,6 +2148,15 @@ index 0000000000000000000000000000000000000000..7345f5ec7814a49deb47a358e45504b7
 +    .add-item svg,.plan-toggle svg { flex:none; width:20px; height:20px; fill:none; stroke:currentColor; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }
 +    .add-description { color:var(--pi-muted,#888); } .add-check { margin-left:auto; }
 +    .plan-toggle { display:flex; align-items:center; gap:5px; padding:5px 8px; color:var(--pi-muted,#888); white-space:nowrap; }
++    .plan-toggle .plan-close-icon { display:none; }
++    .plan-close-icon circle { fill:currentColor; stroke:none; }
++    .plan-close-icon path { stroke:var(--pi-bg,#fff); stroke-width:2; }
++    .plan-toggle:not(:disabled):focus-visible>svg:not(.plan-close-icon) { display:none; }
++    .plan-toggle:not(:disabled):focus-visible>.plan-close-icon { display:block; }
++    @media (hover:hover) {
++      .plan-toggle:not(:disabled):hover>svg:not(.plan-close-icon) { display:none; }
++      .plan-toggle:not(:disabled):hover>.plan-close-icon { display:block; }
++    }
 +    .asking-question { padding:6px 16px; color:var(--pi-muted,#888); }
 +    .context-picker>summary[aria-disabled="true"] { opacity:.45; cursor:default; }
 +    .context-menu { padding:0; } .context-heading,.context-navigation,.context-bottom,.context-entry { display:flex; align-items:center; gap:6px; } .context-heading strong,.context-navigation>span,.context-bottom small { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .context-navigation { margin:6px 0; font-size:11px; } .context-filter { width:100%; border-color:var(--pi-border-muted,#ddd); margin-bottom:8px; } .context-entries { max-height:230px; overflow:auto; } .context-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-align:left; } .context-entry>button:last-child { font-size:11px; } .context-menu p { font-size:12px; margin:10px 0; } .context-bottom { margin-top:8px; border-top:1px solid var(--pi-border-muted,#ddd); padding-top:6px; }
@@ -2136,7 +2230,7 @@ index 0000000000000000000000000000000000000000..7345f5ec7814a49deb47a358e45504b7
 +      footer { position:relative; margin:6px 8px 0; padding:10px 8px 4px; border-radius:16px; }
 +      textarea { min-height:56px; max-height:min(120px,24dvh); font-size:16px; resize:none; }
 +      input,select,.composer-controls select { font-size:16px; min-height:44px; }
-+      .composer-controls { display:grid; grid-template-columns:44px minmax(0,1fr) 36px 32px; gap:2px; }
++      .composer-controls { display:grid; grid-template-columns:44px minmax(0,1fr) 36px 28px; gap:2px; }
 +      .add-menu .settings-menu { display:flex; flex-direction:column; gap:8px; border-top:1px solid var(--pi-border-muted,#ddd); margin-top:8px; padding-top:8px; }
 +      .add-menu .settings-menu .permission-picker { position:static; width:100%; max-width:100%; }
 +      .add-menu .settings-menu summary { min-height:44px; padding:10px 5px; white-space:normal; text-align:left; }
@@ -2146,7 +2240,7 @@ index 0000000000000000000000000000000000000000..7345f5ec7814a49deb47a358e45504b7
 +      .add-item { flex-wrap:wrap; } .add-description { font-size:12px; }
 +      .settings-menu .composer-spacer { display:none; }
 +      .context-picker { position:relative; max-width:100%; }
-+      .context-picker>summary { width:44px; height:44px; } .composer-controls>.primary { width:32px; height:32px; min-height:32px; align-self:center; }
++      .context-picker>summary { width:44px; height:44px; } .composer-controls>.primary { width:28px; height:28px; min-height:28px; align-self:center; }
 +      .voice-input { width:36px; min-height:44px; }
 +      .composer-controls>button { min-height:44px; }
 +      .mobile-model-controls { display:flex; align-items:center; justify-content:flex-end; min-width:0; gap:4px; }
@@ -2406,15 +2500,16 @@ index 0000000000000000000000000000000000000000..d3d0bcbd7c51804463cb85883b66abf1
 +export const createCodexConnection: ConnectionFactory = (cwd, event, exited) => new CodexProcess(cwd, event, exited);
 diff --git a/pi-web-plugins/codex/server/codexService.test.ts b/pi-web-plugins/codex/server/codexService.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..bc4fc07a6eaedea1cc5dd7104b503c76e35cef72
+index 0000000000000000000000000000000000000000..8e175cbe79de768e04db5b98713bbd31a0426882
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/codexService.test.ts
-@@ -0,0 +1,340 @@
+@@ -0,0 +1,378 @@
 +import { mkdtemp, mkdir, writeFile, symlink, rm } from "node:fs/promises";
 +import { join } from "node:path";
 +import { tmpdir } from "node:os";
 +import { afterEach, describe, expect, it, vi } from "vitest";
 +import type { ServerPluginPeerRequestContext, ServerPluginPeerChannelOpenContext } from "@jmfederico/pi-web/server-plugin-api";
++import { cloneBoundedPluginBackendJson, PLUGIN_BACKEND_RESPONSE_JSON_MAX_BYTES } from "../../../src/shared/pluginBackendProtocol.js";
 +import { CodexService } from "./codexService.js";
 +import type { CodexConnection } from "./codexProtocol.js";
 +import { array, object, type RecordValue } from "./protocol.js";
@@ -2450,6 +2545,34 @@ index 0000000000000000000000000000000000000000..bc4fc07a6eaedea1cc5dd7104b503c76
 +}
 +
 +describe("Codex workspace service", () => {
++  it("bounds large UTF-8 snapshots without losing timeline entries or approval details", async () => {
++    const f = fixture(); await f.call("create");
++    for (let i = 0; i < 6; i++) f.emit({ method: "item/completed", params: { threadId: "new", item: {
++      id: `change-${String(i)}`, type: "fileChange", changes: Array.from({ length: 100 }, (_, j) => ({ path: `file-${String(j)}`, kind: "update", diff: "界".repeat(16384) })),
++    } } });
++    f.emit({ id: "approval", method: "item/commandExecution/requestApproval", params: { threadId: "new", command: "check changes" } });
++    const snapshot = await f.call("snapshot", { threadId: "new" });
++    expect(() => cloneBoundedPluginBackendJson(snapshot, "result", PLUGIN_BACKEND_RESPONSE_JSON_MAX_BYTES)).not.toThrow();
++    expect(array(snapshot["items"])).toHaveLength(6);
++    expect(snapshot["total"]).toBe(6);
++    expect(JSON.stringify(snapshot)).toContain("Details omitted");
++    expect(array(snapshot["approvals"])).toHaveLength(1);
++    expect(JSON.stringify(snapshot["approvals"])).toContain("check changes");
++    // Compacting a response must not modify the cached original details.
++    const earlier = await f.call("snapshot", { threadId: "new", offset: 5 });
++    expect(array(object(array(earlier["items"])[0])["changes"])).toHaveLength(100);
++  });
++  it("keeps complete recent input history within the response byte budget", async () => {
++    const f = fixture(); await f.call("create");
++    for (let i = 0; i < 100; i++) f.emit({ method: "item/completed", params: { threadId: "new", item: { id: `input-${String(i)}`, type: "userMessage", content: [{ text: "界".repeat(64000) + String(i) }] } } });
++    const snapshot = await f.call("snapshot", { threadId: "new" });
++    expect(() => cloneBoundedPluginBackendJson(snapshot, "result", PLUGIN_BACKEND_RESPONSE_JSON_MAX_BYTES)).not.toThrow();
++    const history = array(snapshot["inputHistory"]);
++    expect(history.length).toBeLessThan(100);
++    expect(history.at(-1)).toBe("界".repeat(64000) + "99");
++    expect(array(snapshot["items"])).toHaveLength(40);
++  });
++
 +  it("retains Codex turn timestamps for stored and resumed messages", async () => {
 +    const f = fixture();
 +    const saved = { id: "saved", cwd: "/work/one", turns: [{ id: "old", status: "completed", startedAt: 1700000000, completedAt: 1700000060, items: [{ id: "answer", type: "agentMessage", phase: "final_answer", text: "Saved" }] }] };
@@ -2513,6 +2636,15 @@ index 0000000000000000000000000000000000000000..bc4fc07a6eaedea1cc5dd7104b503c76
 +    expect(starts.at(-1)?.[1]).toMatchObject({ collaborationMode: { mode: "default", settings: { model: "chosen", reasoning_effort: "low", developer_instructions: null } } });
 +    f.emit({ method: "thread/settings/updated", params: { threadId: "new", threadSettings: { model: "actual-model", effort: "high", collaborationMode: { mode: "plan" } } } });
 +    expect(await f.call("snapshot", { threadId: "new" })).toMatchObject({ mode: "plan" });
++  });
++  it.each(["default", "plan"])("forwards matching model and effort through both Codex settings paths in %s mode", async (mode) => {
++    const f = fixture();
++    await f.call("create");
++    await f.call("send", { threadId: "new", text: "hello", mode, model: "chosen", effort: "xhigh" });
++    expect(f.request).toHaveBeenCalledWith("turn/start", expect.objectContaining({
++      model: "chosen", effort: "xhigh",
++      collaborationMode: { mode, settings: { model: "chosen", reasoning_effort: "xhigh", developer_instructions: null } },
++    }));
 +  });
 +  it("rejects unsupported modes and fails clearly when Codex has not returned a model", async () => {
 +    const f = fixture();
@@ -2752,10 +2884,10 @@ index 0000000000000000000000000000000000000000..bc4fc07a6eaedea1cc5dd7104b503c76
 +});
 diff --git a/pi-web-plugins/codex/server/codexService.ts b/pi-web-plugins/codex/server/codexService.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..fb94fea1177d2db635b768b377d67ec7b64b12b6
+index 0000000000000000000000000000000000000000..2f698172d475ecbbe809160397f75022aa96408e
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/codexService.ts
-@@ -0,0 +1,518 @@
+@@ -0,0 +1,550 @@
 +import { isAbsolute, relative, resolve, sep } from "node:path";
 +import { realpath, stat } from "node:fs/promises";
 +import type { JsonValue, ServerPluginPeerRequestContext, ServerPluginPeerChannelOpenContext, ServerPluginPeerChannel } from "@jmfederico/pi-web/server-plugin-api";
@@ -2929,8 +3061,8 @@ index 0000000000000000000000000000000000000000..fb94fea1177d2db635b768b377d67ec7
 +      if (input["version"] === thread.version) return { changed: false };
 +      const offset = typeof input["offset"] === "number" ? Math.max(0, Math.min(512, Math.floor(input["offset"]))) : 0;
 +      const end = Math.max(0, thread.items.size - offset);
-+      return { changed: true, id, mode: thread.mode, model: thread.model, effort: thread.effort, version: thread.version, status: thread.status, busy: thread.busy, error: thread.error,
-+        inputHistory: [...thread.inputHistory.values()], items: [...thread.items.values()].slice(Math.max(0, end - 40), end), offset, total: thread.items.size, approvals: [...thread.approvals.values()], policy: thread.policy };
++      return this.boundedSnapshot({ changed: true, id, mode: thread.mode, model: thread.model, effort: thread.effort, version: thread.version, status: thread.status, busy: thread.busy, error: thread.error,
++        inputHistory: [...thread.inputHistory.values()], items: [...thread.items.values()].slice(Math.max(0, end - 40), end), offset, total: thread.items.size, approvals: [...thread.approvals.values()], policy: thread.policy });
 +    }
 +    if (context.operation === "send") {
 +      let prompt = text(input["text"]);
@@ -3025,6 +3157,38 @@ index 0000000000000000000000000000000000000000..fb94fea1177d2db635b768b377d67ec7
 +    thread.version++; this.notify(thread);
 +    state.connection.reply(requestId, response);
 +    return { accepted: true };
++  }
++
++  private boundedSnapshot(snapshot: RecordValue): RecordValue {
++    // Leave headroom below the host's 8 MiB UTF-8 JSON response limit.
++    const limit = 7 * 1024 * 1024;
++    const size = (value: JsonValue): number => Buffer.byteLength(JSON.stringify(value), "utf8");
++    let bytes = size(snapshot);
++    if (bytes <= limit) return snapshot;
++    const items = array(snapshot["items"]);
++    const largest = items.map((item, index) => ({ index, bytes: size(item) })).sort((a, b) => b.bytes - a.bytes);
++    for (const entry of largest) {
++      if (bytes <= limit) break;
++      const item = object(items[entry.index]);
++      // Keep every timeline entry and page boundary. Fall back to the existing
++      // plain-text renderer instead of dropping entire file-change entries.
++      const compact: RecordValue = {};
++      for (const key of ["id", "kind", "status", "turnId", "phase", "turnStartedAt", "turnCompletedAt", "durationMs", "turnDurationMs", "exitCode"]) {
++        if (item[key] !== undefined) compact[key] = item[key];
++      }
++      compact["text"] = bounded(text(item["text"]), 4096) + "\n[Details omitted to fit response limit; full history is available in Codex CLI]";
++      const compactBytes = size(compact);
++      if (compactBytes < entry.bytes) { items[entry.index] = compact; bytes += compactBytes - entry.bytes; }
++    }
++    // History navigation is optional; keep complete recent prompts, never send
++    // truncated prompts that a user might accidentally submit as original text.
++    const history = array(snapshot["inputHistory"]);
++    while (bytes > limit && history.length > 0) {
++      const removed = history.shift();
++      if (removed !== undefined) bytes -= size(removed) + (history.length > 0 ? 1 : 0);
++    }
++    if (size(snapshot) > limit) throw new Error("Pending Codex interaction exceeds the response limit. Resolve it in Codex CLI before reconnecting.");
++    return snapshot;
 +  }
 +
 +  private async checkWorkspaces(): Promise<void> {

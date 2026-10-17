@@ -19,7 +19,7 @@ console.log([process.env.PI_WEB_DATA_DIR, process.env.PI_WEB_SESSIOND_SOCKET, pr
 setInterval(() => {}, 1000);
 `, { mode: 0o755 });
   }
-  script('curl', '/bin/sleep 0.05; exit 0');
+  script('curl', '/bin/sleep 0.05; printf 200; exit 0');
   script('ss', 'exit 0');
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}` };
   for (const key of Object.keys(env)) if (key.startsWith('PI_WEB_')) delete env[key];
@@ -218,11 +218,11 @@ test('service environment cannot override config or defaults', () => {
   try {
     const env = { ...process.env, PI_WEB_PORT: '9999', PI_WEB_HOST: 'bad-host', PI_WEB_RUN_DIR: '/bad-path' };
     const run = () => spawnSync('bash', [join(f.root, 'scripts/run.sh'), 'status'], { env, encoding: 'utf8' });
-    // Use a live PID to expose the selected host and port in status output.
+    // Start owned processes to expose the selected host and port in status output.
     for (const port of ['8024', '8425']) {
       const dir = join(f.root, 'data/pi-web', port);
-      mkdirSync(dir, { recursive: true });
-      writeFileSync(join(dir, 'server.pid'), String(process.pid));
+      assert.equal(f.run('start', port).status, 0);
+      for (const service of ['server', 'sessiond']) f.pids.push(Number(readFileSync(join(dir, `${service}.pid`), 'utf8')));
     }
     writeFileSync(join(f.root, 'data/pi-web.conf'), 'PI_WEB_PORT=8425\nPI_WEB_HOST=127.0.0.1\n');
     assert.match(run().stdout, /http:\/\/127\.0\.0\.1:8425/);
@@ -266,6 +266,58 @@ for (const running of [false, true]) {
         }
       }
       assert.match(f.run('status').stdout, /:8425/);
+    } finally { f.cleanup(); }
+  });
+}
+
+for (const failure of ['server', 'sessiond', 'http']) {
+  test(`start reports failure when ${failure} is unavailable`, () => {
+    const f = fixture();
+    try {
+      writeFileSync(join(f.root, 'bin/sleep'), '#!/bin/sh\n/bin/sleep 0.02\n', { mode: 0o755 });
+      if (failure === 'http') writeFileSync(join(f.root, 'bin/curl'), '#!/bin/sh\nprintf 503\n', { mode: 0o755 });
+      else writeFileSync(join(f.root, `bin/pi-web-${failure}`), '#!/bin/sh\nexit 7\n', { mode: 0o755 });
+      const result = f.run('start', '8425');
+      for (const service of ['server', 'sessiond']) {
+        const file = join(f.root, 'data/pi-web/8425', `${service}.pid`);
+        if (existsSync(file)) f.pids.push(Number(readFileSync(file, 'utf8')));
+      }
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /服务未就绪/);
+    } finally { f.cleanup(); }
+  });
+}
+
+test('start replaces stale PID files without accepting or killing unrelated processes', () => {
+  const f = fixture();
+  try {
+    const dir = join(f.root, 'data/pi-web/8425');
+    mkdirSync(dir, { recursive: true });
+    for (const service of ['server', 'sessiond']) writeFileSync(join(dir, `${service}.pid`), String(process.pid));
+    const result = f.run('start', '8425');
+    for (const service of ['server', 'sessiond']) f.pids.push(Number(readFileSync(join(dir, `${service}.pid`), 'utf8')));
+    assert.equal(result.status, 0, result.stderr);
+    for (const pid of f.pids) assert.notEqual(pid, process.pid);
+    process.kill(process.pid, 0);
+    assert.match(result.stdout, /启动 pi-web-server/);
+    assert.match(result.stdout, /启动 pi-web-sessiond/);
+  } finally { f.cleanup(); }
+});
+
+for (const [host, target] of [['127.0.0.2', '127.0.0.2'], ['0.0.0.0', '127.0.0.1'], ['::', '[::1]'], ['::1', '[::1]'], ['[::1]', '[::1]']]) {
+  test(`startup and status probe the configured host ${host}`, () => {
+    const f = fixture();
+    try {
+      writeFileSync(join(f.root, 'bin/curl'), `#!/bin/bash\n[[ "\${@: -1}" == 'http://${target}:8425/' ]] || exit 1\nprintf 200\n`, { mode: 0o755 });
+      const result = f.run('start', '8425', { PI_WEB_HOST: host });
+      for (const service of ['server', 'sessiond']) {
+        const file = join(f.root, 'data/pi-web/8425', `${service}.pid`);
+        if (existsSync(file)) f.pids.push(Number(readFileSync(file, 'utf8')));
+      }
+      assert.equal(result.status, 0, result.stderr);
+      const status = f.run('status');
+      assert.equal(status.status, 0);
+      assert.doesNotMatch(status.stdout, /探测失败/);
     } finally { f.cleanup(); }
   });
 }

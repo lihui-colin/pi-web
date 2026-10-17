@@ -148,12 +148,12 @@ start() {
     fi
 
     # Check before creating either process, so a busy port cannot leave a new daemon behind.
-    if [[ ! -f "$server_pid" ]] || ! kill -0 "$(cat "$server_pid")" 2>/dev/null; then
+    if ! service_running pi-web-server "$server_pid"; then
         check_port_free
     fi
 
     # 会话守护进程
-    if [[ ! -f "$sessiond_pid" ]] || ! kill -0 "$(cat "$sessiond_pid")" 2>/dev/null; then
+    if ! service_running pi-web-sessiond "$sessiond_pid"; then
         echo "启动 pi-web-sessiond ..."
         "${launcher[@]}" pi-web-sessiond </dev/null >"$sessiond_log" 2>&1 &
         echo $! > "$sessiond_pid"
@@ -162,7 +162,7 @@ start() {
     fi
 
     # Web/API 服务
-    if [[ ! -f "$server_pid" ]] || ! kill -0 "$(cat "$server_pid")" 2>/dev/null; then
+    if ! service_running pi-web-server "$server_pid"; then
         echo "启动 pi-web-server -> http://$PI_WEB_HOST:$PI_WEB_PORT"
         if [[ -n "$PI_WEB_PASSWORD" ]]; then
             PI_WEB_PASSWORD="$PI_WEB_PASSWORD" PI_WEB_PORT="$PI_WEB_PORT" PI_WEB_HOST="$PI_WEB_HOST" \
@@ -176,14 +176,43 @@ start() {
         echo "pi-web-server 已在运行 (PID $(cat "$server_pid"))"
     fi
 
-    # 等服务就绪（最多约 15 秒）
+    # Require both owned processes and HTTP readiness; a surviving daemon alone
+    # must not make a failed Web startup look successful.
     for _ in $(seq 1 30); do
-        if curl -s -o /dev/null --max-time 1 "http://127.0.0.1:$PI_WEB_PORT/" 2>/dev/null; then
-            break
+        if service_running pi-web-server "$server_pid" && service_running pi-web-sessiond "$sessiond_pid" && http_ready; then
+            status
+            return 0
         fi
         sleep 0.5
     done
-    status
+    status || true
+    echo "错误：服务未就绪，请检查 $server_log 和 $sessiond_log" >&2
+    return 1
+}
+
+probe_url() {
+    local host="$PI_WEB_HOST"
+    case "$host" in
+        0.0.0.0|'') host=127.0.0.1 ;;
+        ::|'[::]') host='[::1]' ;;
+        *:*) [[ "$host" == \[*\] ]] || host="[$host]" ;;
+    esac
+    printf 'http://%s:%s/' "$host" "$PI_WEB_PORT"
+}
+
+http_ready() {
+    local code
+    code=$(curl --noproxy '*' -s -o /dev/null -w '%{http_code}' --max-time 1 "$(probe_url)" 2>/dev/null) || return 1
+    [[ "$code" =~ ^[23][0-9][0-9]$ || "$code" == 401 || "$code" == 403 ]]
+}
+
+service_running() {
+    local name="$1" pidfile="$2" pid
+    [[ -f "$pidfile" ]] || return 1
+    pid=$(cat "$pidfile")
+    [[ "$pid" =~ ^[1-9][0-9]*$ && "$pid" -gt 1 ]] || return 1
+    process_running "$pid" || return 1
+    [[ ! -d /proc ]] || is_instance_process "$pid" "$name"
 }
 
 # Match both executable identity and this instance's run directory before recovering a PID.
@@ -267,14 +296,14 @@ stop() {
 
 status() {
     local any=0
-    if [[ -f "$server_pid" ]] && kill -0 "$(cat "$server_pid")" 2>/dev/null; then
+    if service_running pi-web-server "$server_pid"; then
         echo "pi-web-server   运行中 (PID $(cat "$server_pid")) -> http://$PI_WEB_HOST:$PI_WEB_PORT"
-        curl -s -o /dev/null -w "   HTTP 状态: %{http_code}\n" "http://127.0.0.1:$PI_WEB_PORT/" 2>/dev/null || echo "   探测失败"
+        curl --noproxy '*' --max-time 1 -s -o /dev/null -w "   HTTP 状态: %{http_code}\n" "$(probe_url)" 2>/dev/null || echo "   探测失败"
         any=1
     else
         echo "pi-web-server   未在运行"
     fi
-    if [[ -f "$sessiond_pid" ]] && kill -0 "$(cat "$sessiond_pid")" 2>/dev/null; then
+    if service_running pi-web-sessiond "$sessiond_pid"; then
         echo "pi-web-sessiond 运行中 (PID $(cat "$sessiond_pid"))"
         any=1
     else
