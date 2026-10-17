@@ -4577,6 +4577,184 @@ index 0000000000000000000000000000000000000000..4b12dec425526f6d8acd01da9425d5b6
 +    for (const name of names) { const descriptor = original.get(name); if (descriptor === undefined) delete globalThis[name]; else Object.defineProperty(globalThis, name, descriptor); }
 +  }
 +});
+diff --git a/src/client/src/appShell/appShellController.ts b/src/client/src/appShell/appShellController.ts
+index 6923753fbf186cdf62d20c2e01c386a3efacd971..959fb4616375250e94d43dbdb7b6271f7bd7a4cd 100644
+--- a/src/client/src/appShell/appShellController.ts
++++ b/src/client/src/appShell/appShellController.ts
+@@ -11,6 +11,7 @@ export interface AppShellControllerOptions {
+   mobileNavigationMedia?: MediaQueryList | undefined;
+   pwaDisplayModeMedia?: MediaQueryList[] | undefined;
+   viewportPositionRepairer?: ViewportPositionRepairer | undefined;
++  visualViewport?: (EventTarget & Pick<VisualViewport, "height" | "offsetTop" | "scale">) | null;
+ }
+ 
+ export class AppShellController implements ReactiveController {
+@@ -19,16 +20,18 @@ export class AppShellController implements ReactiveController {
+   private readonly mobileNavigationMedia: MediaQueryList | undefined;
+   private readonly pwaDisplayModeMedia: MediaQueryList[];
+   private readonly viewportPositionRepairer: ViewportPositionRepairer;
++  private readonly visualViewport: AppShellControllerOptions["visualViewport"];
+   isMobileNavigationLayout: boolean;
+   isPwaDisplayMode: boolean;
+ 
+-  constructor(private readonly host: ReactiveControllerHost, options: AppShellControllerOptions = {}) {
++  constructor(private readonly host: ReactiveControllerHost & Pick<HTMLElement, "style">, options: AppShellControllerOptions = {}) {
+     host.addController(this);
+     this.desktopSideBySideMedia = options.desktopSideBySideMedia ?? createLayoutMedia(DESKTOP_SIDE_BY_SIDE_MEDIA_QUERY);
+     this.isDesktopSideBySideLayout = this.desktopSideBySideMedia?.matches ?? true;
+     this.mobileNavigationMedia = options.mobileNavigationMedia ?? createLayoutMedia(MOBILE_NAVIGATION_MEDIA_QUERY);
+     this.pwaDisplayModeMedia = options.pwaDisplayModeMedia ?? createPwaDisplayModeMedia();
+     this.viewportPositionRepairer = options.viewportPositionRepairer ?? new ViewportPositionRepairer();
++    this.visualViewport = options.visualViewport === undefined ? (typeof window === "undefined" ? null : window.visualViewport) : options.visualViewport;
+     this.isMobileNavigationLayout = this.mobileNavigationMedia?.matches ?? false;
+     this.isPwaDisplayMode = detectPwaDisplayMode(this.pwaDisplayModeMedia);
+   }
+@@ -37,12 +40,18 @@ export class AppShellController implements ReactiveController {
+     this.desktopSideBySideMedia?.addEventListener("change", this.onDesktopSideBySideMediaChange);
+     this.mobileNavigationMedia?.addEventListener("change", this.onMobileNavigationMediaChange);
+     for (const media of this.pwaDisplayModeMedia) media.addEventListener("change", this.onPwaDisplayModeChange);
++    this.visualViewport?.addEventListener("resize", this.syncVisualViewport);
++    this.visualViewport?.addEventListener("scroll", this.syncVisualViewport);
++    this.syncVisualViewport();
+   }
+ 
+   hostDisconnected(): void {
+     this.desktopSideBySideMedia?.removeEventListener("change", this.onDesktopSideBySideMediaChange);
+     this.mobileNavigationMedia?.removeEventListener("change", this.onMobileNavigationMediaChange);
+     for (const media of this.pwaDisplayModeMedia) media.removeEventListener("change", this.onPwaDisplayModeChange);
++    this.visualViewport?.removeEventListener("resize", this.syncVisualViewport);
++    this.visualViewport?.removeEventListener("scroll", this.syncVisualViewport);
++    this.clearVisualViewport();
+     this.viewportPositionRepairer.clear();
+   }
+ 
+@@ -70,6 +79,25 @@ export class AppShellController implements ReactiveController {
+     return this.isMobileNavigationLayout || this.isPwaDisplayMode;
+   }
+ 
++  private readonly syncVisualViewport = (): void => {
++    const viewport = this.visualViewport;
++    // iOS keyboards shrink and pan the visual viewport while 100dvh stays tall.
++    // Size the fixed shell directly so focused editors remain mounted and visible.
++    // Leave pinch zoom to the browser instead of reflowing the UI into the zoomed area.
++    if (!viewport || viewport.height <= 0 || Math.abs(viewport.scale - 1) > 0.01) {
++      this.clearVisualViewport();
++      return;
++    }
++    this.host.style.setProperty("--pi-visual-viewport-height", `${String(viewport.height)}px`);
++    this.host.style.setProperty("--pi-visual-viewport-top", `${String(Math.max(0, viewport.offsetTop))}px`);
++  };
++
++  private clearVisualViewport(): void {
++    if (!this.visualViewport) return;
++    this.host.style.removeProperty("--pi-visual-viewport-height");
++    this.host.style.removeProperty("--pi-visual-viewport-top");
++  }
++
+   private readonly onDesktopSideBySideMediaChange = (event: MediaQueryListEvent) => {
+     if (this.isDesktopSideBySideLayout === event.matches) return;
+     this.isDesktopSideBySideLayout = event.matches;
+diff --git a/src/client/src/appShell/appShellController.viewport.test.ts b/src/client/src/appShell/appShellController.viewport.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..5c1f6e1b6018b9004370bc8f29dec8fbe9587379
+--- /dev/null
++++ b/src/client/src/appShell/appShellController.viewport.test.ts
+@@ -0,0 +1,82 @@
++// @vitest-environment happy-dom
++
++import { afterEach, describe, expect, it, vi } from "vitest";
++import { AppShellController } from "./appShellController";
++
++class Viewport extends EventTarget {
++  height = 844;
++  offsetTop = 0;
++  scale = 1;
++}
++
++const controllers: AppShellController[] = [];
++afterEach(() => {
++  for (const controller of controllers.splice(0)) controller.hostDisconnected();
++});
++
++function fixture(viewport: Viewport | null = new Viewport()) {
++  const style = document.createElement("div").style;
++  const host = { style, addController: vi.fn(), removeController: vi.fn(), requestUpdate: vi.fn(), updateComplete: Promise.resolve(true) };
++  const controller = new AppShellController(host, { visualViewport: viewport });
++  controllers.push(controller);
++  controller.hostConnected();
++  return { viewport, controller, style };
++}
++
++describe("app shell visual viewport", () => {
++  it("tracks keyboard resize and pan without a layout viewport resize", () => {
++    const viewport = new Viewport();
++    const { style } = fixture(viewport);
++    expect(style.getPropertyValue("--pi-visual-viewport-height")).toBe("844px");
++    viewport.height = 420;
++    viewport.dispatchEvent(new Event("resize"));
++    expect(style.getPropertyValue("--pi-visual-viewport-height")).toBe("420px");
++    viewport.offsetTop = 80;
++    viewport.dispatchEvent(new Event("scroll"));
++    expect(style.getPropertyValue("--pi-visual-viewport-top")).toBe("80px");
++    viewport.height = 844;
++    viewport.offsetTop = 0;
++    viewport.dispatchEvent(new Event("resize"));
++    expect(style.getPropertyValue("--pi-visual-viewport-height")).toBe("844px");
++    expect(style.getPropertyValue("--pi-visual-viewport-top")).toBe("0px");
++  });
++
++  it("keeps native pinch zoom and resumes sizing when zoom returns to normal", () => {
++    const viewport = new Viewport();
++    const { style } = fixture(viewport);
++    viewport.height = 300;
++    viewport.offsetTop = 60;
++    viewport.scale = 2;
++    viewport.dispatchEvent(new Event("resize"));
++    expect(style.getPropertyValue("--pi-visual-viewport-height")).toBe("");
++    expect(style.getPropertyValue("--pi-visual-viewport-top")).toBe("");
++    viewport.scale = 1;
++    viewport.dispatchEvent(new Event("resize"));
++    expect(style.getPropertyValue("--pi-visual-viewport-height")).toBe("300px");
++    expect(style.getPropertyValue("--pi-visual-viewport-top")).toBe("60px");
++  });
++
++  it("uses CSS fallback when the API is unavailable or temporarily reports no height", () => {
++    expect(fixture(null).style.getPropertyValue("--pi-visual-viewport-height")).toBe("");
++    const viewport = new Viewport();
++    const { style } = fixture(viewport);
++    viewport.height = 0;
++    viewport.dispatchEvent(new Event("resize"));
++    expect(style.getPropertyValue("--pi-visual-viewport-height")).toBe("");
++  });
++
++  it("removes viewport listeners and overrides on disconnect, then reads current size on reconnect", () => {
++    const viewport = new Viewport();
++    const { controller, style } = fixture(viewport);
++    controller.hostDisconnected();
++    viewport.height = 420;
++    viewport.offsetTop = 80;
++    viewport.dispatchEvent(new Event("resize"));
++    viewport.dispatchEvent(new Event("scroll"));
++    expect(style.getPropertyValue("--pi-visual-viewport-height")).toBe("");
++    expect(style.getPropertyValue("--pi-visual-viewport-top")).toBe("");
++    controller.hostConnected();
++    expect(style.getPropertyValue("--pi-visual-viewport-height")).toBe("420px");
++    expect(style.getPropertyValue("--pi-visual-viewport-top")).toBe("80px");
++  });
++});
+diff --git a/src/client/src/components/shared.ts b/src/client/src/components/shared.ts
+index 69e417b4bd9aa0a08fabbc688d05dc8d9f697057..cd74d65d7c9c5ca2065d0476e0e2f7b2782221c0 100644
+--- a/src/client/src/components/shared.ts
++++ b/src/client/src/components/shared.ts
+@@ -48,7 +48,7 @@ export interface CompletionItem {
+ 
+ export const appStyles = css`
+   /* Mobile browsers already subtract browser controls from 100dvh; reserve bottom safe area only in standalone PWA modes. */
+-  :host { --pi-app-safe-area-bottom: 0px; position: fixed; top: 0; right: 0; left: 0; display: block; height: 100dvh; box-sizing: border-box; overflow: hidden; padding: env(safe-area-inset-top) env(safe-area-inset-right) var(--pi-app-safe-area-bottom) env(safe-area-inset-left); color: var(--pi-text); background: var(--pi-bg); font: 14px system-ui, sans-serif; }
++  :host { --pi-app-safe-area-bottom: 0px; position: fixed; top: var(--pi-visual-viewport-top, 0px); right: 0; left: 0; display: block; height: var(--pi-visual-viewport-height, 100dvh); box-sizing: border-box; overflow: hidden; padding: env(safe-area-inset-top) env(safe-area-inset-right) var(--pi-app-safe-area-bottom) env(safe-area-inset-left); color: var(--pi-text); background: var(--pi-bg); font: 14px system-ui, sans-serif; }
+   :host([pwa-display-mode]) { --pi-app-safe-area-bottom: env(safe-area-inset-bottom); }
+   @media (display-mode: standalone), (display-mode: fullscreen), (display-mode: minimal-ui) {
+     :host { --pi-app-safe-area-bottom: env(safe-area-inset-bottom); }
 diff --git a/src/client/src/navigationPreferences.test.ts b/src/client/src/navigationPreferences.test.ts
 index a7d45004cf0fe684818cc84063a8aad197065a85..d7f5c6cac903f5dcffb684038158d4f5896be282 100644
 --- a/src/client/src/navigationPreferences.test.ts
