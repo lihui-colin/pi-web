@@ -1599,7 +1599,7 @@ index 00000000..788651b9
 +});
 diff --git a/pi-web-plugins/codex/CodexPanel.ts b/pi-web-plugins/codex/CodexPanel.ts
 new file mode 100644
-index 00000000..a3ccfd5b
+index 0000000000000000000000000000000000000000..668ecd15288d09db69c4b896dc03e3a6be6e6cd4
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.ts
 @@ -0,0 +1,813 @@
@@ -2397,7 +2397,7 @@ index 00000000..a3ccfd5b
 +      .permission-heading { flex-wrap:wrap; gap:4px 12px; }
 +      .add-item { flex-wrap:wrap; } .add-description { font-size:12px; }
 +      .context-picker { position:relative; max-width:100%; }
-+      .context-picker>summary { width:44px; height:44px; } .composer-trailing>.primary { width:28px; height:28px; min-height:28px; align-self:center; }
++      .context-picker>summary,.composer-trailing>.primary { width:28px; height:28px; min-height:28px; align-self:center; }
 +      .voice-input { width:36px; min-height:44px; }
 +      .composer-trailing>button { min-height:44px; }
 +      .composer-trailing .model-picker { position:static; }
