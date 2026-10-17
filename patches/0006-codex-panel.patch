@@ -11,10 +11,10 @@ index 0000000000000000000000000000000000000000..b864cc1c7375582254410edbe397fcf2
 +Add an optional Codex workspace plugin with persistent conversations, streamed responses, tool output, approvals, and model selection using the workspace machine's Codex CLI. Restart sessiond after installing the plugin.
 diff --git a/pi-web-plugins/codex/CodexBrowserRuntime.ts b/pi-web-plugins/codex/CodexBrowserRuntime.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..56c8e7dd23da973fe30602fc785da6d3c370e392
+index 0000000000000000000000000000000000000000..3b1a125b51c67515101330b8ec6a7ee303fc0729
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexBrowserRuntime.ts
-@@ -0,0 +1,327 @@
+@@ -0,0 +1,326 @@
 +import type { PluginPeerChannel, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
 +import { array, errorText, object, text, permissionMode, type PermissionMode, chatMode, type ChatMode, type RecordValue } from "./server/protocol.js";
 +
@@ -249,17 +249,16 @@ index 0000000000000000000000000000000000000000..56c8e7dd23da973fe30602fc785da6d3
 +    view.polling = true;
 +    const generation = view.generation;
 +    try {
-+      if (view.threadId === "") {
-+        const activity = await this.request(view, "activity");
-+        if (generation !== view.generation || this.isDisposed()) return;
-+        const busyIds = new Set(array(activity["busyThreadIds"]).map(text));
++      const home = view.threadId === "";
++      const snapshot = await this.request(view, home ? "activity" : "snapshot", home ? {} : { threadId: view.threadId, version: view.snapshot["version"] ?? -1, offset: view.offset });
++      if (generation !== view.generation || this.isDisposed()) return;
++      if (view.error === this.syncErrors.get(view)) { view.error = ""; this.syncErrors.delete(view); this.changed(view); }
++      if (home) {
++        const busyIds = new Set(array(snapshot["busyThreadIds"]).map(text));
 +        view.threads = view.threads.map((thread) => ({ ...thread, busy: busyIds.has(text(thread["id"])) }));
 +        this.changed(view);
 +        return;
 +      }
-+      const snapshot = await this.request(view, "snapshot", { threadId: view.threadId, version: view.snapshot["version"] ?? -1, offset: view.offset });
-+      if (generation !== view.generation || this.isDisposed()) return;
-+      if (view.error === this.syncErrors.get(view)) { view.error = ""; this.syncErrors.delete(view); this.changed(view); }
 +      if (snapshot["changed"] === true) {
 +        view.snapshot = snapshot;
 +        if (!view.modeDirty && (snapshot["mode"] === "plan" || snapshot["mode"] === "default")) this.saveMode(view, snapshot["mode"], false);
@@ -344,10 +343,10 @@ index 0000000000000000000000000000000000000000..56c8e7dd23da973fe30602fc785da6d3
 +}
 diff --git a/pi-web-plugins/codex/CodexPanel.test.ts b/pi-web-plugins/codex/CodexPanel.test.ts
 new file mode 100644
-index 00000000..788651b9
+index 0000000000000000000000000000000000000000..0b2299748666df79e50a3008950793198d6e60e9
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.test.ts
-@@ -0,0 +1,1249 @@
+@@ -0,0 +1,1287 @@
 +// @vitest-environment happy-dom
 +import { afterEach, describe, expect, it, vi } from "vitest";
 +import type { PluginPeerChannelOptions, FileTreeResponse, JsonValue, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
@@ -661,6 +660,22 @@ index 00000000..788651b9
 +    await runtime.refresh(view); await panel.updateComplete;
 +    expect(required(panel.shadowRoot).querySelector(".conversation-spinner")).toBeNull();
 +    expect(required(panel.shadowRoot).querySelectorAll(".archive-conversation")).toHaveLength(2);
++  });
++  it.each(["", "thread"])("clears a recovered refresh error in the rendered view (thread=%s)", async (threadId) => {
++    vi.useFakeTimers();
++    const { runtime, view, panel, request } = await fixture();
++    runtime.select(view, threadId);
++    request.mockRejectedValueOnce(new Error("Temporary connection failure"));
++    await runtime.refresh(view); await panel.updateComplete;
++    expect(panel.shadowRoot?.textContent).toContain("Temporary connection failure");
++    request.mockResolvedValue({ busyThreadIds: [], changed: false });
++    await runtime.refresh(view); await panel.updateComplete;
++    expect(view.error).toBe("");
++    expect(panel.shadowRoot?.textContent).not.toContain("Temporary connection failure");
++    view.error = "Message submission failed";
++    panel.requestUpdate(); await panel.updateComplete;
++    await runtime.refresh(view); await panel.updateComplete;
++    expect(panel.shadowRoot?.textContent).toContain("Message submission failed");
 +  });
 +  it("toggles Plan from Add and shows its inline indicator and placeholder", async () => {
 +    const { panel, textarea, view, request } = await fixture();
@@ -1283,6 +1298,28 @@ index 00000000..788651b9
 +    expect(picker.open).toBe(false);
 +  });
 +
++  it.each(["", "thread"])("focuses the clicked composer and preserves its caret through updates (thread=%s)", async (threadId) => {
++    const { panel, view, runtime, textarea } = await fixture();
++    runtime.select(view, threadId);
++    runtime.saveDraft(view, "first second");
++    await panel.updateComplete;
++    textarea.setSelectionRange(5, 5);
++    textarea.click();
++    expect(panel.shadowRoot?.activeElement).toBe(textarea);
++
++    // The resize observer and incoming snapshots both request a panel update.
++    view.snapshot = { items: [{ id: "answer", kind: "agentMessage", text: "Updated answer" }] };
++    panel.requestUpdate(); await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelector("textarea")).toBe(textarea);
++    expect(panel.shadowRoot?.activeElement).toBe(textarea);
++    expect([textarea.selectionStart, textarea.selectionEnd]).toEqual([5, 5]);
++
++    const add = required(panel.shadowRoot?.querySelector<HTMLElement>('.context-picker > summary'));
++    add.focus(); add.click();
++    panel.requestUpdate(); await panel.updateComplete;
++    expect(panel.shadowRoot?.activeElement).toBe(add);
++  });
++
 +  it.each([".header-heading>.back-button", ".new-chat"])("returns from a conversation with the home draft via %s", async (returnSelector) => {
 +    const { panel, view, runtime, request, textarea } = await fixture();
 +    expect(panel.shadowRoot?.activeElement).not.toBe(textarea);
@@ -1599,10 +1636,10 @@ index 00000000..788651b9
 +});
 diff --git a/pi-web-plugins/codex/CodexPanel.ts b/pi-web-plugins/codex/CodexPanel.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..668ecd15288d09db69c4b896dc03e3a6be6e6cd4
+index 0000000000000000000000000000000000000000..a49003b73e2b4768a913c1fa532bed6c024d6c65
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.ts
-@@ -0,0 +1,813 @@
+@@ -0,0 +1,818 @@
 +import { LitElement, css, html, svg, nothing } from "lit";
 +import { property } from "lit/decorators.js";
 +import { repeat } from "lit/directives/repeat.js";
@@ -2012,10 +2049,11 @@ index 0000000000000000000000000000000000000000..668ecd15288d09db69c4b896dc03e3a6
 +    return repeat(threads, (thread) => text(thread["id"]), (thread) => {
 +      const id = text(thread["id"]);
 +      const confirming = this.archiveConfirmation === id;
++      const busy = thread["busy"] === true;
 +      return html`
-+      <div class=${`conversation-row${confirming ? " confirming-archive" : ""}`}><button class="conversation-card" ?disabled=${view.pending || !view.connected} @click=${() => { this.cancelArchive(); this.openConversation(view, id); }}>
-+        <span class="conversation-copy"><span class="conversation-title">${text(thread["preview"]) || "Untitled conversation"}</span>${thread["busy"] === true ? html`<span class="conversation-spinner" role="status" aria-label="Response in progress" title="Response in progress"></span>` : html`<span class="conversation-time">${this.conversationTime(thread)}</span>`}</span>
-+      </button>${thread["busy"] === true ? nothing : html`<button class=${`archive-conversation${confirming ? " archive-confirm" : ""}`} aria-label=${`${confirming ? "Confirm archive" : "Archive"} ${text(thread["preview"]) || "Untitled conversation"}`} title=${confirming ? "Confirm archive" : "Archive conversation"} ?disabled=${view.pending || !view.connected} @click=${() => { this.archiveConversation(view, id); }}>${confirming ? "Confirm" : html`<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 8v12h16V8M3 3h18v5H3zM9 12h6"></path></svg>`}</button>`}</div>`;
++      <div class=${`conversation-row${busy ? " running" : ""}${confirming ? " confirming-archive" : ""}`}><button class="conversation-card" ?disabled=${view.pending || !view.connected} @click=${() => { this.cancelArchive(); this.openConversation(view, id); }}>
++        <span class="conversation-copy"><span class="conversation-title">${text(thread["preview"]) || "Untitled conversation"}</span>${busy ? nothing : html`<span class="conversation-time">${this.conversationTime(thread)}</span>`}</span>
++      </button>${busy ? html`<span class="conversation-action conversation-status" role="status" aria-label="Response in progress" title="Response in progress"><span class="conversation-spinner"></span></span>` : html`<button class=${`conversation-action archive-conversation${confirming ? " archive-confirm" : ""}`} aria-label=${`${confirming ? "Confirm archive" : "Archive"} ${text(thread["preview"]) || "Untitled conversation"}`} title=${confirming ? "Confirm archive" : "Archive conversation"} ?disabled=${view.pending || !view.connected} @click=${() => { this.archiveConversation(view, id); }}>${confirming ? "Confirm" : html`<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 8v12h16V8M3 3h18v5H3zM9 12h6"></path></svg>`}</button>`}</div>`;
 +    });
 +  }
 +  private renderConversationHome(view: CodexView) {
@@ -2080,6 +2118,10 @@ index 0000000000000000000000000000000000000000..668ecd15288d09db69c4b896dc03e3a6
 +        </section>` : nothing}
 +        ${view.references.length > 0 ? html`<div class="context-tray" aria-label="Selected workspace context">${view.references.map((path) => html`<span title=${path}>${path}<button aria-label=${`Remove ${path}`} ?disabled=${view.pending} @click=${() => { this.runtime?.saveReferences(view, view.references.filter((entry) => entry !== path)); }}>×</button></span>`)}</div>` : nothing}
 +        <textarea aria-label="Message Codex" enterkeyhint="enter" placeholder=${queueInput ? "Add to the queue, or use Steer after sending..." : view.mode === "plan" ? "Describe your task to generate a plan..." : home ? "Ask Codex to start a new conversation" : "Ask for follow-up changes"} .value=${view.draft}
++          @click=${(event: MouseEvent) => {
++            // Keep focus in the tap gesture, without scrolling or resetting the caret.
++            if (event.currentTarget instanceof HTMLTextAreaElement) event.currentTarget.focus({ preventScroll: true });
++          }}
 +          @input=${(event: Event) => { if (event.target instanceof HTMLTextAreaElement) { this.historyNavigation = undefined; this.runtime?.saveDraft(view, event.target.value); this.requestUpdate(); } }}
 +          @compositionstart=${() => { this.composing = true; }} @compositionend=${() => { this.composing = false; }}
 +          @keydown=${(event: KeyboardEvent) => { this.composerKeydown(event, view); }}></textarea>
@@ -2237,9 +2279,9 @@ index 0000000000000000000000000000000000000000..668ecd15288d09db69c4b896dc03e3a6
 +    .home-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:4px; }
 +    .home-heading h1 { margin:0; font-size:13px; font-weight:600; }
 +    .conversation-list { display:flex; flex-direction:column; }
-+    .conversation-row { position:relative; display:flex; align-items:center; border-radius:6px; } .conversation-row:hover,.conversation-row:focus-within { background:var(--pi-surface-hover,#ededed); } .archive-conversation { position:absolute; right:4px; top:50%; transform:translateY(-50%); display:grid; place-items:center; width:26px; height:26px; padding:5px; opacity:0; pointer-events:none; color:var(--pi-muted,#858585); } .archive-conversation svg { width:16px; height:16px; fill:none; stroke:currentColor; stroke-width:1.7; stroke-linecap:round; stroke-linejoin:round; }
-+    .conversation-card { display:flex; align-items:center; width:100%; min-width:0; min-height:30px; padding:5px 6px; text-align:left; border-radius:6px; } .conversation-card:hover { background:transparent; }
-+    .conversation-row:hover .archive-conversation,.conversation-row:focus-within .archive-conversation { opacity:1; pointer-events:auto; } .conversation-row:hover .conversation-time,.conversation-row:focus-within .conversation-time { opacity:0; } @media(hover:none) { .conversation-row .archive-conversation { opacity:1; pointer-events:auto; width:44px; height:44px; right:0; } .conversation-row .conversation-time { display:none; } .conversation-row .conversation-card { min-height:44px; padding-right:48px; } }
++    .conversation-row { position:relative; display:flex; align-items:center; border-radius:6px; } .conversation-row:hover,.conversation-row:focus-within { background:var(--pi-surface-hover,#ededed); } .conversation-action { position:absolute; right:4px; top:50%; transform:translateY(-50%); display:grid; place-items:center; width:26px; height:26px; } .conversation-status { pointer-events:none; } .archive-conversation { padding:4px; opacity:0; pointer-events:none; color:var(--pi-muted,#858585); } .archive-conversation svg { width:16px; height:16px; fill:none; stroke:currentColor; stroke-width:1.7; stroke-linecap:round; stroke-linejoin:round; }
++    .conversation-card { display:flex; align-items:center; width:100%; min-width:0; min-height:30px; padding:5px 6px; text-align:left; border-radius:6px; } .conversation-card:hover { background:transparent; } .conversation-row.running .conversation-card { padding-right:34px; }
++    .conversation-row:hover .archive-conversation,.conversation-row:focus-within .archive-conversation { opacity:1; pointer-events:auto; } .conversation-row:hover .conversation-time,.conversation-row:focus-within .conversation-time { opacity:0; } @media(hover:none) { .conversation-row .conversation-action { width:44px; height:44px; right:0; } .conversation-row .archive-conversation { opacity:1; pointer-events:auto; } .conversation-row .conversation-time { display:none; } .conversation-row .conversation-card,.conversation-row.running .conversation-card { min-height:44px; padding-right:48px; } }
 +    .conversation-row.confirming-archive { background:var(--pi-surface-hover,#ededed); border-radius:20px; }
 +    .conversation-row.confirming-archive .conversation-card { flex:1; width:auto; padding-right:6px; }
 +    .confirming-archive .conversation-time { display:none; }
@@ -2247,7 +2289,7 @@ index 0000000000000000000000000000000000000000..668ecd15288d09db69c4b896dc03e3a6
 +    .conversation-row .archive-confirm:hover { background:color-mix(in srgb,var(--pi-danger,#c33) 38%,var(--pi-bg,#fff)); }
 +    @media(hover:none) { .conversation-row .archive-confirm { height:36px; } }
 +    .conversation-copy { display:flex; align-items:center; gap:12px; flex:1; min-width:0; } .conversation-title { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-+    .conversation-spinner { flex:none; width:12px; height:12px; margin-right:7px; box-sizing:border-box; border:1.5px solid var(--pi-muted,#888); border-right-color:transparent; border-radius:50%; animation:send-spin .7s linear infinite; }
++    .conversation-spinner { flex:none; width:12px; height:12px; box-sizing:border-box; border:1.5px solid var(--pi-muted,#888); border-right-color:transparent; border-radius:50%; animation:send-spin .7s linear infinite; }
 +    @media(prefers-reduced-motion:reduce) { .conversation-spinner { animation:none; } }
 +    .conversation-time { flex:none; min-width:26px; text-align:right; white-space:nowrap; color:var(--pi-muted,#888); font-size:11px; }
 +    .home-empty { color:var(--pi-muted,#888); padding:20px 6px; }
@@ -2654,10 +2696,10 @@ index 0000000000000000000000000000000000000000..d3d0bcbd7c51804463cb85883b66abf1
 +export const createCodexConnection: ConnectionFactory = (cwd, event, exited) => new CodexProcess(cwd, event, exited);
 diff --git a/pi-web-plugins/codex/server/codexService.test.ts b/pi-web-plugins/codex/server/codexService.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..5bd92aa628593f05dbf78fd49c5edd27d6ba4e54
+index 0000000000000000000000000000000000000000..0d7c3b563c5aa9107a0c8391fc6674eda3e72750
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/codexService.test.ts
-@@ -0,0 +1,567 @@
+@@ -0,0 +1,578 @@
 +import { mkdtemp, mkdir, writeFile, symlink, rm } from "node:fs/promises";
 +import { join } from "node:path";
 +import { tmpdir } from "node:os";
@@ -2699,6 +2741,17 @@ index 0000000000000000000000000000000000000000..5bd92aa628593f05dbf78fd49c5edd27
 +}
 +
 +describe("Codex workspace service", () => {
++  it("keeps an approval retryable when the transport cannot write its answer", async () => {
++    const f = fixture();
++    await f.call("create");
++    f.emit({ id: 7, method: "item/commandExecution/requestApproval", params: { threadId: "new", command: "check changes" } });
++    f.reply.mockImplementationOnce(() => { throw new Error("Codex input queue is full"); });
++    await expect(f.call("answer", { threadId: "new", approvalId: "7", decision: "accept" })).rejects.toThrow("input queue is full");
++    expect(array((await f.call("snapshot", { threadId: "new" }))["approvals"])).toHaveLength(1);
++    await f.call("answer", { threadId: "new", approvalId: "7", decision: "accept" });
++    expect(f.reply).toHaveBeenLastCalledWith(7, { decision: "accept" });
++    expect(array((await f.call("snapshot", { threadId: "new" }))["approvals"])).toHaveLength(0);
++  });
 +  it("bounds large UTF-8 snapshots without losing timeline entries or approval details", async () => {
 +    const f = fixture(); await f.call("create");
 +    for (let i = 0; i < 6; i++) f.emit({ method: "item/completed", params: { threadId: "new", item: {
@@ -3227,7 +3280,7 @@ index 0000000000000000000000000000000000000000..5bd92aa628593f05dbf78fd49c5edd27
 +});
 diff --git a/pi-web-plugins/codex/server/codexService.ts b/pi-web-plugins/codex/server/codexService.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..7921354d89cb913ab1b56de1adb94343309408a9
+index 0000000000000000000000000000000000000000..033af4fb23e2ccc1d0c11b736aaeabd240d36808
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/codexService.ts
 @@ -0,0 +1,694 @@
@@ -3536,10 +3589,10 @@ index 0000000000000000000000000000000000000000..7921354d89cb913ab1b56de1adb94343
 +    }
 +    const requestId = approval["requestId"];
 +    if (typeof requestId !== "string" && typeof requestId !== "number") throw new Error("Invalid approval request");
-+    // No await between lookup and removal: competing clients cannot decide twice.
++    // Keep a failed write retryable. No await before removal, so competing clients cannot decide twice.
++    state.connection.reply(requestId, response);
 +    thread.approvals.delete(approvalId);
 +    thread.version++; this.notify(thread);
-+    state.connection.reply(requestId, response);
 +    return { accepted: true };
 +  }
 +

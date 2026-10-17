@@ -90,6 +90,10 @@ while [[ $# -gt 0 ]]; do
             exit 2
         ;;
         start|stop|restart|update|status|logs)
+            if [[ -n "$ACTION" ]]; then
+                echo "错误：一次只能执行一个命令（已指定 $ACTION，又收到 $1）" >&2
+                exit 2
+            fi
             ACTION="$1"
             shift
         ;;
@@ -207,12 +211,24 @@ http_ready() {
 }
 
 service_running() {
-    local name="$1" pidfile="$2" pid
-    [[ -f "$pidfile" ]] || return 1
-    pid=$(cat "$pidfile")
-    [[ "$pid" =~ ^[1-9][0-9]*$ && "$pid" -gt 1 ]] || return 1
-    process_running "$pid" || return 1
-    [[ ! -d /proc ]] || is_instance_process "$pid" "$name"
+    local name="$1" pidfile="$2" pid candidate
+    if [[ -f "$pidfile" ]]; then
+        pid=$(cat "$pidfile")
+        if [[ "$pid" =~ ^[1-9][0-9]*$ && "$pid" -gt 1 ]] && process_running "$pid"; then
+            if [[ ! -d /proc ]] || is_instance_process "$pid" "$name"; then return 0; fi
+        fi
+    fi
+    # Recover ownership before checking the port or launching a replacement.
+    # A missing PID file does not mean that the daemon and its sessions stopped.
+    for candidate in /proc/[0-9]*/cmdline; do
+        pid="${candidate%/cmdline}"; pid="${pid##*/}"
+        if is_instance_process "$pid" "$name" && process_running "$pid"; then
+            mkdir -p "$(dirname "$pidfile")" || return 1
+            printf '%s\n' "$pid" > "$pidfile" || return 1
+            return 0
+        fi
+    done
+    return 1
 }
 
 # Match both executable identity and this instance's run directory before recovering a PID.

@@ -364,15 +364,20 @@ index 0000000000000000000000000000000000000000..839cbd4e9d7542a1de627d3e1a334b13
 +  }
 +}
 diff --git a/pi-web-plugins/terminal/clipboard.ts b/pi-web-plugins/terminal/clipboard.ts
-index 1feccb2619ea487d438384ed8411ae6755c7b8d7..6919554eee5f5659a57d9a3f58dad247993ec7d7 100644
+index 1feccb2619ea487d438384ed8411ae6755c7b8d7..e9a4c5b8cd53ab0e53d66f562f267fb83a050da0 100644
 --- a/pi-web-plugins/terminal/clipboard.ts
 +++ b/pi-web-plugins/terminal/clipboard.ts
-@@ -32,7 +32,7 @@ function browserIsSecureContext(): boolean {
+@@ -31,9 +31,10 @@ function browserIsSecureContext(): boolean {
+   return typeof window !== "undefined" && window.isSecureContext;
  }
  
- function browserClipboardWriteText(): ((text: string) => Promise<void>) | undefined {
+-function browserClipboardWriteText(): ((text: string) => Promise<void>) | undefined {
 -  if (typeof navigator === "undefined" || !("clipboard" in navigator)) return undefined;
-+  if (typeof navigator === "undefined" || typeof navigator.clipboard?.writeText !== "function") return undefined;
-   return navigator.clipboard.writeText.bind(navigator.clipboard);
+-  return navigator.clipboard.writeText.bind(navigator.clipboard);
++function browserClipboardWriteText(browserNavigator: Partial<Navigator> | undefined = typeof navigator === "undefined" ? undefined : navigator): ((text: string) => Promise<void>) | undefined {
++  const clipboard = browserNavigator?.clipboard;
++  if (typeof clipboard?.writeText !== "function") return undefined;
++  return clipboard.writeText.bind(clipboard);
  }
  
+ function writeClipboardTextWithSelectionFallback(text: string): boolean {

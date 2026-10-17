@@ -304,6 +304,45 @@ test('start replaces stale PID files without accepting or killing unrelated proc
   } finally { f.cleanup(); }
 });
 
+for (const missing of [true, false]) {
+  test(`start recovers running services with ${missing ? 'missing' : 'stale'} PID files`, () => {
+    const f = fixture();
+    try {
+      assert.equal(f.run('start', '8425').status, 0);
+      const dir = join(f.root, 'data/pi-web/8425');
+      for (const service of ['server', 'sessiond']) {
+        const file = join(dir, `${service}.pid`);
+        f.pids.push(Number(readFileSync(file, 'utf8')));
+        if (missing) rmSync(file);
+        else writeFileSync(file, String(process.pid));
+      }
+      // The existing server still owns its port even though its PID file was lost.
+      writeFileSync(join(f.root, 'bin/ss'), '#!/bin/sh\necho "LISTEN 0 511 0.0.0.0:8425 0.0.0.0:*"\n', { mode: 0o755 });
+      const result = f.run('start', '8425');
+      assert.equal(result.status, 0, result.stderr);
+      assert.doesNotMatch(result.stdout, /启动 pi-web/);
+      for (const [index, service] of ['server', 'sessiond'].entries()) {
+        assert.equal(Number(readFileSync(join(dir, `${service}.pid`), 'utf8')), f.pids[index]);
+        process.kill(f.pids[index], 0);
+      }
+    } finally { f.cleanup(); }
+  });
+}
+
+test('multiple service actions are rejected without stopping running services', () => {
+  const f = fixture();
+  try {
+    assert.equal(f.run('start', '8425').status, 0);
+    const dir = join(f.root, 'data/pi-web/8425');
+    for (const service of ['server', 'sessiond']) f.pids.push(Number(readFileSync(join(dir, `${service}.pid`), 'utf8')));
+    for (const args of [['status', 'stop'], ['start', 'restart'], ['update', 'stop']]) {
+      const result = spawnSync('bash', [join(f.root, 'scripts/run.sh'), ...args], { encoding: 'utf8' });
+      assert.equal(result.status, 2, result.stderr);
+      for (const pid of f.pids) process.kill(pid, 0);
+    }
+  } finally { f.cleanup(); }
+});
+
 for (const [host, target] of [['127.0.0.2', '127.0.0.2'], ['0.0.0.0', '127.0.0.1'], ['::', '[::1]'], ['::1', '[::1]'], ['[::1]', '[::1]']]) {
   test(`startup and status probe the configured host ${host}`, () => {
     const f = fixture();
