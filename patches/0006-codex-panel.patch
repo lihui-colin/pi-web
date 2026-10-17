@@ -1614,7 +1614,7 @@ index 0000000000000000000000000000000000000000..0919114c32ccf31159416d47f1a846eb
 +    const changes = items.filter((item) => ["fileChange", "diff"].includes(text(item["kind"])));
 +    const currentThread = view.threads.find((thread) => thread["id"] === view.threadId);
 +    const headerActions = html`<button class="review-toggle" ?disabled=${home} aria-label="Toggle review panel" aria-expanded=${reviewOpen} @click=${() => { this.closeMenus(true); this.reviewOpen = !reviewOpen; this.requestUpdate(); }}>Review${changes.length > 0 ? html` <span class="count">${changes.length}</span>` : nothing}</button>
-+        <button class="reconnect" aria-label="Reconnect" title="Reconnect" ?disabled=${view.pending} @click=${() => { this.closeMenus(true); this.action((runtime, state) => runtime.initialize(state)); }}><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 7a8 8 0 1 0 0 10M20 3v5h-5"></path></svg></button>`;
++        <button class="reconnect" aria-label="Reconnect" title="Reconnect" ?disabled=${view.pending} @click=${() => { this.closeMenus(true); this.action((runtime, state) => runtime.initialize(state)); }}>${this.isMobileComposer() ? "Reconnect" : html`<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 7a8 8 0 1 0 0 10M20 3v5h-5"></path></svg>`}</button>`;
 +    return html`
 +      <div class="layout" ?data-review-open=${reviewOpen}>
 +      <header><div class="header-heading">${home ? html`<strong>Codex</strong>` : html`<button class="back-button new-conversation" aria-label="Back to conversations" title="Back to conversations" ?disabled=${view.pending || !view.connected} @click=${() => { this.openConversation(view, ""); }}>←</button><span class="task-title" title=${text(currentThread?.["preview"])}>${text(currentThread?.["preview"]) || "New conversation"}</span>`}</div>
@@ -1760,7 +1760,7 @@ index 0000000000000000000000000000000000000000..0919114c32ccf31159416d47f1a846eb
 +    .header-actions>summary::-webkit-details-marker { display:none; }
 +    .header-actions-menu { position:absolute; z-index:6; top:100%; right:0; min-width:132px; padding:6px; border:1px solid var(--pi-border,#ddd); border-radius:10px; background:var(--pi-surface,#fff); box-shadow:0 8px 24px var(--pi-shadow,#0002); }
 +    .header-actions-menu>button { display:flex; align-items:center; gap:8px; width:100%; min-height:44px; padding:8px; border-radius:7px; white-space:nowrap; }
-+    .header-actions-menu>.reconnect::after { content:"Reconnect"; font-size:12px; }
++    .header-actions-menu>.reconnect { font-size:12px; }
 +    .scope { position:relative; flex:1; min-width:0; color:var(--pi-muted,#858585); font:11px/1.5 monospace; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 +    .scope-measure { position:absolute; visibility:hidden; pointer-events:none; width:max-content; white-space:nowrap; }
 +    button,select,input,textarea { font:inherit; color:inherit; background:transparent; border:1px solid transparent; border-radius:7px; padding:5px 8px; }
