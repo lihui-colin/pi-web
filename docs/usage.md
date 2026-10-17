@@ -28,29 +28,27 @@
 在 `terminal-patch` 工作区执行：
 
 ```bash
-# 首次安装或补丁基线变更后，获取固定的上游提交
-sh scripts/sync.sh
-# 使用本地缓存的固定提交安装
+# 自动同步固定提交并安装
 sh scripts/install.sh
 ```
 
-`install.sh` 的执行顺序：
+`install.sh` 首先检查 `data/.pi-web.conf`，不存在时从根目录 `.pi-web.conf.example` 创建，已有配置保持不变。随后执行：
 
-1. 创建独立安装仓库，以 detached HEAD 检出 `patches/base-commit` 指定的本地缓存提交，按文件名顺序应用当前工作区 `patches/*.patch`，使用 Git 三方合并。
+1. 创建独立安装仓库，以 detached HEAD 检出 `patches/base-commit` 指定的提交（先由 sync.sh 同步至 data/pi-web-upstream.git），按文件名顺序应用当前工作区 `patches/*.patch`，使用 Git 三方合并。
 2. 在生成目录的 `.npmrc` 中配置 node-pty/esbuild 的安装脚本权限，安装依赖。
 3. 运行测试并构建。
 4. 若 PATH 中没有 `pi` 命令，全局安装 `@earendil-works/pi-coding-agent`（默认 `latest`，可设置 `PI_VERSION`）；已有 Agent 保留当前版本。安装失败会停止，不替换 pi-web。
 5. 使用当前 npm 的全局安装前缀，将 `pi-web`、`pi-web-server`、`pi-web-sessiond` 链接到构建成功的新目录，替换旧的全局 npm 安装，打印安装目录和命令路径。此步骤跳过生命周期脚本和自动 peer 依赖安装，不更新 Pi Agent。
 
-默认安装仅补装缺失的 Pi Agent，不升级已有 Agent、不拉取或推送 Git 远端，不注册、启动或重启服务，也不会调用 `node dist/cli.js install`。若本地缺少指定提交，会提示先运行 `sh scripts/sync.sh`；上游同步与安装分开执行。旧的 `--port` 等服务安装参数不再接受。
+默认安装仅补装缺失的 Pi Agent，不升级已有 Agent、不推送 Git 远端，不注册、启动或重启服务，也不会调用 `node dist/cli.js install`。安装会先执行 `sh scripts/sync.sh` 同步指定提交；同步失败即停止，不安装依赖或替换全局命令。旧的 `--port` 等服务安装参数不再接受。
 
-每次创建的安装目录位于 `~/.local/share/pi-web-opt/release.*`，可设置 `PI_WEB_INSTALL_ROOT` 改变位置。测试或构建失败会停止并保留现场，已安装或运行的版本不变。旧目录不会自动清理。
+每次创建的安装目录位于 `data/pi-web-releases/release.*`，可设置 `PI_WEB_INSTALL_ROOT` 改变位置。测试或构建失败会停止并保留现场，已安装或运行的版本不变。旧目录不会自动清理。
 
 构建成功后，全局命令指向新的独立安装目录，因此不要删除正在使用的 release 目录。全局前缀需可写；使用 nvm 时替换的是当前 Node 环境中的安装。如果 `command -v pi-web` 与脚本输出的命令路径不同，请检查 PATH 中是否有其他安装抢先匹配。
 
 已运行的进程需要手动重启。如果自己的启动脚本或服务配置写死了旧 release 的绝对路径，还需要将其改为新的路径。模型提供商认证和启动配置由使用者单独管理；已有 Pi Agent 的升级使用 `update --pi-only`。
 
-`sync.sh` 按 commit ID 从官方仓库获取基线，可通过 `PI_WEB_UPSTREAM_URL` 改变上游仓库地址，但不能覆盖基线版本。它不拉取最新 `main`、不修改任何分支、不推送远端，也不要求配置 `origin`。`sync.sh --local` 只使用本地已有的同一提交，缺失时明确报错。两种脚本都不会自动提交或推送 `terminal-patch` 的修改，安装前应审查补丁工作区并提交要共享的修改。
+`sync.sh` 先检查 `data/pi-web-upstream.git`，已有指定提交时跳过远端下载，可离线准备源码；缺失时才按 commit ID 从官方仓库获取基线，可通过 `PI_WEB_UPSTREAM_URL` 改变上游仓库地址，但不能覆盖基线版本。它不拉取最新 `main`、不修改任何分支、不推送远端，也不要求配置 `origin`。`sync.sh --local` 只使用 `data/pi-web-upstream.git` 缓存中的同一提交，缺失时明确报错。两种脚本都不会自动提交或推送 `terminal-patch` 的修改，安装前应审查补丁工作区并提交要共享的修改。
 
 ## 只同步代码并准备补丁版本
 
@@ -86,7 +84,7 @@ git rev-parse FETCH_HEAD > patches/base-commit
 sh scripts/sync.sh
 ```
 
-这里手动获取 `main` 仅用于选择新基线。也可以获取一个已知的完整 commit ID；后续安装始终使用写入文件的固定提交。准备成功后，在打印的 release 目录安装依赖、测试和构建；如有冲突，按下一节处理。验证通过后，将基线与适配后的补丁一起提交，其他使用者获取补丁分支的更新后执行 `sync.sh` 和 `install.sh`。
+这里手动获取 `main` 仅用于选择新基线。也可以获取一个已知的完整 commit ID；后续安装始终使用写入文件的固定提交。准备成功后，在打印的 release 目录安装依赖、测试和构建；如有冲突，按下一节处理。验证通过后，将基线与适配后的补丁一起提交，其他使用者获取补丁分支的更新后执行 `install.sh`。
 
 ## 上游变化导致补丁冲突
 
@@ -131,6 +129,6 @@ bash scripts/pi-web-run-jmfederico.sh update --web-only       # 只同步、构�
 bash scripts/pi-web-run-jmfederico.sh update --dry-run        # 预览操作
 ```
 
-`install` 使用本地缓存的固定提交；`update` 默认先将 Pi Agent 更新到 latest，再获取官方 `main` 最新提交并原子写入 `patches/base-commit`，随后调用 `sync.sh --local` 应用补丁，随后安装依赖、测试、构建和替换全局命令。更新不需要 origin 的推送权限，也不会自动更新补丁分支；新基线如与补丁冲突，更新停止并保留新基线和冲突目录，需适配补丁后重试。拉取失败不改写基线，`--dry-run` 不拉取或改写基线。补丁冲突或测试构建失败时，不会替换已安装的 pi-web；之前已完成的 Agent 更新或源码同步不会回滚。
+`install` 先执行 `sync.sh` 复用缓存（缺失时下载）并应用补丁；`update` 默认先将 Pi Agent 更新到 latest，再获取官方 `main` 最新提交并原子写入 `patches/base-commit`，随后调用 `sync.sh` 同步并应用补丁，随后安装依赖、测试、构建和替换全局命令。更新不需要 origin 的推送权限，也不会自动更新补丁分支；新基线如与补丁冲突，更新停止并保留新基线和冲突目录，需适配补丁后重试。拉取失败不改写基线，`--dry-run` 不拉取或改写基线。补丁冲突或测试构建失败时，不会替换已安装的 pi-web；之前已完成的 Agent 更新或源码同步不会回滚。
 
 `update` 不启停服务。支持 `--update-relay`；update 的 Agent 目标固定为 `latest`，`PI_VERSION` 只控制普通 install 补装 Agent 的版本。pi-web 使用 `patches/base-commit`，不使用 `PI_WEB_VERSION`。更新仅通过运行脚本 `pi-web-run-jmfederico.sh update` 执行；`install.sh` 只负责安装，不接受 `update` 子命令。更新完成后，按需手动执行运行脚本的 `stop --port N` 和 `start --port N`。旧的 `update-pi-web-jmfederico.sh` 已移除；不带子命令仍默认执行 `install`。

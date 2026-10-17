@@ -9,13 +9,13 @@ install_usage() {
     cat <<'HELP'
 Usage: bash scripts/install.sh [install]
 
-install (default): Apply local patches to the cached patches/base-commit,
-  test, build and link global pi-web commands. Run sh scripts/sync.sh first
-  to fetch that commit if missing.
+install (default): Run sync.sh to reuse or fetch patches/base-commit and apply patches,
+  then test, build and link global pi-web commands.
+  Creates data/.pi-web.conf from .pi-web.conf.example if missing.
   Installs Pi Agent if missing; preserves an existing Agent.
   Does not manage services. No options accepted.
 
-PI_WEB_INSTALL_ROOT  Local release parent (default: ~/.local/share/pi-web-opt)
+PI_WEB_INSTALL_ROOT  Local release parent (default: <repo>/data/pi-web-releases)
 PI_VERSION          Pi Agent bootstrap target for install (default: latest)
 PI_WEB_TEST_MAX_WORKERS  Maximum parallel test workers (default: 4)
 PI_WEB_TEST_TIMEOUT_MS   Per-test timeout in milliseconds (default: 30000)
@@ -30,9 +30,15 @@ install_local() (
       }
     done
     script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+    local_config="$script_dir/../data/.pi-web.conf"
+    if [[ ! -e "$local_config" ]]; then
+      mkdir -p "$script_dir/../data"
+      cp -n "$script_dir/../.pi-web.conf.example" "$local_config"
+      printf 'Created local configuration: %s\n' "$local_config"
+    fi
 
-    printf '\n[1/3] Preparing patched release\n'
-    release_dir=$(sh "$script_dir/sync.sh" --local)
+    printf '\n[1/3] Synchronizing upstream and preparing patched release\n'
+    release_dir=$(sh "$script_dir/sync.sh")
     trap 'result=$?; if [ "$result" -ne 0 ]; then printf "Installation failed; retained directory: %s\n" "$release_dir" >&2; fi' 0
     cd "$release_dir"
 

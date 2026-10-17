@@ -7,16 +7,13 @@
 #
 # 用法:
 #   ./scripts/pi-web-run-jmfederico.sh start                # 后台启动（sessiond + server）
-#   ./scripts/pi-web-run-jmfederico.sh start --port 8080    # 指定端口启动
 #   ./scripts/pi-web-run-jmfederico.sh stop                 # 停止
+#   ./scripts/pi-web-run-jmfederico.sh restart              # 先停止，再启动
 #   ./scripts/pi-web-run-jmfederico.sh update [更新选项]    # 升级 pi 和 pi-web
 #   ./scripts/pi-web-run-jmfederico.sh status               # 查看状态
 #   ./scripts/pi-web-run-jmfederico.sh logs                 # 跟随服务日志
 #
-# 可配置参数:
-#   --port <port>    监听端口（优先级高于 PI_WEB_PORT 环境变量，默认 8024）
-#
-# 可配置环境变量:
+# 服务配置从仓库 data/.pi-web.conf 读取（参见 .pi-web.conf.example）：
 #   PI_WEB_HOST      绑定地址，默认 0.0.0.0
 #   PI_WEB_PORT      监听端口，默认 8024
 #   PI_WEB_PASSWORD  设置后（若支持）开启访问保护
@@ -26,7 +23,17 @@ if [ -z "${BASH_VERSION:-}" ]; then
 fi
 set -euo pipefail
 
-port_explicit="${PI_WEB_PORT:+1}"
+script_file="$(readlink -f "${BASH_SOURCE[0]}")"
+project_root="$(cd "$(dirname "$script_file")/.." && pwd)"
+config_file="$project_root/data/.pi-web.conf"
+# Service settings come only from the local config, not the calling shell.
+unset PI_WEB_PORT PI_WEB_HOST PI_WEB_PASSWORD PI_WEB_DATA_DIR PI_WEB_RUN_DIR \
+    PI_WEB_SESSIOND_SOCKET PI_WEB_SESSIOND_PORT PI_WEB_SESSIOND_URL
+if [[ -f "$config_file" ]]; then
+    set -a
+    source "$config_file"
+    set +a
+fi
 PI_WEB_HOST="${PI_WEB_HOST:-0.0.0.0}"
 PI_WEB_PORT="${PI_WEB_PORT:-8024}"
 PI_WEB_PASSWORD="${PI_WEB_PASSWORD:-}"
@@ -37,26 +44,25 @@ PI WEB (jmfederico) 手动运行管理脚本
 
 用法:
   ./scripts/pi-web-run-jmfederico.sh start                # 后台启动（sessiond + server）
-  ./scripts/pi-web-run-jmfederico.sh start --port 8080    # 指定端口启动
   ./scripts/pi-web-run-jmfederico.sh stop                 # 停止
+  ./scripts/pi-web-run-jmfederico.sh restart              # 先停止，再启动
   ./scripts/pi-web-run-jmfederico.sh update [更新选项]    # 升级 pi 和 pi-web
-  ./scripts/pi-web-run-jmfederico.sh status [--port N]    # 查看状态
+  ./scripts/pi-web-run-jmfederico.sh status               # 查看状态
   ./scripts/pi-web-run-jmfederico.sh logs                 # 跟随服务日志
   ./scripts/pi-web-run-jmfederico.sh --help               # 显示本帮助
 
 参数:
-  --port <port>    监听端口（优先级高于 PI_WEB_PORT 环境变量，默认 8024）
   -h, --help       显示本帮助并退出
-  stop 未指定端口或运行目录时，自动选择 data/pi-web 下唯一的端口实例。
+  本地配置：仓库 data/.pi-web.conf，示例 PI_WEB_PORT=8080（不提交 Git）。
 
 更新选项:
   --pi-only        只升级 Pi Coding Agent
   --web-only       只升级 @jmfederico/pi-web
   --update-relay   同步升级全局 relay skill
   --dry-run        只显示将执行的升级操作
-  更新不启停服务；更新完成后需要手动执行 stop、start 才能使用新版本。
+  更新不启停服务；更新完成后需要手动执行 restart 才能使用新版本。
 
-环境变量:
+配置文件字段（未填写时使用默认值）:
   PI_WEB_HOST      绑定地址，默认 0.0.0.0
   PI_WEB_PORT      监听端口，默认 8024
   PI_WEB_PASSWORD  设置后（若支持）开启访问保护
@@ -79,18 +85,11 @@ while [[ $# -gt 0 ]]; do
             usage
             exit 0
         ;;
-        --port)
-            [[ $# -ge 2 ]] || { echo "错误：--port 需要端口号参数" >&2; exit 2; }
-            port_explicit=1
-            PI_WEB_PORT="$2"
-            shift 2
+        --port|--port=*)
+            echo "错误：不再支持 --port，请在 $config_file 中设置 PI_WEB_PORT" >&2
+            exit 2
         ;;
-        --port=*)
-            port_explicit=1
-            PI_WEB_PORT="${1#*=}"
-            shift
-        ;;
-        start|stop|update|status|logs)
+        start|stop|restart|update|status|logs)
             ACTION="$1"
             shift
         ;;
@@ -102,26 +101,14 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "$ACTION" ]] || ACTION="${ACTION_ARGS[0]:-run}"
 
-script_file="$(readlink -f "${BASH_SOURCE[0]}")"
-project_root="$(cd "$(dirname "$script_file")/.." && pwd)"
-# With no explicit target, stop the sole instance instead of assuming port 8024.
-if [[ "$ACTION" == stop && -z "$port_explicit" && -z "${PI_WEB_RUN_DIR:-}" ]]; then
-    instance_ports=()
-    for candidate in "$project_root"/data/pi-web/*; do
-        [[ -d "$candidate" ]] || continue
-        candidate_port="${candidate##*/}"
-        [[ "$candidate_port" =~ ^[1-9][0-9]{0,4}$ ]] || continue
-        (( candidate_port <= 65535 )) || continue
-        instance_ports+=("$candidate_port")
-    done
-    if [[ ${#instance_ports[@]} -eq 1 ]]; then
-        PI_WEB_PORT="${instance_ports[0]}"
-        echo "自动选择唯一实例: $PI_WEB_PORT"
-    fi
+if [[ "$ACTION" != update && ${#ACTION_ARGS[@]} -gt 0 ]]; then
+    echo "错误：不支持的参数 ${ACTION_ARGS[*]}；服务配置请填写 $config_file" >&2
+    exit 2
 fi
+
 # 端口同时作为实例标识，避免不同 Web 服务共享 daemon 状态和 PID。
 if [[ ! "$PI_WEB_PORT" =~ ^[0-9]{1,5}$ ]] || (( 10#$PI_WEB_PORT < 1 || 10#$PI_WEB_PORT > 65535 )); then
-    echo "错误：--port 必须是 1–65535 的整数" >&2
+    echo "错误：端口必须是 1–65535 的整数" >&2
     exit 2
 fi
 PI_WEB_PORT="$((10#$PI_WEB_PORT))"
@@ -391,7 +378,7 @@ update_web() {
     log "获取官方 pi-web main 最新提交、更新 patches/base-commit、应用补丁并测试构建..."
     if [[ $DRY_RUN -eq 1 ]]; then
         log "[dry-run] git fetch --no-tags ${PI_WEB_UPSTREAM_URL:-https://github.com/jmfederico/pi-web.git} refs/heads/main；将提交 ID 写入 patches/base-commit"
-        log "[dry-run] sh $project_root/scripts/sync.sh --local (应用新基线补丁)"
+        log "[dry-run] sh $project_root/scripts/sync.sh (同步并应用新基线补丁)"
         log "[dry-run] npm ci --include=dev; npm test -- --maxWorkers=${PI_WEB_TEST_MAX_WORKERS:-4} --testTimeout=${PI_WEB_TEST_TIMEOUT_MS:-30000}; npm run build; 链接补丁版全局命令"
         return 0
     fi
@@ -491,18 +478,19 @@ update() (
 
     doctor
     log "更新完成"
-    log "管理命令: $run_script {start|stop|update|status|logs}"
-    log "使用新版本请手动执行: $run_script stop --port $PI_WEB_PORT，然后 $run_script start --port $PI_WEB_PORT"
+    log "管理命令: $run_script {start|stop|restart|update|status|logs}"
+    log "使用新版本请手动执行: $run_script restart"
 )
 
 case "$ACTION" in
     start)   start ;;
     stop)    stop ;;
+    restart) stop; start ;;
     update)  update ;;
     status)  status ;;
     logs)    logs ;;
     *)
-        echo "用法: $0 {start|stop|update|status|logs} [--port <port>]" >&2
+        echo "用法: $0 {start|stop|restart|update|status|logs}" >&2
         exit 2
     ;;
 esac

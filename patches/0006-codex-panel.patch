@@ -508,7 +508,7 @@ index 0000000000000000000000000000000000000000..182e46ce188a04e1507c79b15ed14ceb
 +    expect(root.querySelector(".composer-controls > .settings-menu select[aria-label=Model]")).not.toBeNull();
 +    expect(view.model).toBe("test-model");
 +  });
-+  it("keeps New chat beside the directory and collapses mobile header actions", async () => {
++  it("keeps New chat rightmost and collapses mobile header actions", async () => {
 +    const { panel, textarea } = await fixture();
 +    let width = 390;
 +    vi.spyOn(panel, "getBoundingClientRect").mockImplementation(() => new DOMRect(0, 0, width, 700));
@@ -518,7 +518,7 @@ index 0000000000000000000000000000000000000000..182e46ce188a04e1507c79b15ed14ceb
 +    const review = menu?.querySelector<HTMLButtonElement>(".review-toggle");
 +    if (!root || !menu || !review) throw new Error("Expected collapsed header actions");
 +    expect(menu.open).toBe(false);
-+    expect(root.querySelector("header > .scope + .new-chat")).not.toBeNull();
++    expect(root.querySelector("header > .header-actions + .new-chat:last-child")).not.toBeNull();
 +    expect(menu.querySelector(".reconnect")).not.toBeNull();
 +    menu.open = true;
 +    review.click(); await panel.updateComplete;
@@ -534,7 +534,7 @@ index 0000000000000000000000000000000000000000..182e46ce188a04e1507c79b15ed14ceb
 +    width = 900; panel.requestUpdate(); await panel.updateComplete;
 +    expect(root.querySelector(".header-actions")).toBeNull();
 +    expect(root.querySelector("header > .review-toggle")).not.toBeNull();
-+    expect(root.querySelector("header > .reconnect")).not.toBeNull();
++    expect(root.querySelector("header > .reconnect + .new-chat:last-child")).not.toBeNull();
 +  });
 +  it("updates running indicators on the home page and restores archive when finished", async () => {
 +    const { runtime, view, panel, request } = await fixture();
@@ -1619,8 +1619,8 @@ index 0000000000000000000000000000000000000000..0919114c32ccf31159416d47f1a846eb
 +      <div class="layout" ?data-review-open=${reviewOpen}>
 +      <header><div class="header-heading">${home ? html`<strong>Codex</strong>` : html`<button class="back-button new-conversation" aria-label="Back to conversations" title="Back to conversations" ?disabled=${view.pending || !view.connected} @click=${() => { this.openConversation(view, ""); }}>←</button><span class="task-title" title=${text(currentThread?.["preview"])}>${text(currentThread?.["preview"]) || "New conversation"}</span>`}</div>
 +        <span class="scope" title=${view.context.workspace.path}><span class="scope-measure" aria-hidden="true">${view.context.workspace.path}</span><span class="scope-label">${this.compactScope ? view.context.workspace.path.split(/[\\/]/).filter(Boolean).at(-1) || view.context.workspace.path : view.context.workspace.path}</span></span>
-+        <button class="new-conversation new-chat" aria-label="New chat" title="New chat" ?disabled=${view.pending || !view.connected} @click=${() => { this.openConversation(view, ""); }}><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 4H7a4 4 0 0 0-4 4v9a4 4 0 0 0 4 4h9a4 4 0 0 0 4-4v-5"></path><path d="m10 14 1-4 7-7a2.12 2.12 0 0 1 3 3l-7 7-4 1Z"></path></svg></button>
-+        ${this.isMobileComposer() ? html`<details class="header-actions"><summary aria-label="More actions" title="More actions">···</summary><div class="header-actions-menu">${headerActions}</div></details>` : headerActions}</header>
++        ${this.isMobileComposer() ? html`<details class="header-actions"><summary aria-label="More actions" title="More actions">···</summary><div class="header-actions-menu">${headerActions}</div></details>` : headerActions}
++        <button class="new-conversation new-chat" aria-label="New chat" title="New chat" ?disabled=${view.pending || !view.connected} @click=${() => { this.openConversation(view, ""); }}><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 4H7a4 4 0 0 0-4 4v9a4 4 0 0 0 4 4h9a4 4 0 0 0 4-4v-5"></path><path d="m10 14 1-4 7-7a2.12 2.12 0 0 1 3 3l-7 7-4 1Z"></path></svg></button></header>
 +      <main>
 +      ${view.notice === "" ? nothing : html`<p role="status">${view.notice}</p>`}
 +      ${view.error === "" && text(snapshot["error"]) === "" ? nothing : html`<p class="error" role="alert">${view.error || text(snapshot["error"])}</p>`}
@@ -1818,8 +1818,8 @@ index 0000000000000000000000000000000000000000..0919114c32ccf31159416d47f1a846eb
 +    .command-shell { border:1px solid var(--pi-border-muted,#e5e5e5); border-radius:10px; overflow:hidden; margin:8px 0; background:var(--pi-surface,#f7f7f7); color:var(--pi-text,#171717); } .command-line { display:flex; gap:10px; padding:12px; font:12px/1.6 monospace; } .command-line code { white-space:pre-wrap; overflow-wrap:anywhere; } .command-line>span { color:var(--pi-muted,#888); } .transcript .command-shell pre { padding:0 12px 12px; border-radius:0; max-height:320px; overflow:auto; } .command-footer { border-top:1px solid var(--pi-border-muted,#e5e5e5); padding:7px 12px; font-size:11px; display:flex; gap:12px; } .command-footer>span { margin-left:auto; max-width:60%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 +    .changed-file { margin:8px 0; border:1px solid var(--pi-border-muted,#e5e5e5); border-radius:8px; overflow:hidden; } .file-heading { padding:8px 10px; overflow-wrap:anywhere; font:12px/1.5 monospace; display:flex; gap:8px; } .file-heading small { margin-left:auto; } .transcript .changed-file .diff { padding:0; margin:0; border-radius:0; background:transparent; } .reasoning-body { padding:8px 12px; color:var(--pi-muted,#777); } .tool-output { max-height:320px; overflow:auto; } .tool-actions { display:flex; justify-content:flex-end; font-size:11px; } .worked-divider { display:flex; align-items:center; gap:10px; margin:20px 0; color:var(--pi-muted,#777); } .worked-divider>span { height:1px; flex:1; background:var(--pi-border-muted,#e5e5e5); }
 +    .working { display:flex; align-items:center; gap:8px; margin:16px 0; color:var(--pi-muted,#777); } .activity-dot { display:inline-block; width:7px; height:7px; flex:none; border-radius:50%; background:currentColor; animation:activity-pulse 1.4s ease-in-out infinite; } @keyframes activity-pulse { 50% { opacity:.3; } } @media(prefers-reduced-motion:reduce) { .activity-dot { animation:none; } } @media(hover:none) { .message-actions { opacity:1; } }
-+    .context-picker { position:static; flex:none; } .context-picker>summary { display:grid; place-items:center; width:28px; height:28px; border:1px solid var(--pi-border-muted,#ddd); border-radius:50%; padding:0; list-style:none; font-size:20px; line-height:1; } .context-picker>summary::-webkit-details-marker { display:none; }
-+    .add-menu { position:absolute; z-index:5; left:0; right:0; bottom:calc(100% + 8px); max-height:min(420px,55dvh); overflow:auto; padding:10px; border:1px solid var(--pi-border,#ddd); border-radius:18px; background:var(--pi-surface,#fff); box-shadow:0 8px 24px var(--pi-shadow,#0002); }
++    .context-picker { position:relative; flex:none; } .context-picker>summary { display:grid; place-items:center; width:28px; height:28px; border:1px solid var(--pi-border-muted,#ddd); border-radius:50%; padding:0; list-style:none; font-size:20px; line-height:1; } .context-picker>summary::-webkit-details-marker { display:none; }
++    .add-menu { position:absolute; z-index:5; left:0; width:min(360px,calc(100cqw - 48px)); bottom:calc(100% + 4px); max-height:min(420px,55dvh); overflow:auto; padding:10px; border:1px solid var(--pi-border,#ddd); border-radius:18px; background:var(--pi-surface,#fff); box-shadow:0 8px 24px var(--pi-shadow,#0002); }
 +    .add-heading { padding:3px 8px 8px; color:var(--pi-muted,#888); font-size:13px; }
 +    .add-item { display:flex; align-items:center; gap:10px; width:100%; min-height:38px; padding:7px 10px; border-radius:20px; text-align:left; }
 +    .add-item svg,.plan-toggle svg { flex:none; width:20px; height:20px; fill:none; stroke:currentColor; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }
@@ -1865,7 +1865,7 @@ index 0000000000000000000000000000000000000000..0919114c32ccf31159416d47f1a846eb
 +      .permission-heading { flex-wrap:wrap; gap:4px 12px; }
 +      .add-item { flex-wrap:wrap; } .add-description { font-size:12px; }
 +      .settings-menu .composer-spacer { display:none; }
-+      .context-picker { position:static; max-width:100%; }
++      .context-picker { position:relative; max-width:100%; }
 +      .context-picker>summary { width:44px; height:44px; } .composer-controls>.primary { width:32px; height:32px; min-height:32px; align-self:center; }
 +      .voice-input { width:36px; min-height:44px; }
 +      .composer-controls>button { min-height:44px; }

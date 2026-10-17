@@ -9,6 +9,7 @@ function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'pi-web instances '));
   const bin = join(root, 'bin');
   mkdirSync(bin);
+  mkdirSync(join(root, 'data'));
   mkdirSync(join(root, 'scripts'));
   copyFileSync('scripts/pi-web-run-jmfederico.sh', join(root, 'scripts/run.sh'));
   const script = (name, body) => writeFileSync(join(bin, name), `#!/bin/bash\n${body}\n`, { mode: 0o755 });
@@ -22,9 +23,14 @@ setInterval(() => {}, 1000);
   script('ss', 'exit 0');
   const env = { ...process.env, PATH: `${bin}:${process.env.PATH}` };
   for (const key of Object.keys(env)) if (key.startsWith('PI_WEB_')) delete env[key];
-  const run = (action, port, overrides = {}) => spawnSync('bash', [join(root, 'scripts/run.sh'), action, ...(port === undefined ? [] : ['--port', port])], {
-    env: { ...env, ...overrides }, encoding: 'utf8', timeout: 10000,
-  });
+  const run = (action, port, overrides = {}) => {
+    const settings = Object.entries(overrides).filter(([key]) => key.startsWith('PI_WEB_'));
+    if (port !== undefined) settings.push(['PI_WEB_PORT', port]);
+    if (settings.length) writeFileSync(join(root, 'data/.pi-web.conf'), settings.map(([key, value]) => `${key}='${value.replaceAll("'", "'\\''")}'`).join('\n') + '\n');
+    return spawnSync('bash', [join(root, 'scripts/run.sh'), action], {
+      env: { ...env, ...overrides }, encoding: 'utf8', timeout: 10000,
+    });
+  };
   const pids = [];
   return { root, run, pids, cleanup() {
     for (const pid of pids) { try { process.kill(pid, 'SIGKILL'); } catch {} }
@@ -32,11 +38,11 @@ setInterval(() => {}, 1000);
   } };
 }
 
-test('removed restart command and update options are rejected', () => {
+test('unsupported update options and service arguments are rejected', () => {
   const f = fixture();
   try {
     copyFileSync('scripts/install.sh', join(f.root, 'scripts/install.sh'));
-    for (const args of [['restart'], ['update', '--restart'], ['update', '--no-restart']]) {
+    for (const args of [['update', '--restart'], ['update', '--no-restart'], ['start', '--port', '8425'], ['stop', '--port=8425'], ['status', '8425']]) {
       const result = spawnSync('bash', [join(f.root, 'scripts/run.sh'), ...args], { encoding: 'utf8' });
       assert.equal(result.status, 2, result.stderr);
       assert.equal(existsSync(join(f.root, 'data/pi-web/8024/server.pid')), false);
@@ -64,7 +70,7 @@ test('two ports have independent state, socket and processes; stopping one prese
   } finally { f.cleanup(); }
 });
 
-test('stop without a port stops the sole non-default instance', () => {
+test('stop reads the same config as start', () => {
   const f = fixture();
   try {
     assert.equal(f.run('start', '8425').status, 0);
@@ -74,15 +80,15 @@ test('stop without a port stops the sole non-default instance', () => {
     writeFileSync(join(f.root, 'data/pi-web/legacy.log'), '');
     const result = f.run('stop');
     assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /唯一实例: 8425/);
+    assert.doesNotMatch(result.stdout, /唯一实例/);
     for (const service of ['sessiond', 'server']) assert.equal(existsSync(join(dir, `${service}.pid`)), false);
   } finally { f.cleanup(); }
 });
 
 for (const [name, ports, port, overrides, target] of [
   ['multiple instances', ['8024', '8425'], undefined, {}, '8024'],
-  ['explicit argument', ['8425'], '8024', {}, '8024'],
-  ['environment port', ['8425'], undefined, { PI_WEB_PORT: '8024' }, '8024'],
+  ['configured port', ['8425'], '8024', {}, '8024'],
+  ['unconfigured sole instance', ['8425'], undefined, {}, '8024'],
   ['run directory override', ['8425'], undefined, { PI_WEB_RUN_DIR: 'custom' }, 'custom'],
   ['no instances', [], undefined, {}, '8024'],
 ]) {
@@ -135,7 +141,8 @@ for (const missing of [true, false]) {
   });
 }
 
-test('stop failure preserves PID files and returns an error', () => {
+for (const action of ['stop', 'restart']) {
+test(`${action} failure preserves PID files and returns an error`, () => {
   const f = fixture();
   try {
     assert.equal(f.run('start', '8425').status, 0);
@@ -143,13 +150,16 @@ test('stop failure preserves PID files and returns an error', () => {
     for (const service of ['server', 'sessiond']) f.pids.push(Number(readFileSync(join(dir, `${service}.pid`), 'utf8')));
     const shellEnv = join(f.root, 'deny-signals.sh');
     writeFileSync(shellEnv, 'kill() { if [[ "$1" == -0 ]]; then builtin kill "$@"; else return 1; fi; }\n');
-    const result = f.run('stop', '8425', { BASH_ENV: shellEnv });
+    const result = f.run(action, '8425', { BASH_ENV: shellEnv });
+    assert.doesNotMatch(result.stdout, /启动 pi-web/);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /无法停止.*保留 PID 文件/);
     for (const service of ['server', 'sessiond']) assert.equal(existsSync(join(dir, `${service}.pid`)), true);
     for (const pid of f.pids) process.kill(pid, 0);
   } finally { f.cleanup(); }
 });
+
+}
 
 test('a busy port does not start sessiond or write PID files', () => {
   const f = fixture();
@@ -202,3 +212,60 @@ test('Linux services run in separate sessions with detached stdin', { skip: proc
     }
   } finally { f.cleanup(); }
 });
+
+test('service environment cannot override config or defaults', () => {
+  const f = fixture();
+  try {
+    const env = { ...process.env, PI_WEB_PORT: '9999', PI_WEB_HOST: 'bad-host', PI_WEB_RUN_DIR: '/bad-path' };
+    const run = () => spawnSync('bash', [join(f.root, 'scripts/run.sh'), 'status'], { env, encoding: 'utf8' });
+    // Use a live PID to expose the selected host and port in status output.
+    for (const port of ['8024', '8425']) {
+      const dir = join(f.root, 'data/pi-web', port);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'server.pid'), String(process.pid));
+    }
+    writeFileSync(join(f.root, 'data/.pi-web.conf'), 'PI_WEB_PORT=8425\nPI_WEB_HOST=127.0.0.1\n');
+    assert.match(run().stdout, /http:\/\/127\.0\.0\.1:8425/);
+    rmSync(join(f.root, 'data/.pi-web.conf'));
+    assert.match(run().stdout, /http:\/\/0\.0\.0\.0:8024/);
+  } finally { f.cleanup(); }
+});
+
+test('invalid configured port is rejected before starting services', () => {
+  const f = fixture();
+  try {
+    writeFileSync(join(f.root, 'data/.pi-web.conf'), 'PI_WEB_PORT=65536\n');
+    assert.equal(f.run('start').status, 2);
+    assert.equal(existsSync(join(f.root, 'data/pi-web')), false);
+  } finally { f.cleanup(); }
+});
+
+for (const running of [false, true]) {
+  test(`restart stops before starting with configured port (running=${running})`, () => {
+    const f = fixture();
+    try {
+      const dir = join(f.root, 'data/pi-web/8425');
+      if (running) {
+        assert.equal(f.run('start', '8425').status, 0);
+        for (const service of ['sessiond', 'server']) f.pids.push(Number(readFileSync(join(dir, `${service}.pid`), 'utf8')));
+      }
+      const result = f.run('restart', '8425');
+      assert.equal(result.status, 0, result.stderr);
+      const previous = [...f.pids];
+      for (const service of ['sessiond', 'server']) {
+        const pid = Number(readFileSync(join(dir, `${service}.pid`), 'utf8'));
+        f.pids.push(pid);
+        assert.ok(!previous.includes(pid));
+        process.kill(pid, 0);
+      }
+      if (running) {
+        assert.ok(result.stdout.lastIndexOf('已停止') < result.stdout.indexOf('启动 pi-web'));
+        for (const pid of previous) {
+          const stat = spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' });
+          assert.ok(stat.status !== 0 || stat.stdout.trim().startsWith('Z'));
+        }
+      }
+      assert.match(f.run('status').stdout, /:8425/);
+    } finally { f.cleanup(); }
+  });
+}

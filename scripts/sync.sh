@@ -5,13 +5,15 @@ if [ "${1:-}" = "--help" ]; then
   cat <<'HELP'
 Usage: sh scripts/sync.sh [--local]
 
-Fetch the exact upstream commit in patches/base-commit, then apply
+Reuse the cached upstream commit in patches/base-commit (fetch only if missing),
+then apply
 patches/*.patch in a new release directory. Print that directory on stdout.
-With --local, require that commit locally without fetching.
+Downloads are cached in <repo>/data/pi-web-upstream.git.
+With --local, require that commit in this cache without fetching.
 Neither mode updates main or pushes to any remote.
 
 PI_WEB_UPSTREAM_URL  Official upstream URL override
-PI_WEB_INSTALL_ROOT  Release parent (default: ~/.local/share/pi-web-opt)
+PI_WEB_INSTALL_ROOT  Release parent (default: <repo>/data/pi-web-releases)
 HELP
   exit 0
 fi
@@ -24,7 +26,8 @@ esac
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 source_repo=$(git -C "$script_dir" rev-parse --show-toplevel)
 upstream_url=${PI_WEB_UPSTREAM_URL:-https://github.com/jmfederico/pi-web.git}
-install_root=${PI_WEB_INSTALL_ROOT:-${HOME}/.local/share/pi-web-opt}
+install_root=${PI_WEB_INSTALL_ROOT:-$source_repo/data/pi-web-releases}
+cache_repo="$source_repo/data/pi-web-upstream.git"
 
 base_file="$source_repo/patches/base-commit"
 if [ ! -f "$base_file" ]; then
@@ -46,11 +49,15 @@ if [ ! -f "$1" ]; then
   exit 1
 fi
 
-if [ "$sync_remote" = true ]; then
+if [ "$(git -C "$cache_repo" cat-file -t "$base_commit" 2>/dev/null || true)" = commit ]; then
+  printf 'Using cached upstream commit %s (no download).\n' "$base_commit" >&2
+elif [ "$sync_remote" = true ]; then
+  mkdir -p "$source_repo/data"
+  if [ ! -d "$cache_repo" ]; then git init --bare --quiet "$cache_repo" >&2; fi
   printf 'Fetching pinned upstream commit %s...\n' "$base_commit" >&2
-  git -C "$source_repo" fetch --no-tags "$upstream_url" "$base_commit" >&2
+  git -C "$cache_repo" fetch --no-tags "$upstream_url" "$base_commit:refs/pi-web/$base_commit" >&2
 fi
-if [ "$(git -C "$source_repo" cat-file -t "$base_commit" 2>/dev/null || true)" != commit ]; then
+if [ "$(git -C "$cache_repo" cat-file -t "$base_commit" 2>/dev/null || true)" != commit ]; then
   printf 'Pinned commit %s is missing locally or is not a commit. Run sh scripts/sync.sh to fetch the patch baseline.\n' "$base_commit" >&2
   exit 1
 fi
@@ -61,7 +68,7 @@ release_dir=$(mktemp -d "$install_root/release.XXXXXXXX")
 trap 'result=$?; if [ "$result" -ne 0 ]; then printf "Preparation failed; retained directory: %s\n" "$release_dir" >&2; fi' 0
 
 git init --quiet "$release_dir" >&2
-git -C "$release_dir" fetch --no-tags "$source_repo" "$base_commit" >&2
+git -C "$release_dir" fetch --no-tags "$cache_repo" "$base_commit" >&2
 git -C "$release_dir" checkout --detach "$base_commit" >&2
 for patch_file do
   printf 'Applying %s\n' "$(basename -- "$patch_file")" >&2

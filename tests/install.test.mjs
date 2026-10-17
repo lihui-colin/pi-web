@@ -22,7 +22,7 @@ function fixture({ conflict = false, failure = '', agent = true, agentVersion = 
   const source = join(root, 'patch-source');
   const origin = join(root, 'origin.git');
   const bin = join(root, 'bin');
-  const releases = join(root, 'releases');
+  const releases = join(source, 'data/pi-web-releases');
   const log = join(root, 'calls.log');
   const prefix = join(root, 'global');
   for (const dir of [upstream, source, bin]) mkdirSync(dir);
@@ -49,7 +49,9 @@ function fixture({ conflict = false, failure = '', agent = true, agentVersion = 
   writeFileSync(join(source, 'patches', '0001-layout.patch'), patch);
   writeFileSync(join(source, 'patches', 'base-commit'), (conflict ? git(upstream, 'rev-parse', 'HEAD') : baseCommit) + '\n');
   mkdirSync(join(source, 'scripts'));
+  copyFileSync(join(repo, '.pi-web.conf.example'), join(source, '.pi-web.conf.example'));
   for (const file of ['install.sh', 'sync.sh', 'pi-web-run-jmfederico.sh']) copyFileSync(join(repo, 'scripts', file), join(source, 'scripts', file));
+  writeFileSync(join(source, '.gitignore'), '/data\n');
   git(source, 'add', '.');
   git(source, 'commit', '-m', 'patch-only root');
   git(source, 'remote', 'add', 'origin', origin);
@@ -86,7 +88,7 @@ printf 'installed %s\n' "$PWD" >> "$TEST_LOG"
   if (agent) writeFileSync(join(bin, 'pi'), '#!/bin/sh\necho 0.85.1\n');
   for (const file of ['node', 'npm', ...(agent ? ['pi'] : [])]) chmodSync(join(bin, file), 0o755);
   const run = (script = 'install.sh', args = [], runFailure = failure) => spawnSync('sh', [join(source, 'scripts', script), ...args], {
-    cwd: root, encoding: 'utf8', env: { ...process.env, PATH: `${bin}:/usr/bin:/bin`, TEST_BIN: bin, PI_VERSION: agentVersion, PI_WEB_UPSTREAM_URL: upstream, PI_WEB_INSTALL_ROOT: releases, PI_WEB_TEST_MAX_WORKERS: maxWorkers, PI_WEB_TEST_TIMEOUT_MS: testTimeout, TEST_LOG: log, TEST_FAILURE: runFailure, TEST_PREFIX: prefix, REAL_NODE: process.execPath, REAL_NPM: realpathSync(npm) },
+    cwd: root, encoding: 'utf8', env: { ...process.env, PATH: `${bin}:/usr/bin:/bin`, TEST_BIN: bin, PI_VERSION: agentVersion, PI_WEB_UPSTREAM_URL: upstream, PI_WEB_INSTALL_ROOT: '', PI_WEB_TEST_MAX_WORKERS: maxWorkers, PI_WEB_TEST_TIMEOUT_MS: testTimeout, TEST_LOG: log, TEST_FAILURE: runFailure, TEST_PREFIX: prefix, REAL_NODE: process.execPath, REAL_NPM: realpathSync(npm) },
   });
   return { source, upstream, origin, log, releases, prefix, run, baseCommit };
 }
@@ -95,7 +97,7 @@ function prepareLocalMain(f) {
   git(f.source, 'fetch', f.upstream, 'main:main');
 }
 
-test('installs the cached pinned commit even when local main is newer', () => {
+test('install synchronizes the pinned commit even when local main is newer', () => {
   const f = fixture();
   prepareLocalMain(f);
   git(f.source, 'remote', 'set-url', 'origin', '/nonexistent-origin');
@@ -179,6 +181,8 @@ test('sync fetches the pinned commit without requiring main or origin', () => {
   assert.equal(git(result.stdout.trim(), 'rev-parse', 'HEAD'), f.baseCommit);
   assert.equal(git(f.source, 'for-each-ref', '--format=%(refname)', 'refs/heads/main'), '');
   assert.equal(git(f.origin, 'for-each-ref', '--format=%(refname)'), '');
+  assert.equal(git(join(f.source, 'data/pi-web-upstream.git'), 'cat-file', '-t', f.baseCommit), 'commit');
+  assert.notEqual(spawnSync('git', ['-C', f.source, 'cat-file', '-t', f.baseCommit]).status, 0);
   // --local must also work when the baseline is only cached, with no local main.
   rmSync(f.upstream, { recursive: true });
   const local = f.run('sync.sh', ['--local']);
@@ -225,7 +229,7 @@ test('only changing base-commit advances the release to a newer upstream commit'
 
 test('missing local pinned commit asks for synchronization without remote writes', () => {
   const f = fixture();
-  const result = f.run();
+  const result = f.run('sync.sh', ['--local']);
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /Pinned commit .* is missing locally/);
   assert.equal(readFileSync(f.log, 'utf8'), '');
@@ -299,6 +303,8 @@ function updateFixture({ running = false } = {}) {
   copyFileSync(join(repo, 'scripts/pi-web-run-jmfederico.sh'), join(root, 'scripts/pi-web-run-jmfederico.sh'));
   const runDir = join(root, 'run');
   mkdirSync(runDir);
+  mkdirSync(join(root, 'data'));
+  writeFileSync(join(root, 'data/.pi-web.conf'), `PI_WEB_RUN_DIR='${runDir}'\n`);
   if (running) writeFileSync(join(runDir, 'server.pid'), String(process.pid));
   writeFileSync(join(bin, 'npm'), `#!/bin/sh
 printf 'npm %s\\n' "$*" >> "$TEST_LOG"
@@ -453,4 +459,73 @@ test('update dry-run and failed upstream fetch preserve the baseline', () => {
   assert.notEqual(f.run('pi-web-run-jmfederico.sh', ['update', '--web-only']).status, 0);
   assert.equal(readFileSync(join(f.source, 'patches/base-commit'), 'utf8'), before);
   assert.ok(!readFileSync(f.log, 'utf8').includes('built '));
+});
+
+test('install fetches on a fresh checkout and retains the previous install on sync failure', () => {
+  const f = fixture();
+  const first = f.run();
+  assert.equal(first.status, 0, first.stderr);
+  const installed = realpathSync(join(f.prefix, 'bin/pi-web'));
+  assert.ok(installed.startsWith(f.releases));
+  writeFileSync(f.log, '');
+  rmSync(f.upstream, { recursive: true });
+  writeFileSync(join(f.source, 'patches/base-commit'), 'a'.repeat(40) + '\n');
+  const failed = f.run();
+  assert.notEqual(failed.status, 0);
+  assert.equal(readFileSync(f.log, 'utf8'), '');
+  assert.equal(realpathSync(join(f.prefix, 'bin/pi-web')), installed);
+});
+
+test('sync and install reuse the cached baseline without fetching upstream', () => {
+  const f = fixture();
+  const first = f.run('sync.sh');
+  assert.equal(first.status, 0, first.stderr);
+  assert.match(first.stderr, /Fetching pinned upstream commit/);
+  const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+  // Fail any Git command referencing the upstream; local cache fetches still work.
+  writeFileSync(join(f.source, '../bin/git'), `#!/bin/sh
+for arg do
+  if [ "$arg" = "$PI_WEB_UPSTREAM_URL" ]; then echo 'Unexpected upstream access' >&2; exit 97; fi
+done
+exec '${realGit}' "$@"
+`, { mode: 0o755 });
+  rmSync(f.upstream, { recursive: true });
+  const repeated = f.run('sync.sh');
+  assert.equal(repeated.status, 0, repeated.stderr);
+  assert.match(repeated.stderr, /Using cached upstream commit/);
+  assert.notEqual(repeated.stdout.trim(), first.stdout.trim());
+  assert.equal(git(repeated.stdout.trim(), 'rev-parse', 'HEAD'), f.baseCommit);
+  assert.match(readFileSync(join(repeated.stdout.trim(), 'app.txt'), 'utf8'), /custom layout/);
+  const installed = f.run();
+  assert.equal(installed.status, 0, installed.stderr);
+  assert.match(installed.stderr, /Using cached upstream commit/);
+  writeFileSync(join(f.source, 'patches/base-commit'), 'a'.repeat(40) + '\n');
+  const missing = f.run('sync.sh');
+  assert.notEqual(missing.status, 0);
+  assert.match(missing.stderr, /Unexpected upstream access/);
+});
+
+test('install creates local config from template and preserves it on reinstall', () => {
+  const f = fixture();
+  const config = join(f.source, 'data/.pi-web.conf');
+  const template = join(f.source, '.pi-web.conf.example');
+  assert.equal(existsSync(config), false);
+  const first = f.run();
+  assert.equal(first.status, 0, first.stderr);
+  assert.equal(readFileSync(config, 'utf8'), readFileSync(template, 'utf8'));
+  const custom = '# Keep local settings\nPI_WEB_PORT=25224\n';
+  writeFileSync(config, custom);
+  rmSync(template);
+  const second = f.run();
+  assert.equal(second.status, 0, second.stderr);
+  assert.equal(readFileSync(config, 'utf8'), custom);
+});
+
+test('install stops before syncing if config and template are missing', () => {
+  const f = fixture();
+  rmSync(join(f.source, '.pi-web.conf.example'));
+  const result = f.run();
+  assert.notEqual(result.status, 0);
+  assert.equal(existsSync(join(f.source, 'data/pi-web-upstream.git')), false);
+  assert.equal(readFileSync(f.log, 'utf8'), '');
 });
