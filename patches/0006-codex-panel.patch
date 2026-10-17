@@ -344,10 +344,10 @@ index 0000000000000000000000000000000000000000..56c8e7dd23da973fe30602fc785da6d3
 +}
 diff --git a/pi-web-plugins/codex/CodexPanel.test.ts b/pi-web-plugins/codex/CodexPanel.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..8aba573235dee3f547dca85c40a7d45f83ef342b
+index 00000000..788651b9
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.test.ts
-@@ -0,0 +1,1210 @@
+@@ -0,0 +1,1249 @@
 +// @vitest-environment happy-dom
 +import { afterEach, describe, expect, it, vi } from "vitest";
 +import type { PluginPeerChannelOptions, FileTreeResponse, JsonValue, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
@@ -832,6 +832,45 @@ index 0000000000000000000000000000000000000000..8aba573235dee3f547dca85c40a7d45f
 +    await panel.updateComplete; await Promise.resolve(); await panel.updateComplete;
 +    expect(request.mock.calls.filter(([operation]) => operation === "send")).toEqual([["send", { mode: "default", threadId: "thread", text: "你好" }]]);
 +    expect(view.draft).toBe("");
++  });
++  it.each([false, true])("leaves mobile Enter to insert a newline and submits only on a button click (busy=%s)", async (busy) => {
++    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: true }));
++    const { request, panel, textarea, view } = await fixture();
++    view.snapshot = { busy, status: busy ? "inProgress" : "idle" };
++    textarea.value = "First line"; textarea.dispatchEvent(new Event("input")); await panel.updateComplete;
++    // Touch keyboards may report autocapitalization as Shift; neither Enter should submit.
++    for (const shiftKey of [false, true]) {
++      const enter = new KeyboardEvent("keydown", { key: "Enter", shiftKey, bubbles: true, cancelable: true });
++      textarea.dispatchEvent(enter);
++      expect(enter.defaultPrevented).toBe(false);
++    }
++    await panel.updateComplete;
++    expect(request.mock.calls.filter(([operation]) => operation === "send")).toHaveLength(0);
++    expect(view.draft).toBe("First line");
++    expect(textarea.getAttribute("enterkeyhint")).toBe("enter");
++    // Synthetic keydown does not edit text in happy-dom; deliver the browser's subsequent input.
++    textarea.value = "First line\nSecond line"; textarea.dispatchEvent(new Event("input")); await panel.updateComplete;
++    required(panel.shadowRoot?.querySelector<HTMLButtonElement>(`[aria-label="${busy ? "Queue message" : "Send message"}"]`)).click();
++    await vi.waitFor(() => {
++      expect(request.mock.calls.filter(([operation]) => operation === "send")).toEqual([["send", { mode: "default", threadId: "thread", text: "First line\nSecond line" }]]);
++    });
++  });
++  it("preserves desktop Shift+Enter and sends on Enter even in a narrow panel", async () => {
++    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: false }));
++    const { request, panel, textarea, view } = await fixture();
++    vi.spyOn(panel, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 400, 800));
++    textarea.value = "Desktop message"; textarea.dispatchEvent(new Event("input")); await panel.updateComplete;
++    const newline = new KeyboardEvent("keydown", { key: "Enter", shiftKey: true, bubbles: true, cancelable: true });
++    textarea.dispatchEvent(newline);
++    expect(newline.defaultPrevented).toBe(false);
++    expect(request.mock.calls.filter(([operation]) => operation === "send")).toHaveLength(0);
++    const send = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
++    textarea.dispatchEvent(send);
++    expect(send.defaultPrevented).toBe(true);
++    await vi.waitFor(() => {
++      expect(request).toHaveBeenCalledWith("send", { mode: "default", threadId: "thread", text: "Desktop message" });
++      expect(view.draft).toBe("");
++    });
 +  });
 +  it("shows a spinner until send acknowledgement then shows stop, and restores send on failure", async () => {
 +    const { request, runtime, view, panel } = await fixture();
@@ -1560,10 +1599,10 @@ index 0000000000000000000000000000000000000000..8aba573235dee3f547dca85c40a7d45f
 +});
 diff --git a/pi-web-plugins/codex/CodexPanel.ts b/pi-web-plugins/codex/CodexPanel.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..3a8a4d0a727b6960bae28c0a771e0af800713793
+index 00000000..a3ccfd5b
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.ts
-@@ -0,0 +1,804 @@
+@@ -0,0 +1,813 @@
 +import { LitElement, css, html, svg, nothing } from "lit";
 +import { property } from "lit/decorators.js";
 +import { repeat } from "lit/directives/repeat.js";
@@ -1706,6 +1745,15 @@ index 0000000000000000000000000000000000000000..3a8a4d0a727b6960bae28c0a771e0af8
 +    const runtime = this.runtime;
 +    const view = this.view;
 +    if (runtime !== undefined && view !== undefined) void runtime.run(view, () => action(runtime, view));
++  }
++  private composerKeydown(event: KeyboardEvent, view: CodexView): void {
++    this.navigateInputHistory(event, view);
++    if (event.key !== "Enter" || event.shiftKey || event.isComposing || this.composing) return;
++    // Match the host composer's touch/narrow-screen default, independent of this panel's width.
++    // Leave the native newline intact; mobile users submit with the send/queue button.
++    if (this.ownerDocument.defaultView?.matchMedia("(pointer: coarse), (max-width: 760px)").matches === true) return;
++    event.preventDefault();
++    if (!view.pending && !view.sending && view.connected && (view.draft.trim() !== "" || view.references.length > 0)) this.action((runtime, state) => runtime.send(state));
 +  }
 +  private navigateInputHistory(event: KeyboardEvent, view: CodexView): void {
 +    if (!["ArrowUp", "ArrowDown"].includes(event.key) || event.isComposing || this.composing || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
@@ -2031,10 +2079,10 @@ index 0000000000000000000000000000000000000000..3a8a4d0a727b6960bae28c0a771e0af8
 +          </div></div>`)}
 +        </section>` : nothing}
 +        ${view.references.length > 0 ? html`<div class="context-tray" aria-label="Selected workspace context">${view.references.map((path) => html`<span title=${path}>${path}<button aria-label=${`Remove ${path}`} ?disabled=${view.pending} @click=${() => { this.runtime?.saveReferences(view, view.references.filter((entry) => entry !== path)); }}>×</button></span>`)}</div>` : nothing}
-+        <textarea aria-label="Message Codex" placeholder=${queueInput ? "Add to the queue, or use Steer after sending..." : view.mode === "plan" ? "Describe your task to generate a plan..." : home ? "Ask Codex to start a new conversation" : "Ask for follow-up changes"} .value=${view.draft}
++        <textarea aria-label="Message Codex" enterkeyhint="enter" placeholder=${queueInput ? "Add to the queue, or use Steer after sending..." : view.mode === "plan" ? "Describe your task to generate a plan..." : home ? "Ask Codex to start a new conversation" : "Ask for follow-up changes"} .value=${view.draft}
 +          @input=${(event: Event) => { if (event.target instanceof HTMLTextAreaElement) { this.historyNavigation = undefined; this.runtime?.saveDraft(view, event.target.value); this.requestUpdate(); } }}
 +          @compositionstart=${() => { this.composing = true; }} @compositionend=${() => { this.composing = false; }}
-+          @keydown=${(event: KeyboardEvent) => { this.navigateInputHistory(event, view); if (event.key === "Enter" && !event.shiftKey && !event.isComposing && !this.composing) { event.preventDefault(); if (!view.pending && !view.sending && view.connected && (view.draft.trim() !== "" || view.references.length > 0)) this.action((runtime, state) => runtime.send(state)); } }}></textarea>
++          @keydown=${(event: KeyboardEvent) => { this.composerKeydown(event, view); }}></textarea>
 +        <div class="composer-controls">
 +          <div class="composer-leading">${this.renderContextPicker(view)}${this.isMobileComposer() ? this.renderPlanStatus(view) : this.renderComposerSettings(view)}</div>
 +          <div class="composer-trailing">${this.renderModelPicker(view)}
