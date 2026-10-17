@@ -343,7 +343,7 @@ index 0000000000000000000000000000000000000000..f014f4798729eb43524f9631a8ee94ce
 +}
 diff --git a/pi-web-plugins/codex/CodexPanel.test.ts b/pi-web-plugins/codex/CodexPanel.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..92e1a3097b91344e32c0f962388817b039191aa8
+index 0000000000000000000000000000000000000000..9c20b818aff6182a14006723e36537f93418323b
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.test.ts
 @@ -0,0 +1,1164 @@
@@ -538,7 +538,7 @@ index 0000000000000000000000000000000000000000..92e1a3097b91344e32c0f962388817b0
 +    root.querySelector<HTMLButtonElement>(".add-plan")!.click(); await panel.updateComplete;
 +    for (const viewport of [390, 900, 390]) {
 +      width = viewport; panel.requestUpdate(); await panel.updateComplete;
-+      const status = root.querySelector<HTMLButtonElement>(".composer-controls .plan-toggle")!;
++      const status = root.querySelector<HTMLButtonElement>(".composer-leading .plan-toggle")!;
 +      expect(status).not.toBeNull();
 +      expect(status.textContent).toContain("Plan");
 +      expect(status.getAttribute("aria-pressed")).toBe("true");
@@ -571,7 +571,7 @@ index 0000000000000000000000000000000000000000..92e1a3097b91344e32c0f962388817b0
 +      width = viewport; panel.requestUpdate(); await panel.updateComplete;
 +      const plan = add.querySelector<HTMLButtonElement>(".add-plan");
 +      if (!plan) throw new Error("Expected plan mode in Add");
-+      expect(root.querySelector(".composer-controls > .plan-toggle")).toBeNull();
++      expect(root.querySelector(".composer-leading .plan-toggle")).toBeNull();
 +      expect(plan.getAttribute("aria-pressed")).toBe("false");
 +      add.open = true;
 +      plan.click(); await panel.updateComplete;
@@ -586,7 +586,7 @@ index 0000000000000000000000000000000000000000..92e1a3097b91344e32c0f962388817b0
 +    }
 +    add.open = true;
 +    expect(add.querySelector(".model-picker")).toBeNull();
-+    expect(root.querySelector(".mobile-model-controls .model-picker")).not.toBeNull();
++    expect(root.querySelector(".composer-trailing .model-picker")).not.toBeNull();
 +    await chooseModel(panel, "test-model");
 +    expect(view.model).toBe("test-model");
 +    add.open = true;
@@ -609,7 +609,7 @@ index 0000000000000000000000000000000000000000..92e1a3097b91344e32c0f962388817b0
 +    expect(add.open).toBe(false);
 +    width = 900; panel.requestUpdate(); await panel.updateComplete;
 +    expect(add.querySelector(".settings-menu")).toBeNull();
-+    expect(root.querySelector(".composer-controls > .settings-menu button[aria-label=Model]")).not.toBeNull();
++    expect(root.querySelector(".composer-trailing button[aria-label=Model]")).not.toBeNull();
 +    expect(view.model).toBe("test-model");
 +  });
 +  it("keeps New chat rightmost and collapses mobile header actions", async () => {
@@ -674,7 +674,7 @@ index 0000000000000000000000000000000000000000..92e1a3097b91344e32c0f962388817b0
 +    const { panel, view, runtime, request } = await fixture();
 +    runtime.saveDraft(view, "Existing"); await panel.updateComplete;
 +    const mic = panel.shadowRoot!.querySelector<HTMLButtonElement>(".voice-input")!;
-+    expect(mic.previousElementSibling?.querySelector(".model-picker")).not.toBeNull();
++    expect(mic.previousElementSibling?.matches(".model-picker")).toBe(true);
 +    expect(mic.nextElementSibling?.className).toBe("primary");
 +    mic.click(); await panel.updateComplete;
 +    expect(voice.start).toHaveBeenCalledOnce();
@@ -919,7 +919,7 @@ index 0000000000000000000000000000000000000000..92e1a3097b91344e32c0f962388817b0
 +  });
 +  it("uses one composer button to send, stop and return to idle", async () => {
 +    const { request, panel, textarea, view } = await fixture();
-+    const button = panel.shadowRoot?.querySelector<HTMLButtonElement>(".composer-controls>.primary");
++    const button = panel.shadowRoot?.querySelector<HTMLButtonElement>(".composer-trailing>.primary");
 +    if (button === null || button === undefined) throw new Error("Expected composer action");
 +    expect(button.disabled).toBe(true);
 +    textarea.value = "hello"; textarea.dispatchEvent(new Event("input")); await panel.updateComplete;
@@ -928,7 +928,7 @@ index 0000000000000000000000000000000000000000..92e1a3097b91344e32c0f962388817b0
 +    expect(request).toHaveBeenCalledWith("send", { mode: "default", threadId: "thread", text: "hello" });
 +    expect(view.draft).toBe(""); await vi.waitFor(() => { expect(button.disabled).toBe(false); });
 +    expect(button.getAttribute("aria-label")).toBe("Stop response");
-+    expect(panel.shadowRoot?.querySelectorAll(".composer-controls>button.primary")).toHaveLength(1);
++    expect(panel.shadowRoot?.querySelectorAll(".composer-trailing>button.primary")).toHaveLength(1);
 +    expect(panel.shadowRoot?.querySelector(".primary")).toBe(button);
 +    view.pending = true; panel.requestUpdate(); await panel.updateComplete;
 +    expect(button.disabled).toBe(true);
@@ -1513,7 +1513,7 @@ index 0000000000000000000000000000000000000000..92e1a3097b91344e32c0f962388817b0
 +});
 diff --git a/pi-web-plugins/codex/CodexPanel.ts b/pi-web-plugins/codex/CodexPanel.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..2b370541c7387ec103670325d31e03bad9191e07
+index 0000000000000000000000000000000000000000..bd6ab644494ee9ea423ad543444171e5bdc9a87d
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.ts
 @@ -0,0 +1,864 @@
@@ -1902,7 +1902,7 @@ index 0000000000000000000000000000000000000000..2b370541c7387ec103670325d31e03ba
 +    </details>`;
 +  }
 +  private renderComposerSettings(view: CodexView) {
-+    return html`<div class="settings-menu">${this.renderPermissionPicker(view)}${!this.isMobileComposer() ? html`${this.renderPlanStatus(view)}<span class="composer-spacer"></span>${this.renderModelPicker(view)}` : nothing}</div>`;
++    return html`<div class="settings-menu">${this.renderPermissionPicker(view)}${!this.isMobileComposer() ? this.renderPlanStatus(view) : nothing}</div>`;
 +  }
 +  private renderContextPicker(view: CodexView) {
 +    const entries = this.browseEntries.filter((entry) => entry.name.toLowerCase().includes(this.browseFilter.toLowerCase()));
@@ -2054,9 +2054,12 @@ index 0000000000000000000000000000000000000000..2b370541c7387ec103670325d31e03ba
 +          @compositionstart=${() => { this.composing = true; }} @compositionend=${() => { this.composing = false; }}
 +          @keydown=${(event: KeyboardEvent) => { this.navigateInputHistory(event, view); if (event.key === "Enter" && !event.shiftKey && !event.isComposing && !this.composing) { event.preventDefault(); if (!this.voice && !view.pending && !busy && view.connected && (view.draft.trim() !== "" || view.references.length > 0)) this.action((runtime, state) => runtime.send(state)); } }}></textarea>
 +        ${this.voiceStatus ? html`<div class="voice-status" role="status">${this.voiceStatus}</div>` : nothing}
-+        <div class="composer-controls">${this.renderContextPicker(view)}${this.isMobileComposer() ? html`<div class="composer-spacer plan-status mobile-model-controls">${this.renderPlanStatus(view)}${this.renderModelPicker(view)}</div>` : this.renderComposerSettings(view)}
++        <div class="composer-controls">
++          <div class="composer-leading">${this.renderContextPicker(view)}${this.isMobileComposer() ? this.renderPlanStatus(view) : this.renderComposerSettings(view)}</div>
++          <div class="composer-trailing">${this.renderModelPicker(view)}
 +          <button class="voice-input" aria-label=${this.voice ? "Stop voice input" : "Start voice input"} title=${this.voice ? "Stop voice input" : "Voice input"} aria-pressed=${!!this.voice} ?disabled=${this.voiceStopping || view.pending || view.sending || busy} @click=${() => { this.toggleVoice(view); }}><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2" width="6" height="13" rx="3"></rect><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"></path></svg></button>
 +          <button class="primary" aria-label=${view.sending ? "Sending message" : busy ? "Stop response" : "Send message"} title=${view.sending ? "Sending message" : busy ? "Stop response" : "Send message"} aria-busy=${view.sending} ?disabled=${!!this.voice || view.pending || view.sending || !view.connected || (!busy && view.draft.trim() === "" && view.references.length === 0)} @click=${() => { this.action((runtime, state) => busy ? runtime.request(state, "stop", { threadId: state.threadId }) : runtime.send(state)); }}>${view.sending ? html`<span class="send-spinner" aria-hidden="true"></span>` : busy ? html`<span class="stop-icon" aria-hidden="true"></span>` : html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20V4m-7 7 7-7 7 7"></path></svg>`}</button>
++          </div>
 +        </div>
 +      </footer>
 +      <div class="connection-status" role="status">${view.pending ? "Working…" : text(snapshot["status"]) || (view.connected ? "Ready" : "Connecting…")}</div>
@@ -2228,7 +2231,9 @@ index 0000000000000000000000000000000000000000..2b370541c7387ec103670325d31e03ba
 +    summary { padding:6px; } .markdown { overflow-wrap:anywhere; } .markdown p { margin:0 0 12px; } .markdown pre { padding:12px; overflow:auto; background:var(--pi-surface,#f7f7f7); border-radius:8px; } .markdown a { color:var(--pi-accent,#4569ae); } .markdown table { border-collapse:collapse; display:block; overflow:auto; } .markdown td,.markdown th { border:1px solid var(--pi-border,#ddd); padding:4px; }
 +    footer { position:relative; flex:none; margin:12px 16px 0; padding:12px 8px 7px; background:var(--pi-surface,#f7f7f7); border:1px solid var(--pi-border-muted,#e4e4e4); border-radius:22px; box-shadow:0 4px 18px #00000005; }
 +    textarea { display:block; width:100%; resize:vertical; min-height:70px; max-height:180px; padding:3px 7px 12px; border:0; background:transparent; }
-+    textarea::placeholder { color:var(--pi-muted,#858585); } .composer-controls { display:flex; align-items:center; gap:2px; flex-wrap:wrap; margin-top:8px; } .composer-controls select { font-size:12px; max-width:180px; min-width:0; padding:4px; color:var(--pi-muted,#707070); } .composer-spacer { flex:1; }
++    textarea::placeholder { color:var(--pi-muted,#858585); } .composer-controls { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:8px; } .composer-controls select { font-size:12px; max-width:180px; min-width:0; padding:4px; color:var(--pi-muted,#707070); }
++    .composer-leading,.composer-trailing { display:flex; align-items:center; gap:2px; }
++    .composer-leading { flex:none; } .composer-trailing { min-width:0; margin-left:auto; }
 +    .voice-input { display:flex; align-items:center; justify-content:center; flex:none; width:32px; height:32px; color:var(--pi-muted,#707070); }
 +    .voice-input svg { width:20px; height:20px; fill:none; stroke:currentColor; stroke-width:1.7; stroke-linecap:round; stroke-linejoin:round; }
 +    .voice-input[aria-pressed="true"] { color:var(--pi-danger,#c33); background:var(--pi-surface-hover,#ededed); border-radius:50%; }
@@ -2281,7 +2286,7 @@ index 0000000000000000000000000000000000000000..2b370541c7387ec103670325d31e03ba
 +    .context-menu { padding:0; } .context-heading,.context-navigation,.context-bottom,.context-entry { display:flex; align-items:center; gap:6px; } .context-heading strong,.context-navigation>span,.context-bottom small { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .context-navigation { margin:6px 0; font-size:11px; } .context-filter { width:100%; border-color:var(--pi-border-muted,#ddd); margin-bottom:8px; } .context-entries { max-height:230px; overflow:auto; } .context-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-align:left; } .context-entry>button:last-child { font-size:11px; } .context-menu p { font-size:12px; margin:10px 0; } .context-bottom { margin-top:8px; border-top:1px solid var(--pi-border-muted,#ddd); padding-top:6px; }
 +    .context-tray { display:flex; flex-wrap:wrap; gap:6px; padding:0 6px 8px; max-height:100px; overflow:auto; } .context-tray>span { display:flex; align-items:center; gap:4px; border:1px solid var(--pi-border-muted,#ddd); border-radius:8px; padding-left:8px; max-width:100%; overflow-wrap:anywhere; font-size:11px; } .context-tray button { flex:none; }
 +    .settings-menu { display:contents; }
-+    .model-picker { position:relative; min-width:0; max-width:65%; }
++    .model-picker { position:relative; min-width:0; }
 +    .model-picker>summary { display:flex; align-items:center; justify-content:center; gap:24px; min-height:32px; padding:5px 18px; border-radius:999px; background:var(--pi-surface,#f3f3f3); color:var(--pi-muted,#707070); font-size:13px; white-space:nowrap; list-style:none; cursor:pointer; }
 +    .model-picker>summary::-webkit-details-marker { display:none; }
 +    .model-picker svg { fill:none; stroke:currentColor; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; }
@@ -2349,27 +2354,22 @@ index 0000000000000000000000000000000000000000..2b370541c7387ec103670325d31e03ba
 +      footer { position:relative; margin:6px 8px 0; padding:10px 8px 4px; border-radius:16px; }
 +      textarea { min-height:56px; max-height:min(120px,24dvh); font-size:16px; resize:none; }
 +      input,select,.composer-controls select { font-size:16px; min-height:44px; }
-+      .composer-controls { display:grid; grid-template-columns:44px minmax(0,1fr) 36px 28px; gap:2px; }
 +      .add-menu .settings-menu { display:flex; flex-direction:column; gap:8px; border-top:1px solid var(--pi-border-muted,#ddd); margin-top:8px; padding-top:8px; }
 +      .add-menu .settings-menu .permission-picker { position:static; width:100%; max-width:100%; }
 +      .add-menu .settings-menu summary { min-height:44px; padding:10px 5px; white-space:normal; text-align:left; }
 +      .add-menu .settings-menu .permission-menu { position:static; width:auto; max-height:none; overflow:visible; box-shadow:none; margin-top:4px; }
-+      .settings-menu .plan-toggle,.plan-status .plan-toggle { min-height:44px; }
++      .composer-leading .plan-toggle { min-height:44px; padding:4px; }
 +      .permission-heading { flex-wrap:wrap; gap:4px 12px; }
 +      .add-item { flex-wrap:wrap; } .add-description { font-size:12px; }
-+      .settings-menu .composer-spacer { display:none; }
 +      .context-picker { position:relative; max-width:100%; }
-+      .context-picker>summary { width:44px; height:44px; } .composer-controls>.primary { width:28px; height:28px; min-height:28px; align-self:center; }
++      .context-picker>summary { width:44px; height:44px; } .composer-trailing>.primary { width:28px; height:28px; min-height:28px; align-self:center; }
 +      .voice-input { width:36px; min-height:44px; }
-+      .composer-controls>button { min-height:44px; }
-+      .mobile-model-controls { display:flex; align-items:center; justify-content:flex-end; min-width:0; gap:4px; }
-+      .mobile-model-controls .model-picker { position:static; flex:1; max-width:100%; }
-+      .mobile-model-controls .model-picker>summary { gap:8px; min-height:36px; padding:6px 10px; font-size:13px; }
-+      .mobile-model-controls .model-menu { right:8px; bottom:56px; width:min(300px,calc(100% - 16px)); }
++      .composer-trailing>button { min-height:44px; }
++      .composer-trailing .model-picker { position:static; }
++      .composer-trailing .model-picker>summary { gap:8px; min-height:36px; padding:6px 10px; font-size:13px; }
++      .composer-trailing .model-menu { right:8px; bottom:56px; width:min(300px,calc(100% - 16px)); }
 +      .effort-slider input { min-height:32px; }
 +      .model-option { min-height:44px; }
-+      .mobile-model-controls .plan-toggle { padding:4px; }
-+      .mobile-model-controls .plan-toggle span { display:none; }
 +
 +      .context-menu button { min-height:44px; }
 +      .context-entries { max-height:25dvh; }
