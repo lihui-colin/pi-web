@@ -343,10 +343,10 @@ index 0000000000000000000000000000000000000000..f014f4798729eb43524f9631a8ee94ce
 +}
 diff --git a/pi-web-plugins/codex/CodexPanel.test.ts b/pi-web-plugins/codex/CodexPanel.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..a25e4d4c4ac1d795794059027e2ac80736829fbf
+index 0000000000000000000000000000000000000000..92e1a3097b91344e32c0f962388817b039191aa8
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.test.ts
-@@ -0,0 +1,1077 @@
+@@ -0,0 +1,1164 @@
 +// @vitest-environment happy-dom
 +import { afterEach, describe, expect, it, vi } from "vitest";
 +import type { PluginPeerChannelOptions, FileTreeResponse, JsonValue, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
@@ -1232,7 +1232,7 @@ index 0000000000000000000000000000000000000000..a25e4d4c4ac1d795794059027e2ac807
 +    expect(panel.shadowRoot?.querySelectorAll(".conversation-card")).toHaveLength(2);
 +    expect(request).not.toHaveBeenCalledWith("create", expect.anything());
 +  });
-+  it.each([false, true])("archives a conversation without opening it (failure=%s)", async (fail) => {
++  it.each([false, true])("archives a conversation only after confirmation without opening it (failure=%s)", async (fail) => {
 +    const { panel, view, runtime, request } = await fixture();
 +    runtime.select(view, "");
 +    view.threads = [{ id: "saved", preview: "Saved chat" }];
@@ -1242,12 +1242,99 @@ index 0000000000000000000000000000000000000000..a25e4d4c4ac1d795794059027e2ac807
 +    });
 +    panel.requestUpdate(); await panel.updateComplete;
 +    panel.shadowRoot?.querySelector<HTMLButtonElement>(".archive-conversation")?.click();
++    await panel.updateComplete;
++    expect(request).not.toHaveBeenCalledWith("archive", expect.anything());
++    expect(view.threads).toHaveLength(1);
++    const confirm = panel.shadowRoot?.querySelector<HTMLButtonElement>('[aria-label="Confirm archive Saved chat"]');
++    expect(confirm?.textContent).toBe("Confirm");
++    confirm?.dispatchEvent(new Event("pointerdown", { bubbles: true, composed: true }));
++    confirm?.focus(); await panel.updateComplete;
++    expect(confirm?.textContent).toBe("Confirm");
++    confirm?.click();
 +    await vi.waitFor(() => { expect(request).toHaveBeenCalledWith("archive", { threadId: "saved" }); expect(view.pending).toBe(false); });
 +    await panel.updateComplete;
 +    expect(view.threadId).toBe("");
 +    expect(panel.shadowRoot?.querySelectorAll(".conversation-card")).toHaveLength(fail ? 1 : 0);
++    expect(panel.shadowRoot?.querySelector(".archive-confirm")).toBeNull();
 +    if (fail) expect(view.error).toContain("Archive failed");
 +    expect(request).not.toHaveBeenCalledWith("create", expect.anything());
++  });
++  it.each(["pointerdown", "click", "focusin", "Escape"])("cancels archive confirmation on %s without archiving", async (event) => {
++    const { panel, view, runtime, request, textarea } = await fixture();
++    runtime.select(view, "");
++    view.threads = [{ id: "saved", preview: "Saved chat" }];
++    panel.requestUpdate(); await panel.updateComplete;
++    const archive = panel.shadowRoot?.querySelector<HTMLButtonElement>(".archive-conversation");
++    archive?.focus(); archive?.click(); await panel.updateComplete;
++    if (event === "Escape") archive?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, composed: true }));
++    else textarea.dispatchEvent(new Event(event, { bubbles: true, composed: true }));
++    await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelector(".archive-confirm")).toBeNull();
++    expect(archive?.getAttribute("aria-label")).toBe("Archive Saved chat");
++    if (event === "Escape") expect(panel.shadowRoot?.activeElement).toBe(archive);
++    expect(request).not.toHaveBeenCalledWith("archive", expect.anything());
++    archive?.click(); await panel.updateComplete;
++    expect(archive?.textContent).toBe("Confirm");
++    expect(request).not.toHaveBeenCalledWith("archive", expect.anything());
++  });
++  it("confirms only the selected conversation when switching archive targets", async () => {
++    const { panel, view, runtime, request } = await fixture();
++    runtime.select(view, "");
++    view.threads = [{ id: "first", preview: "First" }, { id: "second", preview: "Second" }];
++    panel.requestUpdate(); await panel.updateComplete;
++    const buttons = panel.shadowRoot?.querySelectorAll<HTMLButtonElement>(".archive-conversation") ?? [];
++    buttons[0]?.click(); await panel.updateComplete;
++    buttons[1]?.click(); await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelectorAll(".archive-confirm")).toHaveLength(1);
++    expect(buttons[0]?.getAttribute("aria-label")).toBe("Archive First");
++    expect(buttons[1]?.getAttribute("aria-label")).toBe("Confirm archive Second");
++    expect(request).not.toHaveBeenCalledWith("archive", expect.anything());
++    buttons[1]?.click();
++    await vi.waitFor(() => { expect(view.pending).toBe(false); });
++    expect(request).toHaveBeenCalledWith("archive", { threadId: "second" });
++    expect(request).not.toHaveBeenCalledWith("archive", { threadId: "first" });
++    expect(view.threads.map((thread) => thread["id"])).toEqual(["first"]);
++  });
++  it("sends only one archive request while confirmation is pending", async () => {
++    const { panel, view, runtime, request } = await fixture();
++    runtime.select(view, "");
++    view.threads = [{ id: "saved", preview: "Saved chat" }];
++    let finish: (() => void) | undefined;
++    request.mockImplementation((operation) => operation === "archive"
++      ? new Promise((resolve) => { finish = () => { resolve({ archived: true }); }; })
++      : Promise.resolve({ changed: false }));
++    panel.requestUpdate(); await panel.updateComplete;
++    const archive = panel.shadowRoot?.querySelector<HTMLButtonElement>(".archive-conversation");
++    archive?.click(); await panel.updateComplete;
++    expect(archive?.textContent).toBe("Confirm");
++    archive?.click(); archive?.click(); await panel.updateComplete;
++    expect(view.pending).toBe(true);
++    expect(archive?.disabled).toBe(true);
++    expect(request.mock.calls.filter(([operation]) => operation === "archive")).toEqual([["archive", { threadId: "saved" }]]);
++    finish?.();
++    await vi.waitFor(() => { expect(view.pending).toBe(false); });
++    await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelector(".conversation-card")).toBeNull();
++  });
++  it.each(["workspace", "conversation", "busy", "disconnect"])("clears archive confirmation after a %s change", async (change) => {
++    const { panel, view, runtime, request, scope } = await fixture();
++    runtime.select(view, "");
++    const thread = { id: "saved", preview: "Saved chat", busy: false };
++    view.threads = [thread];
++    panel.requestUpdate(); await panel.updateComplete;
++    panel.shadowRoot?.querySelector<HTMLButtonElement>(".archive-conversation")?.click(); await panel.updateComplete;
++    if (change === "workspace") panel.context = context(request, "local", "/other");
++    if (change === "conversation") runtime.select(view, "saved");
++    if (change === "busy") thread.busy = true;
++    if (change === "disconnect") view.connected = false;
++    panel.requestUpdate(); await panel.updateComplete;
++    panel.context = scope;
++    if (change === "conversation") runtime.select(view, "");
++    view.connected = true; thread.busy = false;
++    panel.requestUpdate(); await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelector(".archive-confirm")).toBeNull();
++    expect(panel.shadowRoot?.querySelector(".archive-conversation")?.getAttribute("aria-label")).toBe("Archive Saved chat");
++    expect(request).not.toHaveBeenCalledWith("archive", expect.anything());
 +  });
 +  it("toggles extra conversations below More and loads older server pages", async () => {
 +    const { panel, view, runtime, request } = await fixture();
@@ -1426,10 +1513,10 @@ index 0000000000000000000000000000000000000000..a25e4d4c4ac1d795794059027e2ac807
 +});
 diff --git a/pi-web-plugins/codex/CodexPanel.ts b/pi-web-plugins/codex/CodexPanel.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..dbc8704228e1f7fd58d755f634a591ebd4412725
+index 0000000000000000000000000000000000000000..2b370541c7387ec103670325d31e03bad9191e07
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.ts
-@@ -0,0 +1,832 @@
+@@ -0,0 +1,864 @@
 +import { LitElement, css, html, svg, nothing } from "lit";
 +import { property } from "lit/decorators.js";
 +import { repeat } from "lit/directives/repeat.js";
@@ -1537,6 +1624,7 @@ index 0000000000000000000000000000000000000000..dbc8704228e1f7fd58d755f634a591eb
 +  private reviewOpen = false;
 +  private modelListOpen = false;
 +  private historyExpanded = false;
++  private archiveConfirmation = "";
 +  private compactScope = false;
 +  private readonly resizeObserver = new ResizeObserver(() => { this.requestUpdate(); });
 +  private readonly markdown = new Map<string, { text: string; html: string }>();
@@ -1552,26 +1640,31 @@ index 0000000000000000000000000000000000000000..dbc8704228e1f7fd58d755f634a591eb
 +  }
 +  private readonly dismissMenus = (event: Event): void => {
 +    const path = event.composedPath();
++    const confirm = this.renderRoot.querySelector(".archive-confirm");
++    if (confirm && !path.includes(confirm)) this.cancelArchive();
 +    for (const menu of this.renderRoot.querySelectorAll<HTMLDetailsElement>(".model-picker, .context-picker, .permission-picker, .header-actions")) {
 +      if (!path.includes(menu)) { menu.open = false; if (menu.classList.contains("model-picker") && this.modelListOpen) { this.modelListOpen = false; this.requestUpdate(); } if (menu.classList.contains("context-picker")) this.addPage = "menu"; }
 +    }
 +  };
 +  private readonly onMenuKeydown = (event: KeyboardEvent): void => {
-+    if (event.key === "Escape") this.closeMenus(true);
++    if (event.key === "Escape") { this.closeMenus(true); this.cancelArchive(); }
 +  };
 +  override connectedCallback(): void {
 +    super.connectedCallback();
 +    this.resizeObserver.observe(this);
 +    this.ownerDocument.addEventListener("pointerdown", this.dismissMenus, true);
++    this.ownerDocument.addEventListener("click", this.dismissMenus, true);
 +    this.ownerDocument.addEventListener("focusin", this.dismissMenus, true);
 +    this.ownerDocument.addEventListener("keydown", this.onMenuKeydown);
 +    this.requestUpdate();
 +  }
 +  override disconnectedCallback(): void {
 +    this.ownerDocument.removeEventListener("pointerdown", this.dismissMenus, true);
++    this.ownerDocument.removeEventListener("click", this.dismissMenus, true);
 +    this.ownerDocument.removeEventListener("focusin", this.dismissMenus, true);
 +    this.ownerDocument.removeEventListener("keydown", this.onMenuKeydown);
 +    this.cancelVoice();
++    this.cancelArchive();
 +    this.closeMenus();
 +    this.unsubscribe?.(); this.unsubscribe = undefined;
 +    this.resizeObserver.disconnect(); super.disconnectedCallback();
@@ -1579,6 +1672,7 @@ index 0000000000000000000000000000000000000000..dbc8704228e1f7fd58d755f634a591eb
 +  protected override willUpdate(): void {
 +    if (this.context === undefined || this.runtime === undefined) return;
 +    const view = this.runtime.view(this.context);
++    if (view !== this.view || view.threadId !== "" || !view.connected || !view.threads.some((thread) => text(thread["id"]) === this.archiveConfirmation && thread["busy"] !== true)) this.archiveConfirmation = "";
 +    if (this.voiceTarget && (this.voiceTarget.view !== view || this.voiceTarget.generation !== view.generation || this.voiceTarget.threadId !== view.threadId || view.pending || view.sending || view.snapshot["busy"] === true)) this.cancelVoice();
 +    if (view === this.view && this.unsubscribe !== undefined) return;
 +    this.unsubscribe?.();
@@ -1880,11 +1974,30 @@ index 0000000000000000000000000000000000000000..dbc8704228e1f7fd58d755f634a591eb
 +    if (seconds < 604800) return `${String(Math.floor(seconds / 86400))} days ago`;
 +    return new Date(timestamp).toLocaleDateString();
 +  }
++  private cancelArchive(): void {
++    if (this.archiveConfirmation === "") return;
++    this.archiveConfirmation = "";
++    this.requestUpdate();
++  }
++  private archiveConversation(view: CodexView, id: string): void {
++    if (view.pending || !view.connected) return;
++    if (this.archiveConfirmation === id) {
++      this.cancelArchive();
++      this.action((runtime, state) => runtime.archive(state, id));
++    } else {
++      this.archiveConfirmation = id;
++      this.requestUpdate();
++    }
++  }
 +  private renderConversationRows(view: CodexView, threads: RecordValue[]) {
-+    return repeat(threads, (thread) => text(thread["id"]), (thread) => html`
-+      <div class="conversation-row"><button class="conversation-card" ?disabled=${view.pending || !view.connected} @click=${() => { this.openConversation(view, text(thread["id"])); }}>
++    return repeat(threads, (thread) => text(thread["id"]), (thread) => {
++      const id = text(thread["id"]);
++      const confirming = this.archiveConfirmation === id;
++      return html`
++      <div class=${`conversation-row${confirming ? " confirming-archive" : ""}`}><button class="conversation-card" ?disabled=${view.pending || !view.connected} @click=${() => { this.cancelArchive(); this.openConversation(view, id); }}>
 +        <span class="conversation-copy"><span class="conversation-title">${text(thread["preview"]) || "Untitled conversation"}</span>${thread["busy"] === true ? html`<span class="conversation-spinner" role="status" aria-label="Response in progress" title="Response in progress"></span>` : html`<span class="conversation-time">${this.conversationTime(thread)}</span>`}</span>
-+      </button>${thread["busy"] === true ? nothing : html`<button class="archive-conversation" aria-label=${`Archive ${text(thread["preview"]) || "Untitled conversation"}`} title="Archive conversation" ?disabled=${view.pending || !view.connected} @click=${() => { this.action((runtime, state) => runtime.archive(state, text(thread["id"]))); }}><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 8v12h16V8M3 3h18v5H3zM9 12h6"></path></svg></button>`}</div>`);
++      </button>${thread["busy"] === true ? nothing : html`<button class=${`archive-conversation${confirming ? " archive-confirm" : ""}`} aria-label=${`${confirming ? "Confirm archive" : "Archive"} ${text(thread["preview"]) || "Untitled conversation"}`} title=${confirming ? "Confirm archive" : "Archive conversation"} ?disabled=${view.pending || !view.connected} @click=${() => { this.archiveConversation(view, id); }}>${confirming ? "Confirm" : html`<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 8v12h16V8M3 3h18v5H3zM9 12h6"></path></svg>`}</button>`}</div>`;
++    });
 +  }
 +  private renderConversationHome(view: CodexView) {
 +    const hasMore = view.threads.length > 5 || view.cursor !== "";
@@ -1894,7 +2007,7 @@ index 0000000000000000000000000000000000000000..dbc8704228e1f7fd58d755f634a591eb
 +        <div class="conversation-list">${this.renderConversationRows(view, view.threads.slice(0, 5))}</div>
 +        ${view.threads.length === 0 ? html`<p class="home-empty">${view.pending ? "Loading conversations…" : "No conversations yet. Send a message below to start one."}</p>` : nothing}
 +        ${hasMore ? html`<button class="more-conversations" aria-expanded=${this.historyExpanded} aria-controls="older-conversations" ?disabled=${view.pending || !view.connected} @click=${() => {
-+          this.historyExpanded = !this.historyExpanded; this.requestUpdate();
++          this.cancelArchive(); this.historyExpanded = !this.historyExpanded; this.requestUpdate();
 +          if (this.historyExpanded && view.threads.length <= 5 && view.cursor !== "") this.action((runtime, state) => runtime.list(state, true));
 +        }}><span>More <span aria-hidden="true">${this.historyExpanded ? "⌃" : "⌄"}</span></span><span class="more-count">${view.threads.length > 5 ? String(view.threads.length - 5) : ""}${view.cursor !== "" ? "+" : ""}</span></button>` : nothing}
 +        ${this.historyExpanded ? html`<div id="older-conversations" class="conversation-list">${this.renderConversationRows(view, view.threads.slice(5))}
@@ -2094,6 +2207,12 @@ index 0000000000000000000000000000000000000000..dbc8704228e1f7fd58d755f634a591eb
 +    .conversation-row { position:relative; display:flex; align-items:center; border-radius:6px; } .conversation-row:hover,.conversation-row:focus-within { background:var(--pi-surface-hover,#ededed); } .archive-conversation { position:absolute; right:4px; top:50%; transform:translateY(-50%); display:grid; place-items:center; width:26px; height:26px; padding:5px; opacity:0; pointer-events:none; color:var(--pi-muted,#858585); } .archive-conversation svg { width:16px; height:16px; fill:none; stroke:currentColor; stroke-width:1.7; stroke-linecap:round; stroke-linejoin:round; }
 +    .conversation-card { display:flex; align-items:center; width:100%; min-width:0; min-height:30px; padding:5px 6px; text-align:left; border-radius:6px; } .conversation-card:hover { background:transparent; }
 +    .conversation-row:hover .archive-conversation,.conversation-row:focus-within .archive-conversation { opacity:1; pointer-events:auto; } .conversation-row:hover .conversation-time,.conversation-row:focus-within .conversation-time { opacity:0; } @media(hover:none) { .conversation-row .archive-conversation { opacity:1; pointer-events:auto; width:44px; height:44px; right:0; } .conversation-row .conversation-time { display:none; } .conversation-row .conversation-card { min-height:44px; padding-right:48px; } }
++    .conversation-row.confirming-archive { background:var(--pi-surface-hover,#ededed); border-radius:20px; }
++    .conversation-row.confirming-archive .conversation-card { flex:1; width:auto; padding-right:6px; }
++    .confirming-archive .conversation-time { display:none; }
++    .conversation-row .archive-confirm { position:static; transform:none; flex:none; width:auto; height:24px; margin:0 6px; padding:0 10px; border-radius:999px; opacity:1; pointer-events:auto; font-size:12px; color:var(--pi-danger,#c33); background:color-mix(in srgb,var(--pi-danger,#c33) 28%,var(--pi-bg,#fff)); }
++    .conversation-row .archive-confirm:hover { background:color-mix(in srgb,var(--pi-danger,#c33) 38%,var(--pi-bg,#fff)); }
++    @media(hover:none) { .conversation-row .archive-confirm { height:36px; } }
 +    .conversation-copy { display:flex; align-items:center; gap:12px; flex:1; min-width:0; } .conversation-title { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 +    .conversation-spinner { flex:none; width:12px; height:12px; margin-right:7px; box-sizing:border-box; border:1.5px solid var(--pi-muted,#888); border-right-color:transparent; border-radius:50%; animation:send-spin .7s linear infinite; }
 +    @media(prefers-reduced-motion:reduce) { .conversation-spinner { animation:none; } }
@@ -3601,7 +3720,7 @@ index 84c5e06a280a16955a9fe76fe4448be4a1553ecd..71df44c9cda0c9a474dc30ba9e710424
    const readyPath = join(tempDir, "dist/.plugins-ready");
 diff --git a/scripts/codex-plugin.artifact.mjs b/scripts/codex-plugin.artifact.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..d2a118a1a6dbc363a9c674e3aa1cbc4f03312327
+index 0000000000000000000000000000000000000000..4b12dec425526f6d8acd01da9425d5b61bb0b9cb
 --- /dev/null
 +++ b/scripts/codex-plugin.artifact.mjs
 @@ -0,0 +1,34 @@
@@ -3616,7 +3735,7 @@ index 0000000000000000000000000000000000000000..d2a118a1a6dbc363a9c674e3aa1cbc4f
 +  const metadata = JSON.parse(await readFile(resolve(root, "package.json"), "utf8"));
 +  expect(metadata.piWeb.plugins[0]).toMatchObject({ id: "pi-web.codex", machineSpecific: true });
 +  const browser = new Window({ url: "http://localhost/" });
-+  const names = ["window", "document", "customElements", "HTMLElement", "Document", "CSSStyleSheet", "ShadowRoot", "Node", "localStorage"];
++  const names = ["window", "document", "customElements", "HTMLElement", "Document", "CSSStyleSheet", "ShadowRoot", "Node", "localStorage", "ResizeObserver"];
 +  const original = new Map(names.map((name) => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
 +  for (const name of names) Object.defineProperty(globalThis, name, { value: name === "window" ? browser : browser[name], configurable: true });
 +  const activations = [];
