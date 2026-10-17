@@ -342,10 +342,10 @@ index 0000000000000000000000000000000000000000..0b502fb51e57c77aa0c45a8be1715e33
 +}
 diff --git a/pi-web-plugins/codex/CodexPanel.test.ts b/pi-web-plugins/codex/CodexPanel.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..182e46ce188a04e1507c79b15ed14ceb07a0ba1e
+index 0000000000000000000000000000000000000000..42a4ad4bec562181abf4f5eec70ad302bdc74dfb
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.test.ts
-@@ -0,0 +1,858 @@
+@@ -0,0 +1,896 @@
 +// @vitest-environment happy-dom
 +import { afterEach, describe, expect, it, vi } from "vitest";
 +import type { PluginPeerChannelOptions, FileTreeResponse, JsonValue, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
@@ -379,6 +379,43 @@ index 0000000000000000000000000000000000000000..182e46ce188a04e1507c79b15ed14ceb
 +}
 +
 +describe("Codex panel", () => {
++  it("shows Codex turn times beside copy, with message-specific order and no invented dates", async () => {
++    const { panel, view } = await fixture();
++    view.snapshot = { items: [
++      { id: "u", kind: "userMessage", text: "Question", turnStartedAt: 1700000000 },
++      { id: "a", kind: "agentMessage", phase: "final_answer", text: "Answer", turnStartedAt: 1700000000, turnCompletedAt: 1700000060 },
++      { id: "old", kind: "agentMessage", text: "Old history" },
++      { id: "bad", kind: "agentMessage", text: "Invalid", turnStartedAt: 1e20 },
++    ] };
++    panel.requestUpdate(); await panel.updateComplete;
++    const root = panel.shadowRoot!;
++    const userTime = root.querySelector<HTMLTimeElement>(".userMessage .message-actions > time:first-child");
++    const answerTime = root.querySelector<HTMLTimeElement>(".agentMessage .message-actions > .copy-button + time");
++    expect(userTime?.dateTime).toBe(new Date(1700000000000).toISOString());
++    expect(answerTime?.dateTime).toBe(new Date(1700000060000).toISOString());
++    expect(userTime?.textContent).toBe(new Date(1700000000000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
++    expect(root.querySelectorAll(".message-time")).toHaveLength(2);
++  });
++  it("restores the copy icon after success and resets feedback on repeated clicks", async () => {
++    const { panel, view } = await fixture();
++    vi.useFakeTimers();
++    vi.stubGlobal("isSecureContext", true);
++    const writeText = vi.fn().mockResolvedValue(undefined);
++    vi.stubGlobal("navigator", { clipboard: { writeText } });
++    view.snapshot = { items: [{ id: "a", kind: "agentMessage", text: "Answer" }] };
++    panel.requestUpdate(); await panel.updateComplete;
++    const button = panel.shadowRoot!.querySelector<HTMLButtonElement>(".copy-button")!;
++    button.click(); await vi.advanceTimersByTimeAsync(0);
++    expect(button.dataset["copyState"]).toBe("copied");
++    expect(button.querySelector(".copy-check")).not.toBeNull();
++    await vi.advanceTimersByTimeAsync(1500);
++    button.click(); await vi.advanceTimersByTimeAsync(600);
++    expect(button.dataset["copyState"]).toBe("copied");
++    await vi.advanceTimersByTimeAsync(1400);
++    expect(button.dataset["copyState"]).toBeUndefined();
++    expect(button.getAttribute("aria-label")).toBe("Copy message or tool output");
++    expect(writeText).toHaveBeenCalledWith("Answer");
++  });
 +  it.each(["available", "missing", "undefined", "null", "no-writeText", "denied", "blocked"])("copies messages and code with clipboard %s even during session work", async (clipboardState) => {
 +    const { panel, view } = await fixture();
 +    const writeText = vi.fn().mockImplementation(() => clipboardState === "denied" || clipboardState === "blocked" ? Promise.reject(new Error("Denied")) : Promise.resolve());
@@ -396,7 +433,8 @@ index 0000000000000000000000000000000000000000..182e46ce188a04e1507c79b15ed14ceb
 +        const button = panel.shadowRoot?.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
 +        if (!button) throw new Error("Missing copy button");
 +        button.click();
-+        await vi.waitFor(() => expect(button.textContent).toBe(clipboardState === "blocked" ? "Copy failed — retry" : "Copied"));
++        await vi.waitFor(() => expect(button.dataset["copyState"]).toBe(clipboardState === "blocked" ? "failed" : "copied"));
++        expect(button.getAttribute("aria-label")).toBe(clipboardState === "blocked" ? "Copy failed — retry" : "Copied to clipboard");
 +        expect(button.disabled).toBe(false);
 +        if (clipboardState === "available") expect(writeText).toHaveBeenLastCalledWith(expected);
 +        else expect(fallback).toHaveBeenLastCalledWith("copy");
@@ -1206,10 +1244,10 @@ index 0000000000000000000000000000000000000000..182e46ce188a04e1507c79b15ed14ceb
 +});
 diff --git a/pi-web-plugins/codex/CodexPanel.ts b/pi-web-plugins/codex/CodexPanel.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..0919114c32ccf31159416d47f1a846eb46934057
+index 0000000000000000000000000000000000000000..a8613149d7bf3f504af7e5a6c1365d36ee49d41b
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.ts
-@@ -0,0 +1,670 @@
+@@ -0,0 +1,701 @@
 +import { LitElement, css, html, svg, nothing } from "lit";
 +import { property } from "lit/decorators.js";
 +import { repeat } from "lit/directives/repeat.js";
@@ -1236,6 +1274,7 @@ index 0000000000000000000000000000000000000000..0919114c32ccf31159416d47f1a846eb
 +  @property({ attribute: false }) context: WorkspacePanelContext | undefined;
 +  @property({ attribute: false }) runtime: CodexBrowserRuntime | undefined;
 +  private view: CodexView | undefined;
++  private readonly copyTimers = new WeakMap<HTMLButtonElement, ReturnType<typeof setTimeout>>();
 +  private unsubscribe: (() => void) | undefined;
 +  private historyNavigation: { view: CodexView; generation: number; entries: string[]; index: number; draft: string; value: string } | undefined;
 +  private voice: VoiceRecognition | undefined;
@@ -1392,6 +1431,10 @@ index 0000000000000000000000000000000000000000..0919114c32ccf31159416d47f1a846eb
 +    if (this.follow && transcript !== null) transcript.scrollTop = transcript.scrollHeight;
 +  }
 +  private async copyText(value: string, button: HTMLButtonElement): Promise<void> {
++    const previousTimer = this.copyTimers.get(button);
++    if (previousTimer !== undefined) clearTimeout(previousTimer);
++    const icon = button.classList.contains("copy-button");
++    const label = icon ? "Copy message or tool output" : "Copy code block";
 +    button.disabled = true;
 +    let copied = false;
 +    try {
@@ -1400,8 +1443,17 @@ index 0000000000000000000000000000000000000000..0919114c32ccf31159416d47f1a846eb
 +      // Report clipboard failures at the clicked button without changing session state.
 +    } finally {
 +      button.disabled = false;
-+      button.textContent = copied ? "Copied" : "Copy failed — retry";
++      button.dataset["copyState"] = copied ? "copied" : "failed";
++      if (!icon) button.textContent = copied ? "✓" : "Copy failed — retry";
++      button.setAttribute("aria-label", copied ? "Copied to clipboard" : "Copy failed — retry");
 +      button.title = copied ? "Copied to clipboard" : "Clipboard access failed. Retry or select the text to copy manually.";
++      this.copyTimers.set(button, setTimeout(() => {
++        delete button.dataset["copyState"];
++        button.setAttribute("aria-label", label);
++        button.title = label;
++        if (!icon) button.textContent = "Copy code";
++        this.copyTimers.delete(button);
++      }, 2000));
 +    }
 +  }
 +  private action(action: (runtime: CodexBrowserRuntime, view: CodexView) => Promise<unknown>): void {
@@ -1703,14 +1755,23 @@ index 0000000000000000000000000000000000000000..0919114c32ccf31159416d47f1a846eb
 +  private renderDiff(body: string) {
 +    return html`<pre class="diff">${body.split("\n").map((line) => html`<span class=${line.startsWith("+") && !line.startsWith("+++") ? "addition" : line.startsWith("-") && !line.startsWith("---") ? "deletion" : line.startsWith("@@") ? "hunk" : "context"}>${line || " "}</span>`)}</pre>`;
 +  }
++  private renderMessageTime(item: RecordValue) {
++    const completed = item["kind"] === "agentMessage" && item["phase"] === "final_answer" && typeof item["turnCompletedAt"] === "number";
++    const value = completed ? item["turnCompletedAt"] : item["turnStartedAt"];
++    if (typeof value !== "number" || !Number.isFinite(value)) return nothing;
++    const date = new Date(value * 1000);
++    if (!Number.isFinite(date.getTime())) return nothing;
++    const label = completed ? "Turn completed" : "Turn started";
++    return html`<time class="message-time" datetime=${date.toISOString()} title=${`${label}: ${date.toLocaleString()}`}>${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>`;
++  }
 +  private renderItem(item: RecordValue) {
 +    const kind = text(item["kind"]);
 +    const body = text(item["text"]);
-+    const copy = html`<button aria-label="Copy message or tool output" @click=${(event: Event) => { if (event.currentTarget instanceof HTMLButtonElement) void this.copyText(body, event.currentTarget); }}>Copy</button>`;
++    const copy = html`<button class="copy-button" aria-label="Copy message or tool output" title="Copy message or tool output" @click=${(event: Event) => { if (event.currentTarget instanceof HTMLButtonElement) void this.copyText(body, event.currentTarget); }}><svg class="copy-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="3" width="13" height="13" rx="3"></rect><rect x="3" y="8" width="13" height="13" rx="3"></rect></svg><svg class="copy-check" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"></path></svg><span class="copy-error" aria-hidden="true">!</span></button>`;
 +    if (kind === "userMessage" || kind === "agentMessage") {
 +      return html`<article class=${`${kind} ${text(item["phase"]) === "commentary" ? "commentary" : ""}`} aria-label=${kind === "userMessage" ? "Your message" : "Codex response"}>
 +        ${kind === "agentMessage" ? html`<div class="markdown">${unsafeHTML(this.markdownHtml(item))}</div>` : html`<div class="user-text">${body}</div>`}
-+        <div class="message-actions">${copy}</div></article>`;
++        <div class="message-actions">${kind === "userMessage" ? html`${this.renderMessageTime(item)}${copy}` : html`${copy}${this.renderMessageTime(item)}`}</div></article>`;
 +    }
 +    const state = this.activityState(item);
 +    const elapsed = this.duration(item["durationMs"]);
@@ -1812,7 +1873,15 @@ index 0000000000000000000000000000000000000000..0919114c32ccf31159416d47f1a846eb
 +    .permission-check { flex:none; width:20px; text-align:center; font-size:20px; }
 +    .permission-picker .permission-warning,.permission-warning .permission-description { color:var(--permission-warning); }
 +    .primary { display:grid; place-items:center; flex:none; width:28px; height:28px; padding:0; border-radius:50%; background:var(--pi-text,#171717); color:var(--pi-bg,#fff); font-size:18px; line-height:1; } .primary:hover { background:var(--pi-muted,#666); } .stop-icon { width:10px; height:10px; border-radius:2px; background:currentColor; }
-+    .message-actions { height:24px; opacity:0; display:flex; gap:4px; font-size:11px; color:var(--pi-muted,#777); } article:hover .message-actions,article:focus-within .message-actions { opacity:1; } .userMessage { position:relative; margin-bottom:32px; } .userMessage .message-actions { position:absolute; top:100%; right:4px; } .commentary { margin-bottom:12px; }
++    .message-time { white-space:nowrap; font-size:12px; }
++    .copy-button { display:inline-flex; align-items:center; justify-content:center; width:28px; height:24px; padding:3px; border-radius:50%; }
++    .copy-button svg { width:18px; height:18px; fill:none; stroke:currentColor; stroke-width:1.5; }
++    .copy-button .copy-check,.copy-button .copy-error { display:none; }
++    .copy-button[data-copy-state="copied"] .copy-icon,.copy-button[data-copy-state="failed"] .copy-icon { display:none; }
++    .copy-button[data-copy-state="copied"] .copy-check,.copy-button[data-copy-state="failed"] .copy-error { display:block; }
++    .copy-button[data-copy-state="copied"] { background:var(--pi-surface,#f3f3f3); }
++    @media (hover:none) { :host .message-actions { opacity:1; } }
++    .message-actions { height:24px; opacity:0; display:flex; align-items:center; gap:8px; font-size:11px; color:var(--pi-muted,#777); } article:hover .message-actions,article:focus-within .message-actions { opacity:1; } .userMessage { position:relative; margin-bottom:32px; } .userMessage .message-actions { position:absolute; top:100%; right:4px; } .commentary { margin-bottom:12px; }
 +    .transcript .activity-group { border:0; padding:0; margin:12px 0 20px; } .activity-group>summary { display:flex; align-items:center; gap:8px; list-style:none; } .activity-group>summary::before { content:"›"; } .activity-group[open]>summary::before { transform:rotate(90deg); } .activity-group>summary>span:nth-of-type(2) { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .activity-group small { margin-left:auto; }
 +    .activity-items { border-left:1px solid var(--pi-border-muted,#e5e5e5); margin:6px 0 0 12px; padding-left:12px; } .transcript .activity-item { margin:4px 0 8px; } .activity-item>summary { display:flex; align-items:center; gap:8px; list-style:none; } .activity-item>summary::before { content:"›"; } .activity-item[open]>summary::before { transform:rotate(90deg); } .activity-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .activity-status { flex:none; font-size:11px; color:var(--pi-muted,#888); } .failed>summary,.failed .activity-status { color:var(--pi-danger,#c33); }
 +    .command-shell { border:1px solid var(--pi-border-muted,#e5e5e5); border-radius:10px; overflow:hidden; margin:8px 0; background:var(--pi-surface,#f7f7f7); color:var(--pi-text,#171717); } .command-line { display:flex; gap:10px; padding:12px; font:12px/1.6 monospace; } .command-line code { white-space:pre-wrap; overflow-wrap:anywhere; } .command-line>span { color:var(--pi-muted,#888); } .transcript .command-shell pre { padding:0 12px 12px; border-radius:0; max-height:320px; overflow:auto; } .command-footer { border-top:1px solid var(--pi-border-muted,#e5e5e5); padding:7px 12px; font-size:11px; display:flex; gap:12px; } .command-footer>span { margin-left:auto; max-width:60%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -2118,10 +2187,10 @@ index 0000000000000000000000000000000000000000..d3d0bcbd7c51804463cb85883b66abf1
 +export const createCodexConnection: ConnectionFactory = (cwd, event, exited) => new CodexProcess(cwd, event, exited);
 diff --git a/pi-web-plugins/codex/server/codexService.test.ts b/pi-web-plugins/codex/server/codexService.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..6a50887a49f3c944ee98a6b9f6fff8e73f737451
+index 0000000000000000000000000000000000000000..bc4fc07a6eaedea1cc5dd7104b503c76e35cef72
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/codexService.test.ts
-@@ -0,0 +1,322 @@
+@@ -0,0 +1,340 @@
 +import { mkdtemp, mkdir, writeFile, symlink, rm } from "node:fs/promises";
 +import { join } from "node:path";
 +import { tmpdir } from "node:os";
@@ -2162,6 +2231,24 @@ index 0000000000000000000000000000000000000000..6a50887a49f3c944ee98a6b9f6fff8e7
 +}
 +
 +describe("Codex workspace service", () => {
++  it("retains Codex turn timestamps for stored and resumed messages", async () => {
++    const f = fixture();
++    const saved = { id: "saved", cwd: "/work/one", turns: [{ id: "old", status: "completed", startedAt: 1700000000, completedAt: 1700000060, items: [{ id: "answer", type: "agentMessage", phase: "final_answer", text: "Saved" }] }] };
++    f.request.mockImplementation(async (method) => method === "thread/read" || method === "thread/resume" ? { thread: saved } : method === "turn/start" ? { turn: { id: "next" } } : {});
++    expect((await f.call("snapshot", { threadId: "saved" }))["items"]).toEqual([expect.objectContaining({ turnStartedAt: 1700000000, turnCompletedAt: 1700000060 })]);
++    await f.call("send", { threadId: "saved", text: "Continue" });
++    expect((await f.call("snapshot", { threadId: "saved" }))["items"]).toEqual([expect.objectContaining({ turnStartedAt: 1700000000, turnCompletedAt: 1700000060 })]);
++  });
++  it("propagates live Codex timestamps through deltas and completion without replacing them with local time", async () => {
++    const f = fixture();
++    await f.call("create");
++    f.emit({ method: "turn/started", params: { threadId: "new", turn: { id: "turn", startedAt: 1700000000, status: "inProgress" } } });
++    f.emit({ method: "item/agentMessage/delta", params: { threadId: "new", turnId: "turn", itemId: "answer", delta: "Hello" } });
++    expect((await f.call("snapshot", { threadId: "new" }))["items"]).toEqual([expect.objectContaining({ turnStartedAt: 1700000000 })]);
++    f.emit({ method: "item/completed", params: { threadId: "new", turnId: "turn", item: { id: "answer", type: "agentMessage", phase: "final_answer", text: "Hello" } } });
++    f.emit({ method: "turn/completed", params: { threadId: "new", turn: { id: "turn", completedAt: 1700000060, status: "completed" } } });
++    expect((await f.call("snapshot", { threadId: "new" }))["items"]).toEqual([expect.objectContaining({ turnStartedAt: 1700000000, turnCompletedAt: 1700000060 })]);
++  });
 +  it("reports active conversations until their turns complete", async () => {
 +    const f = fixture();
 +    await f.call("create");
@@ -2446,10 +2533,10 @@ index 0000000000000000000000000000000000000000..6a50887a49f3c944ee98a6b9f6fff8e7
 +});
 diff --git a/pi-web-plugins/codex/server/codexService.ts b/pi-web-plugins/codex/server/codexService.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..1c0bf7270ac9b033d5f1a72043ba711c3ea6cbb9
+index 0000000000000000000000000000000000000000..fb94fea1177d2db635b768b377d67ec7b64b12b6
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/codexService.ts
-@@ -0,0 +1,491 @@
+@@ -0,0 +1,518 @@
 +import { isAbsolute, relative, resolve, sep } from "node:path";
 +import { realpath, stat } from "node:fs/promises";
 +import type { JsonValue, ServerPluginPeerRequestContext, ServerPluginPeerChannelOpenContext, ServerPluginPeerChannel } from "@jmfederico/pi-web/server-plugin-api";
@@ -2457,6 +2544,7 @@ index 0000000000000000000000000000000000000000..1c0bf7270ac9b033d5f1a72043ba711c
 +import { array, bounded, errorText, object, string, text, permissionMode, type PermissionMode, chatMode, type ChatMode, type RecordValue } from "./protocol.js";
 +
 +interface ThreadState {
++  turnTimes?: Map<string, RecordValue>;
 +  id: string;
 +  version: number;
 +  model: string;
@@ -2679,6 +2767,7 @@ index 0000000000000000000000000000000000000000..1c0bf7270ac9b033d5f1a72043ba711c
 +          if (typeof current["model"] === "string") this.settings(thread, current);
 +        } catch { /* The turn was accepted; keep the last authoritative settings on read failure. */ }
 +        const turn = object(result["turn"]);
++        this.rememberTurnTimes(thread, turn);
 +        thread.turnId = string(turn["id"]);
 +        // A fast turn may have completed before the response arrives.
 +        this.started(thread);
@@ -2789,7 +2878,7 @@ index 0000000000000000000000000000000000000000..1c0bf7270ac9b033d5f1a72043ba711c
 +    const thread: ThreadState = { id, model: text(saved["model"]), effort: text(saved["reasoningEffort"]), version: --this.historyVersion, turnId: "", status: "Stored history", error: "", busy: false, items: new Map(), inputHistory: new Map(), approvals: new Map(), policy: null, mode: null };
 +    for (const entry of array(saved["turns"])) {
 +      const turn = object(entry);
-+      for (const item of array(turn["items"])) this.item(thread, { ...object(item), turnId: turn["id"] ?? "", turnStatus: turn["status"] ?? "", turnDurationMs: turn["durationMs"] ?? null });
++      for (const item of array(turn["items"])) this.item(thread, { ...object(item), turnId: turn["id"] ?? "", turnStatus: turn["status"] ?? "", turnDurationMs: turn["durationMs"] ?? null, turnStartedAt: turn["startedAt"] ?? null, turnCompletedAt: turn["completedAt"] ?? null });
 +    }
 +    // Do not cache external history: its owner can persist more items between polls.
 +    return thread;
@@ -2813,7 +2902,8 @@ index 0000000000000000000000000000000000000000..1c0bf7270ac9b033d5f1a72043ba711c
 +      this.settings(thread, resumed);
 +      for (const entry of array(object(resumed["thread"])["turns"])) {
 +        const turn = object(entry);
-+        for (const item of array(turn["items"])) this.item(thread, { ...object(item), turnId: turn["id"] ?? "", turnStatus: turn["status"] ?? "", turnDurationMs: turn["durationMs"] ?? null }, false);
++        this.rememberTurnTimes(thread, turn);
++        for (const item of array(turn["items"])) this.item(thread, { ...object(item), turnId: turn["id"] ?? "", turnStatus: turn["status"] ?? "", turnDurationMs: turn["durationMs"] ?? null, turnStartedAt: turn["startedAt"] ?? null, turnCompletedAt: turn["completedAt"] ?? null }, false);
 +        if (turn["status"] === "inProgress") { thread.busy = true; thread.turnId = text(turn["id"]); thread.status = "inProgress"; }
 +      }
 +      thread.version++; this.notify(thread);
@@ -2865,6 +2955,11 @@ index 0000000000000000000000000000000000000000..1c0bf7270ac9b033d5f1a72043ba711c
 +      if (typeof raw[key] === "number" && Number.isFinite(raw[key])) details[key] = raw[key];
 +    }
 +    const turnId = text(raw["turnId"]) || thread.turnId || text(previous?.["turnId"]);
++    const times = thread.turnTimes?.get(turnId);
++    for (const key of ["turnStartedAt", "turnCompletedAt"]) {
++      const value = raw[key] ?? times?.[key];
++      if (typeof value === "number" && Number.isFinite(value)) details[key] = value;
++    }
 +    const status = text(raw["status"]) || text(raw["turnStatus"]) || text(previous?.["status"]);
 +    if (kind === "userMessage" && body.trim() !== "") {
 +      thread.inputHistory.set(id, body);
@@ -2876,6 +2971,24 @@ index 0000000000000000000000000000000000000000..1c0bf7270ac9b033d5f1a72043ba711c
 +    thread.items.set(id, { ...previous, id, kind, text: bounded(body), status,
 +      ...(turnId ? { turnId } : {}), ...(typeof raw["phase"] === "string" ? { phase: raw["phase"] } : {}), ...details });
 +    while (thread.items.size > 512) { const first = thread.items.keys().next().value; if (first !== undefined) thread.items.delete(first); }
++  }
++  private rememberTurnTimes(thread: ThreadState, turn: RecordValue): void {
++    const id = text(turn["id"]);
++    if (!id) return;
++    const times = thread.turnTimes ??= new Map();
++    const entry = times.get(id) ?? {};
++    for (const [source, target] of [["startedAt", "turnStartedAt"], ["completedAt", "turnCompletedAt"]] as const) {
++      const value = turn[source];
++      if (typeof value === "number" && Number.isFinite(value)) entry[target] = value;
++    }
++    times.set(id, entry);
++    for (const item of thread.items.values()) {
++      if (item["turnId"] === id) Object.assign(item, entry);
++    }
++    while (times.size > 512) {
++      const first = times.keys().next().value;
++      if (first !== undefined) times.delete(first);
++    }
 +  }
 +  private event(state: WorkspaceState, frame: RecordValue): void {
 +    const params = object(frame["params"] ?? {});
@@ -2899,6 +3012,7 @@ index 0000000000000000000000000000000000000000..1c0bf7270ac9b033d5f1a72043ba711c
 +      this.settings(thread, { model: settings["model"] ?? null, reasoningEffort: settings["effort"] ?? null, collaborationMode: settings["collaborationMode"] ?? null });
 +    } else if (method === "turn/started" || method === "turn/completed") {
 +      const turn = object(params["turn"]);
++      this.rememberTurnTimes(thread, turn);
 +      thread.turnId = text(turn["id"]);
 +      thread.status = text(turn["status"]);
 +      thread.busy = method === "turn/started";
@@ -2916,7 +3030,7 @@ index 0000000000000000000000000000000000000000..1c0bf7270ac9b033d5f1a72043ba711c
 +    } else if (["item/agentMessage/delta", "item/commandExecution/outputDelta", "item/reasoning/summaryTextDelta", "item/reasoning/textDelta", "item/plan/delta"].includes(method)) {
 +      const id = string(params["itemId"]);
 +      const kind = method.includes("reasoning/") ? "reasoning" : method.includes("commandExecution/") ? "commandExecution" : method.includes("plan/") ? "plan" : "agentMessage";
-+      const item = thread.items.get(id) ?? { id, kind, text: "", status: "inProgress", turnId: params["turnId"] ?? thread.turnId };
++      const item = thread.items.get(id) ?? { id, kind, text: "", status: "inProgress", turnId: params["turnId"] ?? thread.turnId, ...thread.turnTimes?.get(text(params["turnId"]) || thread.turnId) };
 +      if (kind === "reasoning") {
 +        const field = method.includes("summaryText") ? "summaryText" : "contentText";
 +        item[field] = bounded(text(item[field]) + text(params["delta"]));
