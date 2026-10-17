@@ -49,7 +49,7 @@ function fixture({ conflict = false, failure = '', agent = true, agentVersion = 
   writeFileSync(join(source, 'patches', '0001-layout.patch'), patch);
   writeFileSync(join(source, 'patches', 'base-commit'), (conflict ? git(upstream, 'rev-parse', 'HEAD') : baseCommit) + '\n');
   mkdirSync(join(source, 'scripts'));
-  copyFileSync(join(repo, '.pi-web.conf.example'), join(source, '.pi-web.conf.example'));
+  copyFileSync(join(repo, 'pi-web.conf.example'), join(source, 'pi-web.conf.example'));
   for (const file of ['install.sh', 'sync.sh', 'pi-web-run-jmfederico.sh']) copyFileSync(join(repo, 'scripts', file), join(source, 'scripts', file));
   writeFileSync(join(source, '.gitignore'), '/data\n');
   git(source, 'add', '.');
@@ -304,7 +304,7 @@ function updateFixture({ running = false } = {}) {
   const runDir = join(root, 'run');
   mkdirSync(runDir);
   mkdirSync(join(root, 'data'));
-  writeFileSync(join(root, 'data/.pi-web.conf'), `PI_WEB_RUN_DIR='${runDir}'\n`);
+  writeFileSync(join(root, 'data/pi-web.conf'), `PI_WEB_RUN_DIR='${runDir}'\n`);
   if (running) writeFileSync(join(runDir, 'server.pid'), String(process.pid));
   writeFileSync(join(bin, 'npm'), `#!/bin/sh
 printf 'npm %s\\n' "$*" >> "$TEST_LOG"
@@ -507,8 +507,8 @@ exec '${realGit}' "$@"
 
 test('install creates local config from template and preserves it on reinstall', () => {
   const f = fixture();
-  const config = join(f.source, 'data/.pi-web.conf');
-  const template = join(f.source, '.pi-web.conf.example');
+  const config = join(f.source, 'data/pi-web.conf');
+  const template = join(f.source, 'pi-web.conf.example');
   assert.equal(existsSync(config), false);
   const first = f.run();
   assert.equal(first.status, 0, first.stderr);
@@ -523,7 +523,7 @@ test('install creates local config from template and preserves it on reinstall',
 
 test('install stops before syncing if config and template are missing', () => {
   const f = fixture();
-  rmSync(join(f.source, '.pi-web.conf.example'));
+  rmSync(join(f.source, 'pi-web.conf.example'));
   const result = f.run();
   assert.notEqual(result.status, 0);
   assert.equal(existsSync(join(f.source, 'data/pi-web-upstream.git')), false);

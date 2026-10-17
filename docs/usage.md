@@ -32,7 +32,7 @@
 sh scripts/install.sh
 ```
 
-`install.sh` 首先检查 `data/.pi-web.conf`，不存在时从根目录 `.pi-web.conf.example` 创建，已有配置保持不变。随后执行：
+`install.sh` 首先检查 `data/pi-web.conf`，不存在时从根目录 `pi-web.conf.example` 创建，已有配置保持不变。随后执行：
 
 1. 创建独立安装仓库，以 detached HEAD 检出 `patches/base-commit` 指定的提交（先由 sync.sh 同步至 data/pi-web-upstream.git），按文件名顺序应用当前工作区 `patches/*.patch`，使用 Git 三方合并。
 2. 在生成目录的 `.npmrc` 中配置 node-pty/esbuild 的安装脚本权限，安装依赖。

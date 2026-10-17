@@ -40,14 +40,14 @@ bash scripts/pi-web-run-jmfederico.sh restart             # 先停止，再启�
 bash scripts/pi-web-run-jmfederico.sh --help              # 查看完整帮助
 ```
 
-仓库提供配置模板 [`.pi-web.conf.example`](.pi-web.conf.example)。`install.sh` 会在 `data/.pi-web.conf` 不存在时自动从模板创建，已有配置不会覆盖。也可手动创建：
+仓库提供配置模板 [`pi-web.conf.example`](pi-web.conf.example)。`install.sh` 会在 `data/pi-web.conf` 不存在时自动从模板创建，已有配置不会覆盖。也可手动创建：
 
 ```bash
 mkdir -p data
-cp -n .pi-web.conf.example data/.pi-web.conf
+cp -n pi-web.conf.example data/pi-web.conf
 ```
 
-按需编辑 `data/.pi-web.conf`（已被 Git 忽略，不提交到仓库），使用 Bash 赋值语法设置端口，例如：
+按需编辑 `data/pi-web.conf`（已被 Git 忽略，不提交到仓库），使用 Bash 赋值语法设置端口，例如：
 
 ```bash
 PI_WEB_PORT=25224
@@ -66,7 +66,7 @@ PI_WEB_PORT=25224
 
 配置文件也可填写模板中的更新设置，例如下载地址、安装目录和测试并发数。
 
-修改端口或运行目录前，先执行 `stop`，再编辑 `data/.pi-web.conf` 并执行 `start`；若已经修改配置，应先恢复原配置并停止旧服务，再切换到新配置。
+修改端口或运行目录前，先执行 `stop`，再编辑 `data/pi-web.conf` 并执行 `start`；若已经修改配置，应先恢复原配置并停止旧服务，再切换到新配置。
 
 默认按端口隔离实例，状态、socket、日志和 PID 文件保存在仓库 `data/pi-web/<port>/` 下。`start`、`stop`、`restart`、`status`、`logs` 和 `update` 均使用当前配置，`stop` 不再自动选择其他端口的实例。
 

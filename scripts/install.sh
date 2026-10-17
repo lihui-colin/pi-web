@@ -11,7 +11,7 @@ Usage: bash scripts/install.sh [install]
 
 install (default): Run sync.sh to reuse or fetch patches/base-commit and apply patches,
   then test, build and link global pi-web commands.
-  Creates data/.pi-web.conf from .pi-web.conf.example if missing.
+  Creates data/pi-web.conf from pi-web.conf.example if missing.
   Installs Pi Agent if missing; preserves an existing Agent.
   Does not manage services. No options accepted.
 
@@ -30,10 +30,10 @@ install_local() (
       }
     done
     script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-    local_config="$script_dir/../data/.pi-web.conf"
+    local_config="$script_dir/../data/pi-web.conf"
     if [[ ! -e "$local_config" ]]; then
       mkdir -p "$script_dir/../data"
-      cp -n "$script_dir/../.pi-web.conf.example" "$local_config"
+      cp -n "$script_dir/../pi-web.conf.example" "$local_config"
       printf 'Created local configuration: %s\n' "$local_config"
     fi
 

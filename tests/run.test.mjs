@@ -26,7 +26,7 @@ setInterval(() => {}, 1000);
   const run = (action, port, overrides = {}) => {
     const settings = Object.entries(overrides).filter(([key]) => key.startsWith('PI_WEB_'));
     if (port !== undefined) settings.push(['PI_WEB_PORT', port]);
-    if (settings.length) writeFileSync(join(root, 'data/.pi-web.conf'), settings.map(([key, value]) => `${key}='${value.replaceAll("'", "'\\''")}'`).join('\n') + '\n');
+    if (settings.length) writeFileSync(join(root, 'data/pi-web.conf'), settings.map(([key, value]) => `${key}='${value.replaceAll("'", "'\\''")}'`).join('\n') + '\n');
     return spawnSync('bash', [join(root, 'scripts/run.sh'), action], {
       env: { ...env, ...overrides }, encoding: 'utf8', timeout: 10000,
     });
@@ -224,9 +224,9 @@ test('service environment cannot override config or defaults', () => {
       mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, 'server.pid'), String(process.pid));
     }
-    writeFileSync(join(f.root, 'data/.pi-web.conf'), 'PI_WEB_PORT=8425\nPI_WEB_HOST=127.0.0.1\n');
+    writeFileSync(join(f.root, 'data/pi-web.conf'), 'PI_WEB_PORT=8425\nPI_WEB_HOST=127.0.0.1\n');
     assert.match(run().stdout, /http:\/\/127\.0\.0\.1:8425/);
-    rmSync(join(f.root, 'data/.pi-web.conf'));
+    rmSync(join(f.root, 'data/pi-web.conf'));
     assert.match(run().stdout, /http:\/\/0\.0\.0\.0:8024/);
   } finally { f.cleanup(); }
 });
@@ -234,7 +234,7 @@ test('service environment cannot override config or defaults', () => {
 test('invalid configured port is rejected before starting services', () => {
   const f = fixture();
   try {
-    writeFileSync(join(f.root, 'data/.pi-web.conf'), 'PI_WEB_PORT=65536\n');
+    writeFileSync(join(f.root, 'data/pi-web.conf'), 'PI_WEB_PORT=65536\n');
     assert.equal(f.run('start').status, 2);
     assert.equal(existsSync(join(f.root, 'data/pi-web')), false);
   } finally { f.cleanup(); }

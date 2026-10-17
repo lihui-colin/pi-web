@@ -13,7 +13,7 @@
 #   ./scripts/pi-web-run-jmfederico.sh status               # 查看状态
 #   ./scripts/pi-web-run-jmfederico.sh logs                 # 跟随服务日志
 #
-# 服务配置从仓库 data/.pi-web.conf 读取（参见 .pi-web.conf.example）：
+# 服务配置从仓库 data/pi-web.conf 读取（参见 pi-web.conf.example）：
 #   PI_WEB_HOST      绑定地址，默认 0.0.0.0
 #   PI_WEB_PORT      监听端口，默认 8024
 #   PI_WEB_PASSWORD  设置后（若支持）开启访问保护
@@ -25,7 +25,7 @@ set -euo pipefail
 
 script_file="$(readlink -f "${BASH_SOURCE[0]}")"
 project_root="$(cd "$(dirname "$script_file")/.." && pwd)"
-config_file="$project_root/data/.pi-web.conf"
+config_file="$project_root/data/pi-web.conf"
 # Service settings come only from the local config, not the calling shell.
 unset PI_WEB_PORT PI_WEB_HOST PI_WEB_PASSWORD PI_WEB_DATA_DIR PI_WEB_RUN_DIR \
     PI_WEB_SESSIOND_SOCKET PI_WEB_SESSIOND_PORT PI_WEB_SESSIOND_URL
@@ -53,7 +53,7 @@ PI WEB (jmfederico) 手动运行管理脚本
 
 参数:
   -h, --help       显示本帮助并退出
-  本地配置：仓库 data/.pi-web.conf，示例 PI_WEB_PORT=8080（不提交 Git）。
+  本地配置：仓库 data/pi-web.conf，示例 PI_WEB_PORT=8080（不提交 Git）。
 
 更新选项:
   --pi-only        只升级 Pi Coding Agent
