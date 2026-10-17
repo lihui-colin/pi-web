@@ -87,3 +87,5 @@ bash scripts/pi-web-run-jmfederico.sh update --pi-only    # 只更新 Pi Agent
 运行脚本的 `update` 负责更新，不启停服务。更新后需要生效时，执行 `restart`（使用当前配置）。默认升级 Pi Agent 到 latest、获取官方 main 最新提交并写入 `patches/base-commit`，然后构建安装补丁版 pi-web。`PI_VERSION` 仅用于首次 install 补装 Agent。`--update-relay` 同步升级全局 relay skill。`update` 自动跟随官方 `main`；补丁冲突时停止并保留新基线和现场，需要适配补丁后重试。`--dry-run` 不改写基线。
 
 新增独立 **Codex** 插件，可在 Terminal 后打开 Codex 对话、恢复历史并处理审批。安装前置条件和使用限制见 [Codex 插件说明](docs/codex-usage.md)。
+
+语音识别目前仅保留 [实施计划](docs/语音识别.md) 和 [服务设计存档](docs/voice-service.md)，相关实现已移除。输入框保留麦克风按钮，暂不可用。

@@ -11,10 +11,10 @@ index 0000000000000000000000000000000000000000..b864cc1c7375582254410edbe397fcf2
 +Add an optional Codex workspace plugin with persistent conversations, streamed responses, tool output, approvals, and model selection using the workspace machine's Codex CLI. Restart sessiond after installing the plugin.
 diff --git a/pi-web-plugins/codex/CodexBrowserRuntime.ts b/pi-web-plugins/codex/CodexBrowserRuntime.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..f014f4798729eb43524f9631a8ee94ce9d70beaf
+index 0000000000000000000000000000000000000000..56c8e7dd23da973fe30602fc785da6d3c370e392
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexBrowserRuntime.ts
-@@ -0,0 +1,326 @@
+@@ -0,0 +1,327 @@
 +import type { PluginPeerChannel, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
 +import { array, errorText, object, text, permissionMode, type PermissionMode, chatMode, type ChatMode, type RecordValue } from "./server/protocol.js";
 +
@@ -182,6 +182,7 @@ index 0000000000000000000000000000000000000000..f014f4798729eb43524f9631a8ee94ce
 +    await this.list(view);
 +  }
 +  async send(view: CodexView): Promise<void> {
++    if (view.sending) return;
 +    const draft = view.draft;
 +    const references = [...view.references];
 +    let threadId = view.threadId;
@@ -218,7 +219,7 @@ index 0000000000000000000000000000000000000000..f014f4798729eb43524f9631a8ee94ce
 +        view.effort = "";
 +        if (view.draft === draft) this.saveDraft(view, "");
 +        this.saveReferences(view, view.references.filter((path) => !references.includes(path)));
-+        view.snapshot = { ...view.snapshot, busy: true, status: "starting", version: -1 };
++        view.snapshot = { ...view.snapshot, ...(result["queued"] === true ? {} : { busy: true, status: "starting" }), version: -1 };
 +      }
 +    } finally {
 +      view.sending = false; this.changed(view);
@@ -343,10 +344,10 @@ index 0000000000000000000000000000000000000000..f014f4798729eb43524f9631a8ee94ce
 +}
 diff --git a/pi-web-plugins/codex/CodexPanel.test.ts b/pi-web-plugins/codex/CodexPanel.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..9c20b818aff6182a14006723e36537f93418323b
+index 0000000000000000000000000000000000000000..8aba573235dee3f547dca85c40a7d45f83ef342b
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.test.ts
-@@ -0,0 +1,1164 @@
+@@ -0,0 +1,1210 @@
 +// @vitest-environment happy-dom
 +import { afterEach, describe, expect, it, vi } from "vitest";
 +import type { PluginPeerChannelOptions, FileTreeResponse, JsonValue, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
@@ -379,6 +380,11 @@ index 0000000000000000000000000000000000000000..9c20b818aff6182a14006723e36537f9
 +  return { request, runtime, view, panel, textarea, scope };
 +}
 +
++function required<T>(value: T | null | undefined): T {
++  if (value === null || value === undefined) throw new Error("Expected rendered control");
++  return value;
++}
++
 +async function chooseModel(panel: CodexPanel, name: string): Promise<void> {
 +  const trigger = panel.shadowRoot?.querySelector<HTMLButtonElement>('[aria-label="Model"]');
 +  if (!trigger) throw new Error("Expected model selector");
@@ -394,10 +400,10 @@ index 0000000000000000000000000000000000000000..9c20b818aff6182a14006723e36537f9
 +    const approval = (id: string) => ({ id, method: "item/tool/requestUserInput", params: { questions: [{ id: "q", question: "Choose", isOther: true, options: [{ label: "A" }] }] } });
 +    view.snapshot = { approvals: [approval("first")] };
 +    panel.requestUpdate(); await panel.updateComplete;
-+    panel.shadowRoot!.querySelector<HTMLInputElement>(".other-answer")!.value = "private answer for first question";
++    required(panel.shadowRoot?.querySelector<HTMLInputElement>(".other-answer")).value = "private answer for first question";
 +    view.snapshot = { approvals: [approval("second")] };
 +    panel.requestUpdate(); await panel.updateComplete;
-+    expect(panel.shadowRoot!.querySelector<HTMLInputElement>(".other-answer")!.value).toBe("");
++    expect(required(panel.shadowRoot?.querySelector<HTMLInputElement>(".other-answer")).value).toBe("");
 +  });
 +  it.each([true, false])("submits custom or selected answers when Other is allowed (custom=%s)", async (custom) => {
 +    const { panel, view, request } = await fixture();
@@ -406,17 +412,17 @@ index 0000000000000000000000000000000000000000..9c20b818aff6182a14006723e36537f9
 +      { id: "fixed", question: "Fixed", isOther: false, options: [{ label: "Only", description: "Fixed answer" }] },
 +    ] } }] };
 +    panel.requestUpdate(); await panel.updateComplete;
-+    const form = panel.shadowRoot!.querySelector<HTMLFormElement>("form.approval")!;
-+    const input = form.querySelector<HTMLInputElement>(".other-answer")!;
++    const form = required(panel.shadowRoot?.querySelector<HTMLFormElement>("form.approval"));
++    const input = required(form.querySelector<HTMLInputElement>(".other-answer"));
 +    expect(form.querySelectorAll(".other-answer")).toHaveLength(1);
 +    expect(input.type).toBe("password");
-+    const select = form.querySelector<HTMLSelectElement>("select")!;
++    const select = required(form.querySelector<HTMLSelectElement>("select"));
 +    select.value = "B";
 +    input.value = custom ? "My own approach" : "";
 +    // A background update should preserve the unsent answer.
 +    panel.requestUpdate(); await panel.updateComplete;
 +    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-+    await vi.waitFor(() => expect(request).toHaveBeenCalledWith("answer", { threadId: "thread", approvalId: "question", answers: { q: custom ? "My own approach" : "B", fixed: "Only" } }));
++    await vi.waitFor(() => { expect(request).toHaveBeenCalledWith("answer", { threadId: "thread", approvalId: "question", answers: { q: custom ? "My own approach" : "B", fixed: "Only" } }); });
 +  });
 +
 +  it.each([false, true])("preserves edits during first conversation creation (send fails=%s)", async (fail) => {
@@ -454,7 +460,7 @@ index 0000000000000000000000000000000000000000..9c20b818aff6182a14006723e36537f9
 +      { id: "bad", kind: "agentMessage", text: "Invalid", turnStartedAt: 1e20 },
 +    ] };
 +    panel.requestUpdate(); await panel.updateComplete;
-+    const root = panel.shadowRoot!;
++    const root = required(panel.shadowRoot);
 +    const userTime = root.querySelector<HTMLTimeElement>(".userMessage .message-actions > time:first-child");
 +    const answerTime = root.querySelector<HTMLTimeElement>(".agentMessage .message-actions > .copy-button + time");
 +    expect(userTime?.dateTime).toBe(new Date(1700000000000).toISOString());
@@ -470,7 +476,7 @@ index 0000000000000000000000000000000000000000..9c20b818aff6182a14006723e36537f9
 +    vi.stubGlobal("navigator", { clipboard: { writeText } });
 +    view.snapshot = { items: [{ id: "a", kind: "agentMessage", text: "Answer" }] };
 +    panel.requestUpdate(); await panel.updateComplete;
-+    const button = panel.shadowRoot!.querySelector<HTMLButtonElement>(".copy-button")!;
++    const button = required(panel.shadowRoot?.querySelector<HTMLButtonElement>(".copy-button"));
 +    button.click(); await vi.advanceTimersByTimeAsync(0);
 +    expect(button.dataset["copyState"]).toBe("copied");
 +    expect(button.querySelector(".copy-check")).not.toBeNull();
@@ -495,11 +501,11 @@ index 0000000000000000000000000000000000000000..9c20b818aff6182a14006723e36537f9
 +      view.snapshot = { items: [{ id: "answer", kind: "agentMessage", text: body }] };
 +      view.pending = true;
 +      panel.requestUpdate(); await panel.updateComplete;
-+      for (const [label, expected] of [["Copy message or tool output", body], ["Copy code block", "example\n"]]) {
++      for (const [label, expected] of [["Copy message or tool output", body], ["Copy code block", "example\n"]] as const) {
 +        const button = panel.shadowRoot?.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
 +        if (!button) throw new Error("Missing copy button");
 +        button.click();
-+        await vi.waitFor(() => expect(button.dataset["copyState"]).toBe(clipboardState === "blocked" ? "failed" : "copied"));
++        await vi.waitFor(() => { expect(button.dataset["copyState"]).toBe(clipboardState === "blocked" ? "failed" : "copied"); });
 +        expect(button.getAttribute("aria-label")).toBe(clipboardState === "blocked" ? "Copy failed — retry" : "Copied to clipboard");
 +        expect(button.disabled).toBe(false);
 +        if (clipboardState === "available") expect(writeText).toHaveBeenLastCalledWith(expected);
@@ -533,12 +539,12 @@ index 0000000000000000000000000000000000000000..9c20b818aff6182a14006723e36537f9
 +    let width = 390;
 +    vi.spyOn(panel, "getBoundingClientRect").mockImplementation(() => new DOMRect(0, 0, width, 700));
 +    panel.requestUpdate(); await panel.updateComplete;
-+    const root = panel.shadowRoot!;
++    const root = required(panel.shadowRoot);
 +    expect(root.querySelector(".plan-toggle")).toBeNull();
-+    root.querySelector<HTMLButtonElement>(".add-plan")!.click(); await panel.updateComplete;
++    required(root.querySelector<HTMLButtonElement>(".add-plan")).click(); await panel.updateComplete;
 +    for (const viewport of [390, 900, 390]) {
 +      width = viewport; panel.requestUpdate(); await panel.updateComplete;
-+      const status = root.querySelector<HTMLButtonElement>(".composer-leading .plan-toggle")!;
++      const status = required(root.querySelector<HTMLButtonElement>(".composer-leading .plan-toggle"));
 +      expect(status).not.toBeNull();
 +      expect(status.textContent).toContain("Plan");
 +      expect(status.getAttribute("aria-pressed")).toBe("true");
@@ -551,7 +557,7 @@ index 0000000000000000000000000000000000000000..9c20b818aff6182a14006723e36537f9
 +      panel.requestUpdate(); await panel.updateComplete;
 +      expect(status.disabled).toBe(false);
 +    }
-+    root.querySelector<HTMLButtonElement>(".plan-toggle")!.click(); await panel.updateComplete;
++    required(root.querySelector<HTMLButtonElement>(".plan-toggle")).click(); await panel.updateComplete;
 +    expect(view.mode).not.toBe("plan");
 +    expect(root.querySelector(".plan-toggle")).toBeNull();
 +    expect(root.querySelector(".add-plan")?.getAttribute("aria-pressed")).toBe("false");
@@ -562,9 +568,9 @@ index 0000000000000000000000000000000000000000..9c20b818aff6182a14006723e36537f9
 +    let width = 390;
 +    vi.spyOn(panel, "getBoundingClientRect").mockImplementation(() => new DOMRect(0, 0, width, 700));
 +    panel.requestUpdate(); await panel.updateComplete;
-+    const root = panel.shadowRoot!;
-+    const add = root.querySelector<HTMLDetailsElement>(".context-picker")!;
-+    const summary = add.querySelector<HTMLElement>("summary")!;
++    const root = required(panel.shadowRoot);
++    const add = required(root.querySelector<HTMLDetailsElement>(".context-picker"));
++    const summary = required(add.querySelector<HTMLElement>("summary"));
 +    expect(root.querySelector(".more-toggle")).toBeNull();
 +    expect(root.querySelectorAll("button[aria-label=Model]")).toHaveLength(1);
 +    for (const viewport of [390, 900, 390]) {
@@ -590,11 +596,11 @@ index 0000000000000000000000000000000000000000..9c20b818aff6182a14006723e36537f9
 +    await chooseModel(panel, "test-model");
 +    expect(view.model).toBe("test-model");
 +    add.open = true;
-+    const permission = add.querySelector<HTMLDetailsElement>(".permission-picker")!;
++    const permission = required(add.querySelector<HTMLDetailsElement>(".permission-picker"));
 +    permission.open = true;
 +    permission.dispatchEvent(new Event("pointerdown", { bubbles: true, composed: true }));
 +    expect(add.open).toBe(true);
-+    permission.querySelector<HTMLButtonElement>('[role="menuitemradio"]')!.click();
++    required(permission.querySelector<HTMLButtonElement>('[role="menuitemradio"]')).click();
 +    await panel.updateComplete;
 +    expect(view.permissionMode).toBe("ask-for-approval");
 +    expect(add.open).toBe(true);
@@ -647,79 +653,15 @@ index 0000000000000000000000000000000000000000..9c20b818aff6182a14006723e36537f9
 +    request.mockResolvedValue({ busyThreadIds: ["running"] });
 +    await runtime.refresh(view); await panel.updateComplete;
 +    expect(request).toHaveBeenCalledWith("activity", {});
-+    const rows = panel.shadowRoot!.querySelectorAll(".conversation-row");
++    const rows = required(panel.shadowRoot).querySelectorAll(".conversation-row");
 +    expect(rows[0]?.querySelector(".conversation-spinner")).not.toBeNull();
 +    expect(rows[0]?.querySelector(".archive-conversation")).toBeNull();
 +    expect(rows[1]?.querySelector(".conversation-spinner")).toBeNull();
 +    request.mockResolvedValue({ busyThreadIds: [] });
 +    await runtime.refresh(view); await panel.updateComplete;
-+    expect(panel.shadowRoot!.querySelector(".conversation-spinner")).toBeNull();
-+    expect(panel.shadowRoot!.querySelectorAll(".archive-conversation")).toHaveLength(2);
++    expect(required(panel.shadowRoot).querySelector(".conversation-spinner")).toBeNull();
++    expect(required(panel.shadowRoot).querySelectorAll(".archive-conversation")).toHaveLength(2);
 +  });
-+  function mockVoice() {
-+    class Recognition {
-+      lang = ""; continuous = false; interimResults = false;
-+      onresult: ((event: unknown) => void) | null = null;
-+      onerror: ((event: { error: string }) => void) | null = null;
-+      onend: (() => void) | null = null;
-+      start = vi.fn(); stop = vi.fn(); abort = vi.fn();
-+    }
-+    const voice = new Recognition();
-+    vi.stubGlobal("isSecureContext", true);
-+    vi.stubGlobal("SpeechRecognition", class { constructor() { return voice; } });
-+    return voice;
-+  }
-+  it("dictates into the draft without sending and keeps typed edits and final results", async () => {
-+    const voice = mockVoice();
-+    const { panel, view, runtime, request } = await fixture();
-+    runtime.saveDraft(view, "Existing"); await panel.updateComplete;
-+    const mic = panel.shadowRoot!.querySelector<HTMLButtonElement>(".voice-input")!;
-+    expect(mic.previousElementSibling?.matches(".model-picker")).toBe(true);
-+    expect(mic.nextElementSibling?.className).toBe("primary");
-+    mic.click(); await panel.updateComplete;
-+    expect(voice.start).toHaveBeenCalledOnce();
-+    expect(panel.shadowRoot!.querySelector<HTMLButtonElement>(".primary")!.disabled).toBe(true);
-+    voice.onresult?.({ resultIndex: 0, results: [{ isFinal: false, 0: { transcript: "你好" } }] });
-+    expect(view.draft).toBe("Existing");
-+    runtime.saveDraft(view, "Edited");
-+    const final = { resultIndex: 0, results: [{ isFinal: true, 0: { transcript: "你好" } }] };
-+    voice.onresult?.(final); voice.onresult?.(final);
-+    expect(view.draft).toBe("Edited 你好");
-+    mic.click(); expect(voice.stop).toHaveBeenCalledOnce();
-+    voice.onend?.(); await panel.updateComplete;
-+    expect(mic.getAttribute("aria-pressed")).toBe("false");
-+    expect(request.mock.calls.some(([op]) => op === "send")).toBe(false);
-+  });
-+  it("aborts voice on conversation switch and ignores late results", async () => {
-+    const voice = mockVoice();
-+    const { panel, view } = await fixture();
-+    panel.shadowRoot!.querySelector<HTMLButtonElement>(".voice-input")!.click();
-+    const late = voice.onresult;
-+    view.threadId = "other"; view.draft = "Other draft"; panel.requestUpdate(); await panel.updateComplete;
-+    expect(voice.abort).toHaveBeenCalledOnce();
-+    late?.({ resultIndex: 0, results: [{ isFinal: true, 0: { transcript: "stale" } }] });
-+    expect(view.draft).toBe("Other draft");
-+  });
-+  it("reports recognition errors, unsupported browsers and insecure origins", async () => {
-+    const voice = mockVoice();
-+    const { panel, view } = await fixture();
-+    view.draft = "Keep";
-+    const mic = panel.shadowRoot!.querySelector<HTMLButtonElement>(".voice-input")!;
-+    mic.click(); voice.onerror?.({ error: "not-allowed" }); await panel.updateComplete;
-+    expect(panel.shadowRoot!.textContent).toContain("Microphone access denied");
-+    expect(view.draft).toBe("Keep");
-+    vi.stubGlobal("SpeechRecognition", undefined); vi.stubGlobal("webkitSpeechRecognition", undefined);
-+    mic.click(); await panel.updateComplete;
-+    expect(panel.shadowRoot!.textContent).toContain("not supported by this browser");
-+    vi.stubGlobal("isSecureContext", false); mic.click(); await panel.updateComplete;
-+    expect(panel.shadowRoot!.textContent).toContain("requires HTTPS or localhost");
-+  });
-+  it("aborts microphone capture when the panel is removed", async () => {
-+    const voice = mockVoice(); const { panel } = await fixture();
-+    panel.shadowRoot!.querySelector<HTMLButtonElement>(".voice-input")!.click();
-+    panel.remove(); expect(voice.abort).toHaveBeenCalledOnce(); expect(voice.onresult).toBeNull();
-+  });
-+
 +  it("toggles Plan from Add and shows its inline indicator and placeholder", async () => {
 +    const { panel, textarea, view, request } = await fixture();
 +    const picker = panel.shadowRoot?.querySelector<HTMLDetailsElement>(".context-picker");
@@ -770,7 +712,7 @@ index 0000000000000000000000000000000000000000..9c20b818aff6182a14006723e36537f9
 +    runtime.select(view, ""); runtime.setMode(view, "plan"); runtime.saveDraft(view, "make a plan"); runtime.saveReferences(view, ["src"]);
 +    request.mockRejectedValueOnce(new Error("create failed")); await runtime.run(view, () => runtime.send(view));
 +    expect(view.threadId).toBe(""); expect(view.mode).toBe("plan"); expect(view.draft).toBe("make a plan");
-+    request.mockImplementation(async (operation) => { if (operation === "create") return { id: "created", model: "actual" }; if (operation === "send") throw new Error("send failed"); return { changed: false }; });
++    request.mockImplementation((operation) => { if (operation === "create") return Promise.resolve({ id: "created", model: "actual" }); if (operation === "send") return Promise.reject(new Error("send failed")); return Promise.resolve({ changed: false }); });
 +    await runtime.run(view, () => runtime.send(view));
 +    expect(view.threadId).toBe("created"); expect(view.mode).toBe("plan"); expect(view.draft).toBe("make a plan"); expect(view.references).toEqual(["src"]);
 +    expect(request).toHaveBeenCalledWith("send", { threadId: "created", text: "make a plan", mode: "plan", references: ["src"] });
@@ -836,7 +778,7 @@ index 0000000000000000000000000000000000000000..9c20b818aff6182a14006723e36537f9
 +  it("sends the selected permission mode on home creation and subsequent messages", async () => {
 +    const { view, runtime, request } = await fixture();
 +    runtime.select(view, ""); runtime.setPermissionMode(view, "ask-for-approval"); runtime.saveDraft(view, "hello");
-+    request.mockImplementation(async (operation) => operation === "create" ? { id: "new" } : { changed: false });
++    request.mockImplementation((operation) => Promise.resolve(operation === "create" ? { id: "new" } : { changed: false }));
 +    await runtime.send(view);
 +    expect(request).toHaveBeenCalledWith("create", { permissionMode: "ask-for-approval" });
 +    expect(request).toHaveBeenCalledWith("send", { mode: "default", threadId: "new", text: "hello", permissionMode: "ask-for-approval" });
@@ -847,7 +789,7 @@ index 0000000000000000000000000000000000000000..9c20b818aff6182a14006723e36537f9
 +  it("shows backend defaults on home and keeps them separate from thread settings and overrides", async () => {
 +    const { view, runtime, request, panel } = await fixture();
 +    runtime.select(view, "");
-+    request.mockImplementation(async (operation) => operation === "models" ? { defaultModel: "configured", defaultEffort: "high", data: [{ model: "catalog", displayName: "Catalog default", isDefault: true }, { model: "configured", displayName: "Configured model", defaultReasoningEffort: "low" }] } : { data: [], changed: false });
++    request.mockImplementation((operation) => Promise.resolve(operation === "models" ? { defaultModel: "configured", defaultEffort: "high", data: [{ model: "catalog", displayName: "Catalog default", isDefault: true }, { model: "configured", displayName: "Configured model", defaultReasoningEffort: "low" }] } : { data: [], changed: false }));
 +    await runtime.initialize(view); await panel.updateComplete;
 +    expect(panel.shadowRoot?.querySelector(".model-picker summary")?.textContent).toContain("Configured model");
 +    expect(panel.shadowRoot?.querySelector(".model-picker summary")?.textContent).toContain("High");
@@ -917,7 +859,101 @@ index 0000000000000000000000000000000000000000..9c20b818aff6182a14006723e36537f9
 +    expect(button.getAttribute("aria-label")).toBe("Send message");
 +    expect(button.querySelector(".send-spinner")).toBeNull();
 +  });
-+  it("uses one composer button to send, stop and return to idle", async () => {
++  it.each(["enter", "click", "context"])("queues additional input while running via %s and preserves edits during acknowledgement", async (action) => {
++    const { request, runtime, view, panel, textarea } = await fixture();
++    view.snapshot = { busy: true, status: "inProgress" };
++    runtime.saveDraft(view, action === "context" ? "" : "Focus on tests");
++    if (action === "context") runtime.saveReferences(view, ["src"]);
++    let accept!: (value: JsonValue) => void;
++    request.mockImplementation((operation) => operation === "send" ? new Promise<JsonValue>((resolve) => { accept = resolve; }) : Promise.resolve({ changed: false }));
++    panel.requestUpdate(); await panel.updateComplete;
++    const button = required(panel.shadowRoot?.querySelector<HTMLButtonElement>(".primary"));
++    expect(button.getAttribute("aria-label")).toBe("Queue message"); expect(button.disabled).toBe(false);
++    expect(textarea.disabled).toBe(false);
++    expect(panel.shadowRoot?.querySelector('[aria-label="Stop response"]')).not.toBeNull();
++    textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", shiftKey: true, bubbles: true }));
++    textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", isComposing: true, bubbles: true }));
++    expect(request.mock.calls.filter(([operation]) => operation === "send")).toHaveLength(0);
++    if (action === "enter") textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
++    else button.click();
++    textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
++    await runtime.send(view);
++    expect(request.mock.calls.filter(([operation]) => operation === "send")).toEqual([["send", { threadId: "thread", mode: "default", text: action === "context" ? "" : "Focus on tests", ...(action === "context" ? { references: ["src"] } : {}) }]]);
++    textarea.value = "Next instruction"; textarea.dispatchEvent(new Event("input"));
++    accept({ accepted: true, queued: true });
++    await vi.waitFor(() => { expect(view.pending).toBe(false); }); await panel.updateComplete;
++    expect(view.draft).toBe("Next instruction"); expect(view.references).toEqual([]);
++    expect(view.snapshot).toMatchObject({ busy: true, status: "inProgress" });
++    const stop = required(panel.shadowRoot?.querySelector<HTMLButtonElement>('[aria-label="Stop response"]'));
++    stop.click();
++    await vi.waitFor(() => { expect(request).toHaveBeenCalledWith("stop", { threadId: "thread" }); });
++    expect(view.draft).toBe("Next instruction");
++  });
++  it("keeps rejected queue input available for retry while the response continues", async () => {
++    const { request, runtime, view, panel, textarea } = await fixture();
++    view.snapshot = { busy: true, status: "inProgress" };
++    runtime.saveDraft(view, "Keep my input"); runtime.saveReferences(view, ["src"]);
++    request.mockImplementation((operation) => operation === "send" ? Promise.reject(new Error("Queue rejected")) : Promise.resolve({ changed: false }));
++    panel.requestUpdate(); await panel.updateComplete;
++    textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
++    await vi.waitFor(() => { expect(view.error).toContain("Queue rejected"); }); await panel.updateComplete;
++    expect(view.draft).toBe("Keep my input"); expect(view.references).toEqual(["src"]);
++    expect(runtime.inputHistory(view)).toEqual([]);
++    expect(view.snapshot).toMatchObject({ busy: true, status: "inProgress" });
++    expect(required(panel.shadowRoot?.querySelector<HTMLButtonElement>('[aria-label="Queue message"]')).disabled).toBe(false);
++  });
++  it("does not revive a completed response when queue acknowledgement arrives late", async () => {
++    const { request, runtime, view } = await fixture();
++    view.snapshot = { busy: true, status: "inProgress" }; runtime.saveDraft(view, "follow-up");
++    let accept!: (value: JsonValue) => void;
++    request.mockImplementation((operation) => operation === "send" ? new Promise<JsonValue>((resolve) => { accept = resolve; }) : Promise.resolve({ changed: false }));
++    const sending = runtime.send(view);
++    view.snapshot = { busy: false, status: "completed" };
++    accept({ accepted: true, queued: true }); await sending;
++    expect(view.snapshot).toMatchObject({ busy: false, status: "completed" }); expect(view.draft).toBe("");
++  });
++  it("shows queued messages after a snapshot and steers only on an explicit click", async () => {
++    const { request, runtime, view, panel } = await fixture();
++    const queue = [{ id: "q1", text: "First queued task" }, { id: "q2", text: "Second queued task" }];
++    request.mockImplementation((operation) => Promise.resolve(operation === "snapshot" ? { changed: true, busy: true, turnId: "active", status: "inProgress", queue } : { accepted: true }));
++    await runtime.refresh(view); await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelector('[aria-label="Queued messages"]')?.textContent).toContain("First queued task");
++    expect(panel.shadowRoot?.querySelectorAll(".steer-queued")).toHaveLength(2);
++    expect(request).not.toHaveBeenCalledWith("steer", expect.anything());
++    required(panel.shadowRoot?.querySelectorAll<HTMLButtonElement>(".steer-queued")[1]).click();
++    await vi.waitFor(() => { expect(request).toHaveBeenCalledWith("steer", { threadId: "thread", messageId: "q2", expectedTurnId: "active" }); expect(view.pending).toBe(false); });
++    runtime.select(view, "other"); await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelector('[aria-label="Queued messages"]')).toBeNull();
++    runtime.select(view, "thread"); await runtime.refresh(view); await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelectorAll(".queued-message")).toHaveLength(2);
++  });
++  it.each(["steer-queued", "remove-queued"])("keeps %s attached to the same message when an earlier row leaves the queue", async (action) => {
++    const { request, view, panel } = await fixture();
++    const queue = [{ id: "q1", text: "First" }, { id: "q2", text: "Second" }, { id: "q3", text: "Third" }];
++    view.snapshot = { busy: true, turnId: "active", queue }; panel.requestUpdate(); await panel.updateComplete;
++    const selected = required(panel.shadowRoot?.querySelectorAll<HTMLButtonElement>(`.${action}`)[1]);
++    selected.focus();
++    view.snapshot = { ...view.snapshot, queue: queue.slice(1) }; panel.requestUpdate(); await panel.updateComplete;
++    selected.click();
++    await vi.waitFor(() => { expect(request).toHaveBeenCalledWith(action === "steer-queued" ? "steer" : "removeQueued", { threadId: "thread", messageId: "q2", ...(action === "steer-queued" ? { expectedTurnId: "active" } : {}) }); });
++  });
++  it("preserves queued input on a failed Steer and allows removal and explicit resume", async () => {
++    const { request, view, panel } = await fixture();
++    view.snapshot = { busy: true, turnId: "active", queue: [{ id: "q1", text: "Keep this queued" }] };
++    request.mockImplementation((operation) => operation === "steer" ? Promise.reject(new Error("Steering failed")) : Promise.resolve({ changed: false }));
++    panel.requestUpdate(); await panel.updateComplete;
++    required(panel.shadowRoot?.querySelector<HTMLButtonElement>(".steer-queued")).click();
++    await vi.waitFor(() => { expect(view.error).toContain("Steering failed"); }); await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelector(".queued-message")?.textContent).toContain("Keep this queued");
++    required(panel.shadowRoot?.querySelector<HTMLButtonElement>(".remove-queued")).click();
++    await vi.waitFor(() => { expect(request).toHaveBeenCalledWith("removeQueued", { threadId: "thread", messageId: "q1" }); expect(view.pending).toBe(false); });
++    view.snapshot = { ...view.snapshot, busy: false, queuePaused: true }; panel.requestUpdate(); await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelector(".steer-queued")).toBeNull();
++    expect(panel.shadowRoot?.querySelector(".queue-heading")?.textContent).toContain("Queue paused");
++    required(panel.shadowRoot?.querySelector<HTMLButtonElement>(".resume-queue")).click();
++    await vi.waitFor(() => { expect(request).toHaveBeenCalledWith("resumeQueue", { threadId: "thread" }); });
++  });
++  it("uses one composer button to send, stop and return to idle when the input is empty", async () => {
 +    const { request, panel, textarea, view } = await fixture();
 +    const button = panel.shadowRoot?.querySelector<HTMLButtonElement>(".composer-trailing>.primary");
 +    if (button === null || button === undefined) throw new Error("Expected composer action");
@@ -1059,7 +1095,7 @@ index 0000000000000000000000000000000000000000..9c20b818aff6182a14006723e36537f9
 +      slider.value = "1"; slider.dispatchEvent(new Event("input")); await panel.updateComplete;
 +    }
 +    expect(panel.shadowRoot?.querySelector(".model-picker summary")?.textContent).toContain(explicit ? "Chosen model Extra high" : "Chosen model High");
-+    request.mockImplementation(async (operation) => operation === "create" ? { id: "created", model: "previous", effort: "low" } : operation === "send" ? { accepted: true, mode } : { changed: false });
++    request.mockImplementation((operation) => Promise.resolve(operation === "create" ? { id: "created", model: "previous", effort: "low" } : operation === "send" ? { accepted: true, mode } : { changed: false }));
 +    view.draft = "hello";
 +    await runtime.send(view);
 +    expect(request).toHaveBeenCalledWith("send", expect.objectContaining({ threadId: id || "created", mode, model: "chosen", effort: explicit ? "xhigh" : "high" }));
@@ -1210,35 +1246,46 @@ index 0000000000000000000000000000000000000000..9c20b818aff6182a14006723e36537f9
 +
 +  it.each([".header-heading>.back-button", ".new-chat"])("returns from a conversation with the home draft via %s", async (returnSelector) => {
 +    const { panel, view, runtime, request, textarea } = await fixture();
++    expect(panel.shadowRoot?.activeElement).not.toBe(textarea);
 +    runtime.select(view, ""); runtime.saveDraft(view, "home draft");
 +    view.threads = [{ id: "thread", preview: "Current" }, { id: "second", preview: "Second" }];
-+    request.mockImplementation(async (operation) => operation === "list" ? { data: view.threads } : { changed: true, items: [{ id: "answer", kind: "agentMessage", text: "Saved answer" }] });
++    request.mockImplementation((operation) => Promise.resolve(operation === "list" ? { data: view.threads } : { changed: true, items: [{ id: "answer", kind: "agentMessage", text: "Saved answer" }] }));
 +    panel.requestUpdate(); await panel.updateComplete;
 +    expect(panel.shadowRoot?.querySelector(".conversation-home")).not.toBeNull();
 +    expect(panel.shadowRoot?.querySelector(".transcript")).toBeNull();
 +    expect(textarea.value).toBe("home draft");
++    expect(panel.shadowRoot?.activeElement).not.toBe(textarea);
 +    const cards = panel.shadowRoot?.querySelectorAll<HTMLButtonElement>(".conversation-card");
++    textarea.focus();
 +    expect(cards).toHaveLength(2); cards?.[1]?.click(); await runtime.refresh(view); await panel.updateComplete;
 +    expect(view.threadId).toBe("second");
++    expect(panel.shadowRoot?.activeElement).not.toBe(textarea);
 +    expect(panel.shadowRoot?.querySelector(".conversation-home")).toBeNull();
 +    expect(panel.shadowRoot?.querySelector(".transcript")?.textContent).toContain("Saved answer");
 +    const back = panel.shadowRoot?.querySelector<HTMLButtonElement>(".header-heading>.back-button");
 +    expect(back?.textContent).toBe("←");
 +    expect(back?.nextElementSibling?.textContent).toBe("Second");
 +    expect(panel.shadowRoot?.querySelector("header")?.firstElementChild).toBe(back?.parentElement);
++    textarea.focus();
 +    panel.shadowRoot?.querySelector<HTMLButtonElement>(returnSelector)?.click();
 +    await vi.waitFor(() => { expect(view.pending).toBe(false); }); await panel.updateComplete;
 +    expect(view.threadId).toBe(""); expect(textarea.value).toBe("home draft");
++    expect(panel.shadowRoot?.activeElement === textarea).toBe(returnSelector === ".new-chat");
 +    expect(panel.shadowRoot?.querySelectorAll(".conversation-card")).toHaveLength(2);
 +    expect(request).not.toHaveBeenCalledWith("create", expect.anything());
++    textarea.blur();
++    panel.shadowRoot?.querySelector<HTMLButtonElement>(".new-chat")?.click();
++    expect(panel.shadowRoot?.activeElement).toBe(textarea);
++    await vi.waitFor(() => { expect(view.pending).toBe(false); }); await panel.updateComplete;
++    expect(panel.shadowRoot?.activeElement).toBe(textarea);
 +  });
 +  it.each([false, true])("archives a conversation only after confirmation without opening it (failure=%s)", async (fail) => {
 +    const { panel, view, runtime, request } = await fixture();
 +    runtime.select(view, "");
 +    view.threads = [{ id: "saved", preview: "Saved chat" }];
-+    request.mockImplementation(async (operation) => {
-+      if (operation === "archive" && fail) throw new Error("Archive failed");
-+      return { archived: true };
++    request.mockImplementation((operation) => {
++      if (operation === "archive" && fail) return Promise.reject(new Error("Archive failed"));
++      return Promise.resolve({ archived: true });
 +    });
 +    panel.requestUpdate(); await panel.updateComplete;
 +    panel.shadowRoot?.querySelector<HTMLButtonElement>(".archive-conversation")?.click();
@@ -1369,7 +1416,7 @@ index 0000000000000000000000000000000000000000..9c20b818aff6182a14006723e36537f9
 +  it("creates on first home send and carries the draft, context and model into the thread", async () => {
 +    const { panel, view, runtime, request, textarea } = await fixture();
 +    runtime.select(view, ""); runtime.saveReferences(view, ["src"]); view.model = "chosen"; view.effort = "high";
-+    request.mockImplementation(async (operation) => operation === "create" ? { id: "new" } : { changed: false });
++    request.mockImplementation((operation) => Promise.resolve(operation === "create" ? { id: "new" } : { changed: false }));
 +    textarea.value = "new task"; textarea.dispatchEvent(new Event("input")); await panel.updateComplete;
 +    const button = panel.shadowRoot?.querySelector<HTMLButtonElement>(".primary");
 +    expect(button?.disabled).toBe(false); button?.click();
@@ -1385,7 +1432,7 @@ index 0000000000000000000000000000000000000000..9c20b818aff6182a14006723e36537f9
 +    request.mockRejectedValueOnce(new Error("create failed"));
 +    await runtime.run(view, () => runtime.send(view));
 +    expect(view.threadId).toBe(""); expect(view.draft).toBe("keep me"); expect(view.references).toEqual(["src"]); expect(view.sending).toBe(false);
-+    request.mockImplementation(async (operation) => { if (operation === "create") return { id: "new" }; if (operation === "send") throw new Error("send failed"); return { changed: false }; });
++    request.mockImplementation((operation) => { if (operation === "create") return Promise.resolve({ id: "new" }); if (operation === "send") return Promise.reject(new Error("send failed")); return Promise.resolve({ changed: false }); });
 +    await runtime.run(view, () => runtime.send(view));
 +    expect(view.threadId).toBe("new"); expect(view.draft).toBe("keep me"); expect(view.references).toEqual(["src"]);
 +    request.mockResolvedValue({ changed: false }); await runtime.run(view, () => runtime.send(view));
@@ -1513,10 +1560,10 @@ index 0000000000000000000000000000000000000000..9c20b818aff6182a14006723e36537f9
 +});
 diff --git a/pi-web-plugins/codex/CodexPanel.ts b/pi-web-plugins/codex/CodexPanel.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..bd6ab644494ee9ea423ad543444171e5bdc9a87d
+index 0000000000000000000000000000000000000000..3a8a4d0a727b6960bae28c0a771e0af800713793
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.ts
-@@ -0,0 +1,864 @@
+@@ -0,0 +1,804 @@
 +import { LitElement, css, html, svg, nothing } from "lit";
 +import { property } from "lit/decorators.js";
 +import { repeat } from "lit/directives/repeat.js";
@@ -1527,18 +1574,6 @@ index 0000000000000000000000000000000000000000..bd6ab644494ee9ea423ad543444171e5
 +import { writeClipboardText } from "../terminal/clipboard.js";
 +import { renderWorkspaceMarkdownHtml } from "./markdown.js";
 +
-+interface VoiceRecognition {
-+  lang: string;
-+  continuous: boolean;
-+  interimResults: boolean;
-+  onresult: ((event: { resultIndex: number; results: ArrayLike<{ isFinal: boolean; 0: { transcript: string } }> }) => void) | null;
-+  onerror: ((event: { error: string }) => void) | null;
-+  onend: (() => void) | null;
-+  start(): void;
-+  stop(): void;
-+  abort(): void;
-+}
-+
 +export class CodexPanel extends LitElement {
 +  @property({ attribute: false }) context: WorkspacePanelContext | undefined;
 +  @property({ attribute: false }) runtime: CodexBrowserRuntime | undefined;
@@ -1546,71 +1581,6 @@ index 0000000000000000000000000000000000000000..bd6ab644494ee9ea423ad543444171e5
 +  private readonly copyTimers = new WeakMap<HTMLButtonElement, ReturnType<typeof setTimeout>>();
 +  private unsubscribe: (() => void) | undefined;
 +  private historyNavigation: { view: CodexView; generation: number; entries: string[]; index: number; draft: string; value: string } | undefined;
-+  private voice: VoiceRecognition | undefined;
-+  private voiceTarget: { view: CodexView; generation: number; threadId: string } | undefined;
-+  private voiceStatus = "";
-+  private voiceStopping = false;
-+  private cancelVoice(): void {
-+    const voice = this.voice;
-+    this.voice = undefined; this.voiceTarget = undefined; this.voiceStopping = false; this.voiceStatus = "";
-+    if (voice) { voice.onresult = null; voice.onerror = null; voice.onend = null; try { voice.abort(); } catch {} }
-+  }
-+  private toggleVoice(view: CodexView): void {
-+    if (this.voice) {
-+      if (!this.voiceStopping) {
-+        this.voiceStopping = true; this.voiceStatus = "Finishing voice input…";
-+        try { this.voice.stop(); } catch { this.cancelVoice(); }
-+        this.requestUpdate();
-+      }
-+      return;
-+    }
-+    if (view.pending || view.sending || view.snapshot["busy"] === true) return;
-+    const browser = window as unknown as { SpeechRecognition?: new () => VoiceRecognition; webkitSpeechRecognition?: new () => VoiceRecognition };
-+    const Recognition = browser.SpeechRecognition ?? browser.webkitSpeechRecognition;
-+    if (window.isSecureContext === false) {
-+      this.voiceStatus = "Voice input requires HTTPS or localhost.";
-+    } else if (!Recognition) {
-+      this.voiceStatus = "Voice input is not supported by this browser. Try Chrome or Safari.";
-+    } else {
-+      try {
-+        const voice = new Recognition(); this.voice = voice;
-+        const target = { view, generation: view.generation, threadId: view.threadId }; this.voiceTarget = target;
-+        const current = () => this.voice === voice && this.view === view && view.generation === target.generation && view.threadId === target.threadId && !view.pending && !view.sending && view.snapshot["busy"] !== true;
-+        voice.lang = navigator.language || "zh-CN"; voice.continuous = true; voice.interimResults = true;
-+        const committed = new Set<number>();
-+        voice.onresult = (event) => {
-+          if (!current()) return;
-+          let interim = "";
-+          for (let i = event.resultIndex; i < event.results.length; i++) {
-+            const result = event.results[i]; if (!result) continue;
-+            const transcript = result[0].transcript.trim();
-+            if (result.isFinal && !committed.has(i)) {
-+              committed.add(i);
-+              if (transcript) { this.historyNavigation = undefined; this.runtime?.saveDraft(view, view.draft + (view.draft && !/\s$/.test(view.draft) ? " " : "") + transcript); }
-+            } else if (!result.isFinal) interim += result[0].transcript;
-+          }
-+          this.voiceStatus = interim || "Listening… Click the microphone to stop."; this.requestUpdate();
-+        };
-+        voice.onerror = (event) => {
-+          if (!current()) return;
-+          const messages: Record<string, string> = {
-+            "not-allowed": "Microphone access denied. Allow microphone access in browser settings.",
-+            "service-not-allowed": "Speech recognition is unavailable or blocked by this browser.",
-+            "audio-capture": "No microphone available. Check your microphone connection.",
-+            "no-speech": "No speech detected. Click the microphone to try again.",
-+            "network": "Speech recognition connection failed. Check your network and try again.",
-+          };
-+          this.cancelVoice(); this.voiceStatus = messages[event.error] ?? `Voice input failed: ${event.error}`; this.requestUpdate();
-+        };
-+        voice.onend = () => {
-+          if (this.voice !== voice) return;
-+          this.voice = undefined; this.voiceTarget = undefined; this.voiceStopping = false; this.voiceStatus = ""; this.requestUpdate();
-+        };
-+        this.voiceStatus = "Listening… Click the microphone to stop."; voice.start();
-+      } catch (error) { this.cancelVoice(); this.voiceStatus = `Could not start voice input: ${errorText(error)}`; }
-+    }
-+    this.requestUpdate();
-+  }
 +  private follow = true;
 +  private composing = false;
 +  private browsePath = "";
@@ -1663,7 +1633,6 @@ index 0000000000000000000000000000000000000000..bd6ab644494ee9ea423ad543444171e5
 +    this.ownerDocument.removeEventListener("click", this.dismissMenus, true);
 +    this.ownerDocument.removeEventListener("focusin", this.dismissMenus, true);
 +    this.ownerDocument.removeEventListener("keydown", this.onMenuKeydown);
-+    this.cancelVoice();
 +    this.cancelArchive();
 +    this.closeMenus();
 +    this.unsubscribe?.(); this.unsubscribe = undefined;
@@ -1673,7 +1642,6 @@ index 0000000000000000000000000000000000000000..bd6ab644494ee9ea423ad543444171e5
 +    if (this.context === undefined || this.runtime === undefined) return;
 +    const view = this.runtime.view(this.context);
 +    if (view !== this.view || view.threadId !== "" || !view.connected || !view.threads.some((thread) => text(thread["id"]) === this.archiveConfirmation && thread["busy"] !== true)) this.archiveConfirmation = "";
-+    if (this.voiceTarget && (this.voiceTarget.view !== view || this.voiceTarget.generation !== view.generation || this.voiceTarget.threadId !== view.threadId || view.pending || view.sending || view.snapshot["busy"] === true)) this.cancelVoice();
 +    if (view === this.view && this.unsubscribe !== undefined) return;
 +    this.unsubscribe?.();
 +    this.closeMenus();
@@ -1694,7 +1662,7 @@ index 0000000000000000000000000000000000000000..bd6ab644494ee9ea423ad543444171e5
 +        this.requestUpdate();
 +      }
 +    }
-+    if (this.view?.pending || this.view?.sending || this.view?.snapshot["busy"] === true) this.closeMenus(false, ".permission-picker");
++    if (this.view?.pending === true || this.view?.sending === true || this.view?.snapshot["busy"] === true) this.closeMenus(false, ".permission-picker");
 +    const transcript = this.renderRoot.querySelector(".transcript");
 +    for (const pre of this.renderRoot.querySelectorAll(".markdown pre")) {
 +      if (pre.querySelector("button") !== null) continue;
@@ -1807,7 +1775,7 @@ index 0000000000000000000000000000000000000000..bd6ab644494ee9ea423ad543444171e5
 +  private addKeydown(event: KeyboardEvent): void {
 +    if ((event.target instanceof Element && event.target.closest(".settings-menu")) || this.addPage !== "menu" || !["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
 +    const picker = event.currentTarget;
-+    if (!(picker instanceof HTMLDetailsElement) || this.view?.pending) return;
++    if (!(picker instanceof HTMLDetailsElement) || this.view?.pending === true) return;
 +    const buttons = [...picker.querySelectorAll<HTMLButtonElement>(".add-item")].filter((button) => !button.disabled);
 +    if (buttons.length === 0) return;
 +    event.preventDefault(); picker.open = true;
@@ -1957,11 +1925,14 @@ index 0000000000000000000000000000000000000000..bd6ab644494ee9ea423ad543444171e5
 +      </div>
 +    </details>`;
 +  }
-+  private openConversation(view: CodexView, id: string): void {
++  private openConversation(view: CodexView, id: string, focusComposer = false): void {
 +    this.closeMenus(); this.reviewOpen = false; this.follow = true; this.historyNavigation = undefined;
 +    this.runtime?.select(view, id);
 +    if (id === "") { this.historyExpanded = false; this.action((runtime, state) => runtime.list(state)); }
-+    void this.updateComplete.then(() => { this.renderRoot.querySelector<HTMLTextAreaElement>("textarea")?.focus(); });
++    const composer = this.renderRoot.querySelector<HTMLTextAreaElement>("textarea");
++    // Keep New chat focus in the click gesture so mobile browsers can open the keyboard.
++    if (focusComposer) composer?.focus();
++    else composer?.blur();
 +  }
 +  private conversationTime(thread: RecordValue): string {
 +    const value = thread["updatedAt"] ?? thread["createdAt"];
@@ -2021,8 +1992,12 @@ index 0000000000000000000000000000000000000000..bd6ab644494ee9ea423ad543444171e5
 +    if (view === undefined) return html`<p>Select a workspace to open Codex.</p>`;
 +    const snapshot = view.snapshot;
 +    const busy = snapshot["busy"] === true;
++    const queued = array(snapshot["queue"]).map(object);
++    const queueInput = busy || queued.length > 0;
 +    const items = array(snapshot["items"]).map(object);
 +    const home = view.threadId === "";
++    const hasInput = view.draft.trim() !== "" || view.references.length > 0;
++    const stopAction = busy && !hasInput;
 +    const reviewOpen = !home && this.reviewOpen;
 +    const changes = items.filter((item) => ["fileChange", "diff"].includes(text(item["kind"])));
 +    const currentThread = view.threads.find((thread) => thread["id"] === view.threadId);
@@ -2031,9 +2006,9 @@ index 0000000000000000000000000000000000000000..bd6ab644494ee9ea423ad543444171e5
 +    return html`
 +      <div class="layout" ?data-review-open=${reviewOpen}>
 +      <header><div class="header-heading">${home ? html`<strong>Codex</strong>` : html`<button class="back-button new-conversation" aria-label="Back to conversations" title="Back to conversations" ?disabled=${view.pending || !view.connected} @click=${() => { this.openConversation(view, ""); }}>←</button><span class="task-title" title=${text(currentThread?.["preview"])}>${text(currentThread?.["preview"]) || "New conversation"}</span>`}</div>
-+        <span class="scope" title=${view.context.workspace.path}><span class="scope-measure" aria-hidden="true">${view.context.workspace.path}</span><span class="scope-label">${this.compactScope ? view.context.workspace.path.split(/[\\/]/).filter(Boolean).at(-1) || view.context.workspace.path : view.context.workspace.path}</span></span>
++        <span class="scope" title=${view.context.workspace.path}><span class="scope-measure" aria-hidden="true">${view.context.workspace.path}</span><span class="scope-label">${this.compactScope ? view.context.workspace.path.split(/[\\/]/).filter(Boolean).at(-1) ?? view.context.workspace.path : view.context.workspace.path}</span></span>
 +        ${this.isMobileComposer() ? html`<details class="header-actions"><summary aria-label="More actions" title="More actions">···</summary><div class="header-actions-menu">${headerActions}</div></details>` : headerActions}
-+        <button class="new-conversation new-chat" aria-label="New chat" title="New chat" ?disabled=${view.pending || !view.connected} @click=${() => { this.openConversation(view, ""); }}><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 4H7a4 4 0 0 0-4 4v9a4 4 0 0 0 4 4h9a4 4 0 0 0 4-4v-5"></path><path d="m10 14 1-4 7-7a2.12 2.12 0 0 1 3 3l-7 7-4 1Z"></path></svg></button></header>
++        <button class="new-conversation new-chat" aria-label="New chat" title="New chat" ?disabled=${view.pending || !view.connected} @click=${() => { this.openConversation(view, "", true); }}><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 4H7a4 4 0 0 0-4 4v9a4 4 0 0 0 4 4h9a4 4 0 0 0 4-4v-5"></path><path d="m10 14 1-4 7-7a2.12 2.12 0 0 1 3 3l-7 7-4 1Z"></path></svg></button></header>
 +      <main>
 +      ${view.notice === "" ? nothing : html`<p role="status">${view.notice}</p>`}
 +      ${view.error === "" && text(snapshot["error"]) === "" ? nothing : html`<p class="error" role="alert">${view.error || text(snapshot["error"])}</p>`}
@@ -2048,17 +2023,24 @@ index 0000000000000000000000000000000000000000..bd6ab644494ee9ea423ad543444171e5
 +      ${!this.follow || view.offset > 0 ? html`<button class="latest" @click=${() => { this.follow = true; view.offset = 0; view.snapshot = { ...view.snapshot, version: -1 }; this.requestUpdate(); void this.runtime?.refresh(view); }}>Jump to latest</button>` : nothing}
 +      <section aria-label="Pending requests">${array(snapshot["approvals"]).some((approval) => object(approval)["method"] === "item/tool/requestUserInput") ? html`<div class="asking-question" role="status">Asking question</div>` : nothing}${repeat(array(snapshot["approvals"]), (approval) => JSON.stringify([view.key, view.threadId, text(object(approval)["id"])]), (approval) => this.renderApproval(view, object(approval)))}</section>`}
 +      <footer ?data-plan=${view.mode === "plan"}>
++        ${queued.length > 0 ? html`<section class="queued-messages" aria-label="Queued messages">
++          <div class="queue-heading"><span>${snapshot["queuePaused"] === true ? "Queue paused" : "Queued · runs after the current task"}</span>${!busy ? html`<button class="resume-queue" ?disabled=${view.pending || !view.connected} @click=${() => { this.action((runtime, state) => runtime.request(state, "resumeQueue", { threadId: state.threadId })); }}>Run next</button>` : nothing}</div>
++          ${repeat(queued, (message) => text(message["id"]), (message) => html`<div class="queued-message"><p>${text(message["text"])}</p><div class="queue-actions">
++            ${busy ? html`<button class="steer-queued" title="Submit this message to the current response" ?disabled=${view.pending || !view.connected || snapshot["status"] === "starting" || !text(snapshot["turnId"])} @click=${() => { this.action((runtime, state) => runtime.request(state, "steer", { threadId: state.threadId, messageId: message["id"] ?? "", expectedTurnId: snapshot["turnId"] ?? "" })); }}>Steer</button>` : nothing}
++            <button class="remove-queued" aria-label="Remove queued message" title="Remove queued message" ?disabled=${view.pending || !view.connected} @click=${() => { this.action((runtime, state) => runtime.request(state, "removeQueued", { threadId: state.threadId, messageId: message["id"] ?? "" })); }}>×</button>
++          </div></div>`)}
++        </section>` : nothing}
 +        ${view.references.length > 0 ? html`<div class="context-tray" aria-label="Selected workspace context">${view.references.map((path) => html`<span title=${path}>${path}<button aria-label=${`Remove ${path}`} ?disabled=${view.pending} @click=${() => { this.runtime?.saveReferences(view, view.references.filter((entry) => entry !== path)); }}>×</button></span>`)}</div>` : nothing}
-+        <textarea aria-label="Message Codex" placeholder=${view.mode === "plan" ? "Describe your task to generate a plan..." : home ? "Ask Codex to start a new conversation" : "Ask for follow-up changes"} .value=${view.draft}
++        <textarea aria-label="Message Codex" placeholder=${queueInput ? "Add to the queue, or use Steer after sending..." : view.mode === "plan" ? "Describe your task to generate a plan..." : home ? "Ask Codex to start a new conversation" : "Ask for follow-up changes"} .value=${view.draft}
 +          @input=${(event: Event) => { if (event.target instanceof HTMLTextAreaElement) { this.historyNavigation = undefined; this.runtime?.saveDraft(view, event.target.value); this.requestUpdate(); } }}
 +          @compositionstart=${() => { this.composing = true; }} @compositionend=${() => { this.composing = false; }}
-+          @keydown=${(event: KeyboardEvent) => { this.navigateInputHistory(event, view); if (event.key === "Enter" && !event.shiftKey && !event.isComposing && !this.composing) { event.preventDefault(); if (!this.voice && !view.pending && !busy && view.connected && (view.draft.trim() !== "" || view.references.length > 0)) this.action((runtime, state) => runtime.send(state)); } }}></textarea>
-+        ${this.voiceStatus ? html`<div class="voice-status" role="status">${this.voiceStatus}</div>` : nothing}
++          @keydown=${(event: KeyboardEvent) => { this.navigateInputHistory(event, view); if (event.key === "Enter" && !event.shiftKey && !event.isComposing && !this.composing) { event.preventDefault(); if (!view.pending && !view.sending && view.connected && (view.draft.trim() !== "" || view.references.length > 0)) this.action((runtime, state) => runtime.send(state)); } }}></textarea>
 +        <div class="composer-controls">
 +          <div class="composer-leading">${this.renderContextPicker(view)}${this.isMobileComposer() ? this.renderPlanStatus(view) : this.renderComposerSettings(view)}</div>
 +          <div class="composer-trailing">${this.renderModelPicker(view)}
-+          <button class="voice-input" aria-label=${this.voice ? "Stop voice input" : "Start voice input"} title=${this.voice ? "Stop voice input" : "Voice input"} aria-pressed=${!!this.voice} ?disabled=${this.voiceStopping || view.pending || view.sending || busy} @click=${() => { this.toggleVoice(view); }}><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2" width="6" height="13" rx="3"></rect><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"></path></svg></button>
-+          <button class="primary" aria-label=${view.sending ? "Sending message" : busy ? "Stop response" : "Send message"} title=${view.sending ? "Sending message" : busy ? "Stop response" : "Send message"} aria-busy=${view.sending} ?disabled=${!!this.voice || view.pending || view.sending || !view.connected || (!busy && view.draft.trim() === "" && view.references.length === 0)} @click=${() => { this.action((runtime, state) => busy ? runtime.request(state, "stop", { threadId: state.threadId }) : runtime.send(state)); }}>${view.sending ? html`<span class="send-spinner" aria-hidden="true"></span>` : busy ? html`<span class="stop-icon" aria-hidden="true"></span>` : html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20V4m-7 7 7-7 7 7"></path></svg>`}</button>
++          <button class="voice-input" aria-label="Voice input" title="Voice input is not implemented yet" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2" width="6" height="13" rx="3"></rect><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"></path></svg></button>
++          ${busy && hasInput ? html`<button class="stop-response" aria-label="Stop response" title="Stop response" ?disabled=${view.pending || view.sending || !view.connected} @click=${() => { this.action((runtime, state) => runtime.request(state, "stop", { threadId: state.threadId })); }}><span class="stop-icon" aria-hidden="true"></span></button>` : nothing}
++          <button class="primary" aria-label=${view.sending ? "Sending message" : stopAction ? "Stop response" : queueInput ? "Queue message" : "Send message"} title=${view.sending ? "Sending message" : stopAction ? "Stop response" : queueInput ? "Queue message" : "Send message"} aria-busy=${view.sending} ?disabled=${view.pending || view.sending || !view.connected || (!busy && !hasInput)} @click=${() => { this.action((runtime, state) => stopAction ? runtime.request(state, "stop", { threadId: state.threadId }) : runtime.send(state)); }}>${view.sending ? html`<span class="send-spinner" aria-hidden="true"></span>` : stopAction ? html`<span class="stop-icon" aria-hidden="true"></span>` : html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20V4m-7 7 7-7 7 7"></path></svg>`}</button>
 +          </div>
 +        </div>
 +      </footer>
@@ -2234,10 +2216,15 @@ index 0000000000000000000000000000000000000000..bd6ab644494ee9ea423ad543444171e5
 +    textarea::placeholder { color:var(--pi-muted,#858585); } .composer-controls { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:8px; } .composer-controls select { font-size:12px; max-width:180px; min-width:0; padding:4px; color:var(--pi-muted,#707070); }
 +    .composer-leading,.composer-trailing { display:flex; align-items:center; gap:2px; }
 +    .composer-leading { flex:none; } .composer-trailing { min-width:0; margin-left:auto; }
++    .stop-response { display:grid; place-items:center; flex:none; width:28px; height:28px; padding:0; border-radius:50%; }
++    .queued-messages { max-height:180px; overflow:auto; border-bottom:1px solid var(--pi-border-muted,#e5e5e5); padding:4px 0 8px; margin-bottom:4px; }
++    .queue-heading,.queued-message,.queue-actions { display:flex; align-items:center; gap:8px; }
++    .queue-heading { justify-content:space-between; font-size:11px; color:var(--pi-muted,#888); }
++    .queued-message { padding:6px 0; }
++    .queued-message p { flex:1; min-width:0; margin:0; white-space:pre-wrap; overflow-wrap:anywhere; max-height:72px; overflow:auto; font-size:12px; }
++    .queue-actions { flex:none; gap:4px; } .steer-queued,.resume-queue { font-size:12px; }
 +    .voice-input { display:flex; align-items:center; justify-content:center; flex:none; width:32px; height:32px; color:var(--pi-muted,#707070); }
 +    .voice-input svg { width:20px; height:20px; fill:none; stroke:currentColor; stroke-width:1.7; stroke-linecap:round; stroke-linejoin:round; }
-+    .voice-input[aria-pressed="true"] { color:var(--pi-danger,#c33); background:var(--pi-surface-hover,#ededed); border-radius:50%; }
-+    .voice-status { font-size:12px; color:var(--pi-muted,#707070); padding:4px 7px; overflow-wrap:anywhere; }
 +    .send-spinner { width:14px; height:14px; border:2px solid currentColor; border-right-color:transparent; border-radius:50%; animation:send-spin .7s linear infinite; } @keyframes send-spin { to { transform:rotate(360deg); } } @media(prefers-reduced-motion:reduce) { .send-spinner { animation:none; } }
 +    .permission-picker { position:relative; flex:none; --permission-warning:light-dark(#806400,#e6c800); }
 +    .permission-picker>summary { display:flex; align-items:center; gap:6px; width:fit-content; padding:5px 9px; border-radius:20px; list-style:none; background:var(--pi-surface-hover,#ededed); color:var(--pi-muted,#707070); font-size:12px; }
@@ -2619,10 +2606,10 @@ index 0000000000000000000000000000000000000000..d3d0bcbd7c51804463cb85883b66abf1
 +export const createCodexConnection: ConnectionFactory = (cwd, event, exited) => new CodexProcess(cwd, event, exited);
 diff --git a/pi-web-plugins/codex/server/codexService.test.ts b/pi-web-plugins/codex/server/codexService.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..8e175cbe79de768e04db5b98713bbd31a0426882
+index 0000000000000000000000000000000000000000..5bd92aa628593f05dbf78fd49c5edd27d6ba4e54
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/codexService.test.ts
-@@ -0,0 +1,378 @@
+@@ -0,0 +1,567 @@
 +import { mkdtemp, mkdir, writeFile, symlink, rm } from "node:fs/promises";
 +import { join } from "node:path";
 +import { tmpdir } from "node:os";
@@ -2695,7 +2682,7 @@ index 0000000000000000000000000000000000000000..8e175cbe79de768e04db5b98713bbd31
 +  it("retains Codex turn timestamps for stored and resumed messages", async () => {
 +    const f = fixture();
 +    const saved = { id: "saved", cwd: "/work/one", turns: [{ id: "old", status: "completed", startedAt: 1700000000, completedAt: 1700000060, items: [{ id: "answer", type: "agentMessage", phase: "final_answer", text: "Saved" }] }] };
-+    f.request.mockImplementation(async (method) => method === "thread/read" || method === "thread/resume" ? { thread: saved } : method === "turn/start" ? { turn: { id: "next" } } : {});
++    f.request.mockImplementation((method) => Promise.resolve(method === "thread/read" || method === "thread/resume" ? { thread: saved } : method === "turn/start" ? { turn: { id: "next" } } : {}));
 +    expect((await f.call("snapshot", { threadId: "saved" }))["items"]).toEqual([expect.objectContaining({ turnStartedAt: 1700000000, turnCompletedAt: 1700000060 })]);
 +    await f.call("send", { threadId: "saved", text: "Continue" });
 +    expect((await f.call("snapshot", { threadId: "saved" }))["items"]).toEqual([expect.objectContaining({ turnStartedAt: 1700000000, turnCompletedAt: 1700000060 })]);
@@ -2783,7 +2770,7 @@ index 0000000000000000000000000000000000000000..8e175cbe79de768e04db5b98713bbd31
 +    expect(f.request).toHaveBeenCalledWith("thread/start", { cwd: "/work/one", approvalPolicy, sandbox, approvalsReviewer });
 +    await f.call("send", { threadId: "saved", text: "hello", permissionMode: mode });
 +    expect(f.request).toHaveBeenCalledWith("thread/resume", { threadId: "saved", cwd: "/work/one", approvalPolicy, sandbox, approvalsReviewer });
-+    expect(f.request).toHaveBeenCalledWith("turn/start", expect.objectContaining({ approvalPolicy, approvalsReviewer, sandboxPolicy: expect.objectContaining({ type: sandboxType }) }));
++    expect(f.request.mock.calls.filter(([method]) => method === "turn/start").at(-1)?.[1]).toMatchObject({ approvalPolicy, approvalsReviewer, sandboxPolicy: { type: sandboxType } });
 +    expect(await f.call("snapshot", { threadId: "saved" })).toMatchObject({ policy: { approvalPolicy, sandbox, approvalsReviewer } });
 +    f.emit({ method: "turn/completed", params: { threadId: "saved", turn: { id: "turn", status: "completed" } } });
 +    await f.call("send", { threadId: "saved", text: "switch mode", permissionMode: "ask-for-approval" });
@@ -2800,14 +2787,14 @@ index 0000000000000000000000000000000000000000..8e175cbe79de768e04db5b98713bbd31
 +  });
 +  it("returns workspace configured defaults instead of the catalog default", async () => {
 +    const f = fixture();
-+    f.request.mockImplementation(async (method) => {
-+      if (method === "config/read") return { config: { model: "configured-model", model_reasoning_effort: "high" } };
-+      if (method === "model/list") return { data: [{ model: "catalog-default", isDefault: true, defaultReasoningEffort: "low" }, { model: "configured-model", defaultReasoningEffort: "medium" }] };
-+      return {};
++    f.request.mockImplementation((method) => {
++      if (method === "config/read") return Promise.resolve({ config: { model: "configured-model", model_reasoning_effort: "high" } });
++      if (method === "model/list") return Promise.resolve({ data: [{ model: "catalog-default", isDefault: true, defaultReasoningEffort: "low" }, { model: "configured-model", defaultReasoningEffort: "medium" }] });
++      return Promise.resolve({});
 +    });
 +    expect(await f.call("models")).toMatchObject({ defaultModel: "configured-model", defaultEffort: "high" });
 +    expect(f.request).toHaveBeenCalledWith("config/read", { cwd: "/work/one", includeLayers: false });
-+    f.request.mockImplementation(async (method) => method === "model/list" ? { data: [{ model: "catalog-default", isDefault: true, defaultReasoningEffort: "low" }] } : { config: {} });
++    f.request.mockImplementation((method) => Promise.resolve(method === "model/list" ? { data: [{ model: "catalog-default", isDefault: true, defaultReasoningEffort: "low" }] } : { config: {} }));
 +    expect(await f.call("models")).toMatchObject({ defaultModel: "catalog-default", defaultEffort: "low" });
 +  });
 +  it("reports configured settings from start, history, resume and setting events", async () => {
@@ -2899,6 +2886,195 @@ index 0000000000000000000000000000000000000000..8e175cbe79de768e04db5b98713bbd31
 +    expect(f.request).toHaveBeenCalledWith("turn/interrupt", { threadId: "new", turnId: "turn" });
 +    f.emit({ method: "turn/completed", params: { threadId: "new", turn: { id: "turn", status: "interrupted" } } });
 +    await expect(f.call("send", { threadId: "new", text: "continue" })).resolves.toEqual({ accepted: true });
++  });
++  it("queues follow-ups by default and starts them in order after each completed turn without a browser", async () => {
++    const f = fixture(); await f.call("create"); await f.call("send", { threadId: "new", text: "original" });
++    for (const text of ["first", "second"]) await expect(f.call("send", { threadId: "new", text })).resolves.toEqual({ accepted: true, queued: true });
++    expect(f.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(1);
++    expect(f.request).not.toHaveBeenCalledWith("turn/steer", expect.anything());
++    expect((await f.call("snapshot", { threadId: "new" }))["queue"]).toMatchObject([{ text: "first" }, { text: "second" }]);
++    f.emit({ method: "turn/completed", params: { threadId: "new", turn: { id: "turn", status: "completed" } } });
++    await vi.waitFor(async () => { expect((await f.call("snapshot", { threadId: "new" }))["queue"]).toHaveLength(1); });
++    expect(f.request).toHaveBeenLastCalledWith("thread/read", { threadId: "new", includeTurns: false });
++    expect(f.request.mock.calls.filter(([method]) => method === "turn/start").at(-1)?.[1]["input"]).toEqual([{ type: "text", text: "first", text_elements: [] }]);
++    f.emit({ method: "turn/completed", params: { threadId: "new", turn: { id: "turn", status: "completed" } } });
++    await vi.waitFor(async () => { expect((await f.call("snapshot", { threadId: "new" }))["queue"]).toEqual([]); });
++    expect(f.request.mock.calls.filter(([method]) => method === "turn/start").map(([, params]) => object(array(params["input"])[0])["text"])).toEqual(["original", "first", "second"]);
++  });
++  it("steers only the selected queued input and preserves current settings and pending approvals", async () => {
++    const f = fixture(); await f.call("create", { permissionMode: "ask-for-approval" });
++    await f.call("send", { threadId: "new", text: "original", permissionMode: "ask-for-approval" });
++    f.emit({ id: "approval", method: "item/commandExecution/requestApproval", params: { threadId: "new", turnId: "turn" } });
++    await f.call("send", { threadId: "new", text: "later" });
++    await f.call("send", { threadId: "new", text: "Focus on tests", model: "other", effort: "high", mode: "plan" });
++    const before = await f.call("snapshot", { threadId: "new" });
++    const messageId = object(array(before["queue"])[1])["id"] ?? "";
++    await f.call("steer", { threadId: "new", messageId, expectedTurnId: "turn" });
++    expect(f.request).toHaveBeenCalledWith("turn/steer", { threadId: "new", expectedTurnId: "turn", input: [{ type: "text", text: "Focus on tests", text_elements: [] }] });
++    expect(f.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(1);
++    expect(f.request).not.toHaveBeenCalledWith("turn/interrupt", expect.anything());
++    expect(await f.call("snapshot", { threadId: "new" })).toMatchObject({ busy: true, status: before["status"], mode: before["mode"], policy: before["policy"], approvals: before["approvals"], queue: [{ text: "later" }] });
++    await expect(f.call("steer", { threadId: "new", messageId, expectedTurnId: "turn" })).rejects.toThrow("already submitted or removed");
++  });
++  it("does not execute a steered message twice when the turn completes before acknowledgement", async () => {
++    const f = fixture(); await f.call("create"); await f.call("send", { threadId: "new", text: "original" });
++    await f.call("send", { threadId: "new", text: "steer me" }); await f.call("send", { threadId: "new", text: "next" });
++    const messageId = object(array((await f.call("snapshot", { threadId: "new" }))["queue"])[0])["id"] ?? "";
++    let accept!: (value: RecordValue) => void;
++    f.request.mockImplementationOnce(() => new Promise<RecordValue>((resolve) => { accept = resolve; }));
++    const sending = f.call("steer", { threadId: "new", messageId, expectedTurnId: "turn" });
++    await vi.waitFor(() => { expect(f.request).toHaveBeenCalledWith("turn/steer", expect.anything()); });
++    await expect(f.call("steer", { threadId: "new", messageId, expectedTurnId: "turn" })).rejects.toThrow("already being submitted");
++    await expect(f.call("removeQueued", { threadId: "new", messageId })).rejects.toThrow("already being submitted");
++    f.emit({ method: "turn/completed", params: { threadId: "new", turn: { id: "turn", status: "completed" } } });
++    expect(f.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(1);
++    accept({ turnId: "turn" }); await sending;
++    await vi.waitFor(async () => { expect((await f.call("snapshot", { threadId: "new" }))["queue"]).toEqual([]); });
++    expect(f.request.mock.calls.filter(([method]) => method === "turn/start").map(([, params]) => object(array(params["input"])[0])["text"])).toEqual(["original", "next"]);
++  });
++  it("keeps rejected steering queued and prevents steering a different turn", async () => {
++    const f = fixture(); await f.call("create"); await f.call("send", { threadId: "new", text: "original" });
++    await f.call("send", { threadId: "new", text: "follow-up" });
++    const queue = (await f.call("snapshot", { threadId: "new" }))["queue"];
++    const messageId = object(array(queue)[0])["id"] ?? "";
++    await expect(f.call("steer", { threadId: "new", messageId, expectedTurnId: "stale" })).rejects.toThrow("remains queued");
++    expect(f.request).not.toHaveBeenCalledWith("turn/steer", expect.anything());
++    f.request.mockRejectedValueOnce(new Error("Steering rejected"));
++    await expect(f.call("steer", { threadId: "new", messageId, expectedTurnId: "turn" })).rejects.toThrow("Steering rejected");
++    expect(await f.call("snapshot", { threadId: "new" })).toMatchObject({ busy: true, status: "inProgress", error: "", queue });
++    await f.call("steer", { threadId: "new", messageId, expectedTurnId: "turn" });
++    expect((await f.call("snapshot", { threadId: "new" }))["queue"]).toEqual([]);
++  });
++  it.each(["interrupted", "failed", "completed"])("pauses the queue after stopping or failing and resumes explicitly (status=%s)", async (status) => {
++    const f = fixture(); await f.call("create"); await f.call("send", { threadId: "new", text: "original" });
++    await f.call("send", { threadId: "new", text: "next" });
++    if (status !== "failed") await f.call("stop", { threadId: "new" });
++    f.emit({ method: "turn/completed", params: { threadId: "new", turn: { id: "turn", status } } });
++    expect(await f.call("snapshot", { threadId: "new" })).toMatchObject({ busy: false, queuePaused: true, queue: [{ text: "next" }] });
++    expect(f.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(1);
++    await f.call("resumeQueue", { threadId: "new" });
++    expect(await f.call("snapshot", { threadId: "new" })).toMatchObject({ busy: true, queuePaused: false, queue: [] });
++  });
++  it("retains a failed queued start for explicit retry and keeps its selected settings", async () => {
++    const f = fixture(); await f.call("create"); await f.call("send", { threadId: "new", text: "original" });
++    await f.call("send", { threadId: "new", text: "next", model: "chosen", effort: "high", mode: "plan", permissionMode: "ask-for-approval" });
++    f.request.mockRejectedValueOnce(new Error("Start rejected"));
++    f.emit({ method: "turn/completed", params: { threadId: "new", turn: { id: "turn", status: "completed" } } });
++    await vi.waitFor(async () => { expect(await f.call("snapshot", { threadId: "new" })).toMatchObject({ busy: false, queuePaused: true, error: "Start rejected", queue: [{ text: "next" }] }); });
++    expect(f.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(2);
++    await f.call("resumeQueue", { threadId: "new" });
++    expect(f.request).toHaveBeenCalledWith("turn/start", expect.objectContaining({ model: "chosen", effort: "high", approvalPolicy: "on-request", collaborationMode: { mode: "plan", settings: { model: "chosen", reasoning_effort: "high", developer_instructions: null } } }));
++    expect(await f.call("snapshot", { threadId: "new" })).toMatchObject({ busy: true, queue: [], queuePaused: false });
++  });
++  it("continues draining when a queued turn completes before its start acknowledgement", async () => {
++    const f = fixture(); await f.call("create"); await f.call("send", { threadId: "new", text: "original" });
++    await f.call("send", { threadId: "new", text: "fast" }); await f.call("send", { threadId: "new", text: "last" });
++    f.request.mockImplementationOnce(() => {
++      f.emit({ method: "turn/completed", params: { threadId: "new", turn: { id: "fast-turn", status: "completed" } } });
++      return Promise.resolve({ turn: { id: "fast-turn", status: "inProgress" } });
++    });
++    f.emit({ method: "turn/completed", params: { threadId: "new", turn: { id: "turn", status: "completed" } } });
++    await vi.waitFor(async () => { expect((await f.call("snapshot", { threadId: "new" }))["queue"]).toEqual([]); });
++    expect(f.request.mock.calls.filter(([method]) => method === "turn/start").map(([, params]) => object(array(params["input"])[0])["text"])).toEqual(["original", "fast", "last"]);
++  });
++  it("bounds the queue, isolates it by workspace, and never executes a removed entry", async () => {
++    const f = fixture(); await f.call("create"); await f.call("send", { threadId: "new", text: "original" });
++    for (let i = 0; i < 20; i++) await f.call("send", { threadId: "new", text: String(i) });
++    await expect(f.call("send", { threadId: "new", text: "overflow" })).rejects.toThrow("At most 20");
++    const messageId = object(array((await f.call("snapshot", { threadId: "new" }))["queue"])[0])["id"] ?? "";
++    await f.call("removeQueued", { threadId: "new", messageId });
++    expect((await f.call("snapshot", { threadId: "new" }))["queue"]).toHaveLength(19);
++    f.emit({ method: "turn/completed", params: { threadId: "new", turn: { id: "turn", status: "completed" } } });
++    await vi.waitFor(async () => { expect((await f.call("snapshot", { threadId: "new" }))["queue"]).toHaveLength(18); });
++    expect(f.request.mock.calls.filter(([method]) => method === "turn/start").at(-1)?.[1]["input"]).toEqual([{ type: "text", text: "1", text_elements: [] }]);
++    await expect(f.call("removeQueued", { threadId: "new", messageId }, "/work/two")).rejects.toThrow("No queued messages");
++  });
++  it.each([false, true])("stops the queued turn that is starting, never the previous turn (event first=%s)", async (eventFirst) => {
++    const f = fixture(); await f.call("create"); await f.call("send", { threadId: "new", text: "original" });
++    await f.call("send", { threadId: "new", text: "next" });
++    let accept!: (value: RecordValue) => void;
++    f.request.mockImplementationOnce(() => new Promise<RecordValue>((resolve) => { accept = resolve; }));
++    f.emit({ method: "turn/completed", params: { threadId: "new", turn: { id: "turn", status: "completed" } } });
++    await f.call("stop", { threadId: "new" });
++    if (eventFirst) f.emit({ method: "turn/started", params: { threadId: "new", turn: { id: "next-turn", status: "inProgress" } } });
++    accept({ turn: { id: "next-turn", status: "inProgress" } });
++    await vi.waitFor(async () => { expect((await f.call("snapshot", { threadId: "new" }))["queue"]).toEqual([]); });
++    expect(f.request.mock.calls.filter(([method]) => method === "turn/interrupt")).toEqual([["turn/interrupt", { threadId: "new", turnId: "next-turn" }]]);
++    expect((await f.call("snapshot", { threadId: "new" }))["queuePaused"]).toBe(true);
++  });
++  it("acknowledges accepted input without waiting for a settings read", async () => {
++    const f = fixture(); await f.call("create");
++    const original = f.request.getMockImplementation();
++    if (original === undefined) throw new Error("Missing request fixture");
++    let read!: (value: RecordValue) => void;
++    f.request.mockImplementation((method, params) => method === "thread/read" ? new Promise<RecordValue>((resolve) => { read = resolve; }) : original(method, params));
++    let acknowledged = false;
++    const sending = f.call("send", { threadId: "new", text: "original" }).then(() => { acknowledged = true; });
++    try {
++      await vi.waitFor(() => { expect(acknowledged).toBe(true); });
++      await expect(f.call("send", { threadId: "new", text: "next" })).resolves.toEqual({ accepted: true, queued: true });
++    } finally { read({ thread: { model: "actual", reasoningEffort: "high" } }); await sending; }
++  });
++  it("retains a paused queue through process failure, activity checks and reconnect until explicitly resumed", async () => {
++    const f = fixture(); await f.call("create"); await f.call("send", { threadId: "new", text: "original" });
++    await f.call("send", { threadId: "new", text: "keep me", permissionMode: "ask-for-approval" });
++    f.emit({ method: "item/started", params: { threadId: "new", turnId: "turn", item: { id: "answer", type: "agentMessage", text: "Partial answer before process exit" } } });
++    const queue = (await f.call("snapshot", { threadId: "new" }))["queue"];
++    f.exit("Process stopped");
++    await f.call("activity");
++    await f.call("status");
++    expect(await f.call("snapshot", { threadId: "new" })).toMatchObject({ busy: false, queuePaused: true, queue });
++    expect((await f.call("snapshot", { threadId: "new" }))["items"]).toMatchObject([{ text: "Saved answer" }]);
++    expect(f.request).not.toHaveBeenCalledWith("thread/resume", expect.anything());
++    await f.call("resumeQueue", { threadId: "new" });
++    expect(f.request).toHaveBeenCalledWith("thread/resume", expect.objectContaining({ threadId: "new", approvalPolicy: "on-request" }));
++    expect(await f.call("snapshot", { threadId: "new" })).toMatchObject({ busy: true, queue: [] });
++  });
++  it("can remove a queued message after process failure without resuming or losing the remaining entries", async () => {
++    const f = fixture(); await f.call("create"); await f.call("send", { threadId: "new", text: "original" });
++    await f.call("send", { threadId: "new", text: "remove me" }); await f.call("send", { threadId: "new", text: "keep me" });
++    const messageId = object(array((await f.call("snapshot", { threadId: "new" }))["queue"])[0])["id"] ?? "";
++    f.exit("Process stopped");
++    await f.call("removeQueued", { threadId: "new", messageId });
++    expect((await f.call("snapshot", { threadId: "new" }))["queue"]).toMatchObject([{ text: "keep me" }]);
++    expect(f.request).not.toHaveBeenCalledWith("thread/resume", expect.anything());
++  });
++  it("retains recovered queue entries when resuming fails and retries only on request", async () => {
++    const f = fixture(); await f.call("create"); await f.call("send", { threadId: "new", text: "original" });
++    await f.call("send", { threadId: "new", text: "next" }); f.exit("Process stopped"); await f.call("status");
++    const original = f.request.getMockImplementation();
++    if (original === undefined) throw new Error("Missing request fixture");
++    f.request.mockImplementation((method, params) => method === "thread/resume" ? Promise.reject(new Error("already has an active writer")) : original(method, params));
++    await expect(f.call("resumeQueue", { threadId: "new" })).rejects.toThrow("Close it there");
++    expect(await f.call("snapshot", { threadId: "new" })).toMatchObject({ queuePaused: true, queue: [{ text: "next" }] });
++    expect(f.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(1);
++    f.request.mockImplementation(original);
++    await f.call("resumeQueue", { threadId: "new" });
++    expect((await f.call("snapshot", { threadId: "new" }))["queue"]).toEqual([]);
++  });
++  it("does not replace resumed live items with a delayed recovery snapshot", async () => {
++    const f = fixture(); await f.call("create"); await f.call("send", { threadId: "new", text: "original" });
++    await f.call("send", { threadId: "new", text: "next" }); f.exit("Process stopped"); await f.call("status");
++    const original = f.request.getMockImplementation();
++    if (original === undefined) throw new Error("Missing request fixture");
++    let read!: (value: RecordValue) => void;
++    f.request.mockImplementation((method, params) => method === "thread/read" && params["includeTurns"] === true ? new Promise<RecordValue>((resolve) => { read = resolve; }) : original(method, params));
++    const reading = f.call("snapshot", { threadId: "new" });
++    await f.call("resumeQueue", { threadId: "new" });
++    f.emit({ method: "item/started", params: { threadId: "new", turnId: "turn", item: { id: "live", type: "agentMessage", text: "New response" } } });
++    read({ thread: { id: "new", cwd: "/work/one", turns: [] } });
++    expect(array((await reading)["items"])).toContainEqual(expect.objectContaining({ id: "live", text: "New response" }));
++  });
++  it("ignores an older settings read after a newer settings event", async () => {
++    const f = fixture(); await f.call("create");
++    const original = f.request.getMockImplementation();
++    if (original === undefined) throw new Error("Missing request fixture");
++    let read!: (value: RecordValue) => void;
++    f.request.mockImplementation((method, params) => method === "thread/read" ? new Promise<RecordValue>((resolve) => { read = resolve; }) : original(method, params));
++    await f.call("send", { threadId: "new", text: "original" });
++    f.emit({ method: "thread/settings/updated", params: { threadId: "new", threadSettings: { model: "latest", effort: "high" } } });
++    read({ thread: { model: "stale", reasoningEffort: "low" } });
++    expect(await f.call("snapshot", { threadId: "new" })).toMatchObject({ model: "latest", effort: "high" });
 +  });
 +  it("applies an approval once and rejects escalation, expiry, and cross-workspace answers", async () => {
 +    const f = fixture();
@@ -3003,18 +3179,29 @@ index 0000000000000000000000000000000000000000..8e175cbe79de768e04db5b98713bbd31
 +});
 diff --git a/pi-web-plugins/codex/server/codexService.ts b/pi-web-plugins/codex/server/codexService.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..2f698172d475ecbbe809160397f75022aa96408e
+index 0000000000000000000000000000000000000000..7921354d89cb913ab1b56de1adb94343309408a9
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/codexService.ts
-@@ -0,0 +1,550 @@
+@@ -0,0 +1,694 @@
++import { randomUUID } from "node:crypto";
 +import { isAbsolute, relative, resolve, sep } from "node:path";
 +import { realpath, stat } from "node:fs/promises";
 +import type { JsonValue, ServerPluginPeerRequestContext, ServerPluginPeerChannelOpenContext, ServerPluginPeerChannel } from "@jmfederico/pi-web/server-plugin-api";
 +import { createCodexConnection, type CodexConnection, type ConnectionFactory } from "./codexProtocol.js";
 +import { array, bounded, errorText, object, string, text, permissionMode, type PermissionMode, chatMode, type ChatMode, type RecordValue } from "./protocol.js";
 +
++interface QueuedMessage {
++  id: string;
++  prompt: string;
++  options: RecordValue;
++  policy: RecordValue;
++  mode: ChatMode | undefined;
++}
 +interface ThreadState {
 +  turnTimes?: Map<string, RecordValue>;
++  needsResume?: boolean;
++  stopRequested?: boolean;
++  settingsVersion?: number;
 +  id: string;
 +  version: number;
 +  model: string;
@@ -3023,6 +3210,9 @@ index 0000000000000000000000000000000000000000..2f698172d475ecbbe809160397f75022
 +  status: string;
 +  error: string;
 +  busy: boolean;
++  sending: boolean;
++  queue: QueuedMessage[];
++  queuePaused: boolean;
 +  items: Map<string, RecordValue>;
 +  inputHistory: Map<string, string>;
 +  approvals: Map<string, RecordValue>;
@@ -3120,7 +3310,7 @@ index 0000000000000000000000000000000000000000..2f698172d475ecbbe809160397f75022
 +
 +  async request(context: ServerPluginPeerRequestContext): Promise<JsonValue> {
 +    if (context.signal.aborted || this.disposed) throw new Error("Codex request cancelled");
-+    const supported = new Set(["status", "activity", "list", "models", "create", "snapshot", "send", "stop", "answer", "archive"]);
++    const supported = new Set(["status", "activity", "list", "models", "create", "snapshot", "send", "steer", "removeQueued", "resumeQueue", "stop", "answer", "archive"]);
 +    if (!supported.has(context.operation)) throw new Error("Unsupported Codex operation");
 +    const input = object(context.input);
 +    const selectedPolicy = policies[permissionMode(input["permissionMode"])];
@@ -3157,7 +3347,8 @@ index 0000000000000000000000000000000000000000..2f698172d475ecbbe809160397f75022
 +        const id = string(input["threadId"], "threadId");
 +        const read = await rpc("thread/read", { threadId: id, includeTurns: false });
 +        if (resolve(string(object(read["thread"])["cwd"], "thread cwd", 4096)) !== state.cwd) throw new Error("Conversation belongs to another workspace");
-+        if (state.threads.get(id)?.busy) throw new Error("Stop the response before archiving this conversation");
++        const cached = state.threads.get(id);
++        if (cached !== undefined && (cached.busy || cached.sending || cached.queue.length > 0)) throw new Error("Stop the response and clear queued messages before archiving this conversation");
 +        await rpc("thread/archive", { threadId: id });
 +        state.threads.delete(id);
 +        return { archived: true };
@@ -3174,84 +3365,110 @@ index 0000000000000000000000000000000000000000..2f698172d475ecbbe809160397f75022
 +      default: break;
 +    }
 +    const id = string(input["threadId"], "threadId");
-+    const thread = context.operation === "snapshot" ? await this.readSnapshot(state, id) : await this.load(state, id, selectedPolicy);
++    const localQueueAction = context.operation === "steer" || context.operation === "removeQueued";
++    const thread = localQueueAction ? state.threads.get(id) : context.operation === "snapshot" ? await this.readSnapshot(state, id) : await this.load(state, id, selectedPolicy);
++    if (thread === undefined) throw new Error("No queued messages for this conversation in the current workspace");
 +    context.signal.throwIfAborted();
 +    if (context.operation === "snapshot") {
 +      if (input["version"] === thread.version) return { changed: false };
 +      const offset = typeof input["offset"] === "number" ? Math.max(0, Math.min(512, Math.floor(input["offset"]))) : 0;
 +      const end = Math.max(0, thread.items.size - offset);
-+      return this.boundedSnapshot({ changed: true, id, mode: thread.mode, model: thread.model, effort: thread.effort, version: thread.version, status: thread.status, busy: thread.busy, error: thread.error,
++      return this.boundedSnapshot({ changed: true, id, mode: thread.mode, model: thread.model, effort: thread.effort, version: thread.version, status: thread.status, busy: thread.busy, turnId: thread.turnId, error: thread.error,
++        queue: thread.queue.map((message) => ({ id: message.id, text: bounded(message.prompt) })), queuePaused: thread.queuePaused,
 +        inputHistory: [...thread.inputHistory.values()], items: [...thread.items.values()].slice(Math.max(0, end - 40), end), offset, total: thread.items.size, approvals: [...thread.approvals.values()], policy: thread.policy });
 +    }
 +    if (context.operation === "send") {
-+      let prompt = text(input["text"]);
-+      if (prompt.length > 64000) throw new Error("Message exceeds 64000 characters");
-+      const references = array(input["references"]);
-+      if (references.length > 20) throw new Error("Select at most 20 workspace items");
-+      if (references.length > 0) {
-+        const root = await realpath(state.cwd);
-+        const selected: string[] = [];
-+        for (const entry of references) {
-+          const path = string(entry, "workspace path", 4096);
-+          if (isAbsolute(path) || path.split(/[\\/]/u).includes("..")) throw new Error("Attachment must be inside the current workspace");
-+          const target = await realpath(resolve(root, path));
-+          const within = relative(root, target);
-+          if (isAbsolute(within) || within === ".." || within.startsWith(`..${sep}`)) throw new Error("Attachment must be inside the current workspace");
-+          const info = await stat(target);
-+          if (!info.isFile() && !info.isDirectory()) throw new Error("Only workspace files and directories can be attached");
-+          selected.push(`${info.isDirectory() ? "Directory" : "File"}: ${JSON.stringify(path)}`);
-+        }
-+        prompt = [prompt, "Selected workspace context (paths relative to the working directory; read as needed):", ...selected].filter(Boolean).join("\n");
-+      }
-+      if (prompt.trim() === "") throw new Error("Enter a message or select workspace context");
-+      if (thread.busy) throw new Error("This conversation already has an active turn");
-+      const options: RecordValue = {
-+        approvalPolicy: selectedPolicy["approvalPolicy"] ?? "never",
-+        approvalsReviewer: selectedPolicy["approvalsReviewer"] ?? "user",
-+        sandboxPolicy: selectedPolicy["sandbox"] === "danger-full-access" ? { type: "dangerFullAccess" } : {
-+          type: "workspaceWrite", writableRoots: [state.cwd], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false,
-+        },
-+      };
-+      if (input["model"] !== undefined) options["model"] = string(input["model"], "model");
-+      if (input["effort"] !== undefined) options["effort"] = string(input["effort"], "reasoning effort", 32);
-+      if (mode !== undefined) {
-+        const model = text(options["model"]) || thread.model;
-+        if (model === "") throw new Error("Codex model is unavailable. Reconnect before changing collaboration mode.");
-+        options["collaborationMode"] = { mode, settings: {
-+          model,
-+          reasoning_effort: input["effort"] !== undefined ? text(options["effort"]) : input["model"] !== undefined ? null : thread.effort || null,
-+          developer_instructions: null,
-+        } };
-+      }
-+      thread.busy = true;
-+      thread.status = "starting";
-+      thread.error = "";
-+      thread.version++; this.notify(thread);
++      if (thread.sending) throw new Error("A message is already being submitted to this conversation");
++      thread.sending = true;
 +      try {
-+        const result = await rpc("turn/start", { threadId: id, input: [{ type: "text", text: prompt, text_elements: [] }], ...options });
-+        thread.policy = selectedPolicy;
-+        if (mode !== undefined) thread.mode = mode;
-+        // Settings come from Codex, not from the requested override (which may be normalized).
-+        try {
-+          const current = object((await rpc("thread/read", { threadId: id, includeTurns: false }))["thread"]);
-+          if (typeof current["model"] === "string") this.settings(thread, current);
-+        } catch { /* The turn was accepted; keep the last authoritative settings on read failure. */ }
-+        const turn = object(result["turn"]);
-+        this.rememberTurnTimes(thread, turn);
-+        thread.turnId = string(turn["id"]);
-+        // A fast turn may have completed before the response arrives.
-+        this.started(thread);
-+        return { accepted: true, ...(thread.mode === null ? {} : { mode: thread.mode }) };
-+      } catch (error) {
-+        thread.busy = false;
-+        thread.status = "failed";
-+        thread.error = errorText(error);
-+        throw error;
-+      } finally { thread.version++; this.notify(thread); }
++        let prompt = text(input["text"]);
++        if (prompt.length > 64000) throw new Error("Message exceeds 64000 characters");
++        const references = array(input["references"]);
++        if (references.length > 20) throw new Error("Select at most 20 workspace items");
++        if (references.length > 0) {
++          const root = await realpath(state.cwd);
++          const selected: string[] = [];
++          for (const entry of references) {
++            const path = string(entry, "workspace path", 4096);
++            if (isAbsolute(path) || path.split(/[\\/]/u).includes("..")) throw new Error("Attachment must be inside the current workspace");
++            const target = await realpath(resolve(root, path));
++            const within = relative(root, target);
++            if (isAbsolute(within) || within === ".." || within.startsWith(`..${sep}`)) throw new Error("Attachment must be inside the current workspace");
++            const info = await stat(target);
++            if (!info.isFile() && !info.isDirectory()) throw new Error("Only workspace files and directories can be attached");
++            selected.push(`${info.isDirectory() ? "Directory" : "File"}: ${JSON.stringify(path)}`);
++          }
++          prompt = [prompt, "Selected workspace context (paths relative to the working directory; read as needed):", ...selected].filter(Boolean).join("\n");
++        }
++        if (prompt.trim() === "") throw new Error("Enter a message or select workspace context");
++        const options: RecordValue = {
++          approvalPolicy: selectedPolicy["approvalPolicy"] ?? "never",
++          approvalsReviewer: selectedPolicy["approvalsReviewer"] ?? "user",
++          sandboxPolicy: selectedPolicy["sandbox"] === "danger-full-access" ? { type: "dangerFullAccess" } : {
++            type: "workspaceWrite", writableRoots: [state.cwd], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false,
++          },
++        };
++        if (input["model"] !== undefined) options["model"] = string(input["model"], "model");
++        if (input["effort"] !== undefined) options["effort"] = string(input["effort"], "reasoning effort", 32);
++        if (mode !== undefined) {
++          const model = text(options["model"]) || thread.model;
++          if (model === "") throw new Error("Codex model is unavailable. Reconnect before changing collaboration mode.");
++          options["collaborationMode"] = { mode, settings: {
++            model,
++            reasoning_effort: input["effort"] !== undefined ? text(options["effort"]) : input["model"] !== undefined ? null : thread.effort || null,
++            developer_instructions: null,
++          } };
++        }
++        const message: QueuedMessage = { id: randomUUID(), prompt, options, policy: selectedPolicy, mode };
++        if (thread.busy || thread.queue.length > 0) {
++          if (thread.queue.length >= 20) throw new Error("At most 20 messages can be queued per conversation");
++          thread.queue.push(message);
++          thread.version++; this.notify(thread);
++          return { accepted: true, queued: true };
++        }
++        thread.queuePaused = false;
++        return await this.startTurn(state, thread, message);
++      } finally {
++        thread.sending = false;
++        void this.drainQueue(state, thread);
++      }
++    }
++    if (context.operation === "steer" || context.operation === "removeQueued") {
++      if (thread.sending) throw new Error("A message is already being submitted to this conversation");
++      const message = thread.queue.find((entry) => entry.id === string(input["messageId"], "messageId"));
++      if (message === undefined) throw new Error("This queued message was already submitted or removed");
++      if (context.operation === "removeQueued") {
++        thread.queue.splice(thread.queue.indexOf(message), 1);
++        thread.version++; this.notify(thread);
++        return { removed: true };
++      }
++      const expectedTurnId = string(input["expectedTurnId"], "expectedTurnId");
++      if (!thread.busy || thread.turnId !== expectedTurnId) throw new Error("The active response changed. The message remains queued.");
++      thread.sending = true;
++      try {
++        await rpc("turn/steer", { threadId: id, expectedTurnId, input: [{ type: "text", text: message.prompt, text_elements: [] }] });
++        // Remove only after acknowledgement, so failed steering keeps the queued input.
++        thread.queue.splice(thread.queue.indexOf(message), 1);
++        return { accepted: true };
++      } finally {
++        thread.sending = false;
++        thread.version++; this.notify(thread);
++        void this.drainQueue(state, thread);
++      }
++    }
++    if (context.operation === "resumeQueue") {
++      if (thread.sending || thread.busy) throw new Error("Wait for the current response before resuming the queue");
++      thread.queuePaused = false;
++      const error = await this.drainQueue(state, thread);
++      if (error !== undefined) throw new Error(error);
++      return { accepted: true };
 +    }
 +    if (context.operation === "stop") {
-+      if (!thread.busy || thread.turnId === "") throw new Error("No active turn to stop");
-+      await rpc("turn/interrupt", { threadId: id, turnId: thread.turnId });
++      if (!thread.busy) throw new Error("No active turn to stop");
++      thread.queuePaused = true;
++      thread.stopRequested = true;
++      thread.version++; this.notify(thread);
++      await this.interruptRequestedTurn(state, thread);
 +      return { accepted: true };
 +    }
 +    const approvalId = string(input["approvalId"], "approvalId");
@@ -3276,6 +3493,78 @@ index 0000000000000000000000000000000000000000..2f698172d475ecbbe809160397f75022
 +    thread.version++; this.notify(thread);
 +    state.connection.reply(requestId, response);
 +    return { accepted: true };
++  }
++
++  private async startTurn(state: WorkspaceState, thread: ThreadState, message: QueuedMessage): Promise<RecordValue> {
++    thread.busy = true;
++    thread.turnId = "";
++    thread.stopRequested = false;
++    thread.status = "starting";
++    thread.error = "";
++    thread.version++; this.notify(thread);
++    try {
++      const result = await state.connection.request("turn/start", { threadId: thread.id, input: [{ type: "text", text: message.prompt, text_elements: [] }], ...message.options });
++      thread.policy = message.policy;
++      if (message.mode !== undefined) thread.mode = message.mode;
++      const turn = object(result["turn"]);
++      this.rememberTurnTimes(thread, turn);
++      thread.turnId = string(turn["id"]);
++      // A fast turn may have completed before the response arrives.
++      this.started(thread);
++      void this.interruptRequestedTurn(state, thread).catch(() => { /* The failure is exposed in the thread snapshot. */ });
++      void this.refreshSettings(state, thread);
++      return { accepted: true, ...(thread.mode === null ? {} : { mode: thread.mode }) };
++    } catch (error) {
++      thread.busy = false;
++      thread.status = "failed";
++      thread.error = errorText(error);
++      throw error;
++    } finally { thread.version++; this.notify(thread); }
++  }
++  private async interruptRequestedTurn(state: WorkspaceState, thread: ThreadState): Promise<void> {
++    if (thread.stopRequested !== true || !thread.busy || thread.turnId === "") return;
++    const turnId = thread.turnId;
++    thread.stopRequested = false;
++    try {
++      await state.connection.request("turn/interrupt", { threadId: thread.id, turnId });
++    } catch (error) {
++      if (thread.turnId === turnId) { thread.error = errorText(error); thread.version++; this.notify(thread); }
++      throw error;
++    }
++  }
++  private async refreshSettings(state: WorkspaceState, thread: ThreadState): Promise<void> {
++    const turnId = thread.turnId;
++    const version = thread.settingsVersion;
++    try {
++      const current = object((await state.connection.request("thread/read", { threadId: thread.id, includeTurns: false }))["thread"]);
++      if (this.disposed || state.error !== "" || thread.turnId !== turnId || thread.settingsVersion !== version) return;
++      if (typeof current["model"] === "string") { this.settings(thread, current); thread.version++; this.notify(thread); }
++    } catch { /* Accepted input must not wait for settings; retain the last authoritative values on read failure. */ }
++  }
++  private canDrainQueue(state: WorkspaceState, thread: ThreadState): boolean {
++    return !thread.busy && thread.queue.length > 0 && !thread.queuePaused && !this.disposed && state.error === "";
++  }
++  private async drainQueue(state: WorkspaceState, thread: ThreadState): Promise<string | undefined> {
++    if (thread.sending || !this.canDrainQueue(state, thread)) return undefined;
++    thread.sending = true;
++    try {
++      while (this.canDrainQueue(state, thread)) {
++        const message = thread.queue[0];
++        if (message === undefined) break;
++        try {
++          await this.startTurn(state, thread, message);
++          thread.queue.shift();
++        } catch (error) {
++          // Keep rejected input visible and require an explicit retry; never spin on an error.
++          thread.queuePaused = true;
++          return errorText(error);
++        }
++      }
++    } finally {
++      thread.sending = false;
++      thread.version++; this.notify(thread);
++    }
++    return undefined;
 +  }
 +
 +  private boundedSnapshot(snapshot: RecordValue): RecordValue {
@@ -3324,6 +3613,7 @@ index 0000000000000000000000000000000000000000..2f698172d475ecbbe809160397f75022
 +    } finally { this.checking = false; }
 +  }
 +  private settings(thread: ThreadState, result: RecordValue): void {
++    thread.settingsVersion = (thread.settingsVersion ?? 0) + 1;
 +    thread.model = text(result["model"]);
 +    thread.effort = text(result["reasoningEffort"]);
 +    const mode = object(result["collaborationMode"] ?? {})["mode"];
@@ -3331,23 +3621,28 @@ index 0000000000000000000000000000000000000000..2f698172d475ecbbe809160397f75022
 +  }
 +  private started(thread: ThreadState): void { if (thread.status === "starting") thread.status = "inProgress"; }
 +  private active(state: WorkspaceState): boolean {
-+    return [...this.subscriptions].some((subscription) => subscription.state === state) || [...state.threads.values()].some((thread) => thread.busy || thread.approvals.size > 0);
++    return [...this.subscriptions].some((subscription) => subscription.state === state) || [...state.threads.values()].some((thread) => thread.busy || thread.sending || thread.queue.length > 0 || thread.approvals.size > 0);
 +  }
 +  private workspace(context: ServerPluginPeerRequestContext): WorkspaceState {
 +    const cwd = resolve(context.workspace.path);
 +    const key = JSON.stringify([context.project.id, context.workspace.id, cwd]);
 +    let state = this.workspaces.get(key);
-+    if (state?.error !== undefined && state.error !== "" && context.operation !== "snapshot") {
++    const threads = new Map<string, ThreadState>();
++    if (state?.error !== undefined && state.error !== "" && !["snapshot", "activity", "steer", "removeQueued"].includes(context.operation)) {
++      for (const [id, thread] of state.threads) {
++        if (thread.queue.length > 0) threads.set(id, { ...thread, queue: [...thread.queue], items: new Map(), inputHistory: new Map(), approvals: new Map(), turnTimes: new Map(),
++          busy: false, sending: false, turnId: "", stopRequested: false, needsResume: true, queuePaused: true, version: thread.version + 1,
++          error: `${thread.error} Queued messages are paused; check conversation history before resuming.` });
++      }
 +      this.closeSubscriptions(state);
 +      this.workspaces.delete(key);
 +      state = undefined;
 +    }
 +    if (state === undefined) {
 +      if (this.workspaces.size >= 16) throw new Error("Codex workspace limit reached. Idle instances expire after 15 minutes.");
-+      const threads = new Map<string, ThreadState>();
 +      const connection = this.connect(cwd, (frame) => { this.event(created, frame); }, (message) => {
 +        created.error = message;
-+        for (const thread of threads.values()) { thread.busy = false; thread.status = "interrupted"; thread.error = message; thread.approvals.clear(); thread.version++; this.notify(thread); }
++        for (const thread of threads.values()) { thread.busy = false; thread.status = "interrupted"; thread.queuePaused = true; thread.error = message; thread.approvals.clear(); thread.version++; this.notify(thread); }
 +      });
 +      const created: WorkspaceState = { cwd, projectId: context.project.id, workspaceId: context.workspace.id, threads, opening: new Map(), error: "", touched: Date.now(), connection };
 +      state = created;
@@ -3360,11 +3655,11 @@ index 0000000000000000000000000000000000000000..2f698172d475ecbbe809160397f75022
 +    const existing = state.threads.get(id);
 +    if (existing !== undefined) return existing;
 +    if (state.threads.size >= 30) {
-+      const idle = [...state.threads.values()].find((thread) => !thread.busy && thread.approvals.size === 0);
++      const idle = [...state.threads.values()].find((thread) => !thread.busy && !thread.sending && thread.queue.length === 0 && thread.approvals.size === 0);
 +      if (idle === undefined) throw new Error("Too many active Codex conversations");
 +      state.threads.delete(idle.id);
 +    }
-+    const thread: ThreadState = { id, model: "", effort: "", version: 0, turnId: "", status: "idle", error: "", busy: false, items: new Map(), inputHistory: new Map(), approvals: new Map(), policy: null, mode: null };
++    const thread: ThreadState = { id, model: "", effort: "", version: 0, turnId: "", status: "idle", error: "", busy: false, sending: false, queue: [], queuePaused: false, items: new Map(), inputHistory: new Map(), approvals: new Map(), policy: null, mode: null };
 +    state.threads.set(id, thread);
 +    return thread;
 +  }
@@ -3372,15 +3667,32 @@ index 0000000000000000000000000000000000000000..2f698172d475ecbbe809160397f75022
 +    const opening = state.opening.get(id);
 +    if (opening !== undefined) return opening;
 +    const existing = state.threads.get(id);
-+    if (existing !== undefined) return existing;
++    if (existing !== undefined && (existing.needsResume !== true || state.error !== "")) return existing;
 +    // Viewing external history must not acquire the thread's exclusive writer.
-+    const read = await state.connection.request("thread/read", { threadId: id, includeTurns: true });
++    let read: RecordValue;
++    try { read = await state.connection.request("thread/read", { threadId: id, includeTurns: true }); }
++    catch (error) {
++      if (existing === undefined) throw error;
++      if (existing.needsResume === true) { existing.error = errorText(error); existing.version++; }
++      return existing;
++    }
++    if (existing !== undefined) {
++      const resuming = state.opening.get(id);
++      if (resuming !== undefined) return resuming;
++      if (existing.needsResume !== true) return existing;
++    }
 +    const saved = object(read["thread"]);
 +    if (resolve(string(saved["cwd"], "thread cwd", 4096)) !== state.cwd) throw new Error("Conversation belongs to another workspace");
-+    const thread: ThreadState = { id, model: text(saved["model"]), effort: text(saved["reasoningEffort"]), version: --this.historyVersion, turnId: "", status: "Stored history", error: "", busy: false, items: new Map(), inputHistory: new Map(), approvals: new Map(), policy: null, mode: null };
++    const thread: ThreadState = { id, model: text(saved["model"]), effort: text(saved["reasoningEffort"]), version: --this.historyVersion, turnId: "", status: "Stored history", error: "", busy: false, sending: false, queue: [], queuePaused: false, items: new Map(), inputHistory: new Map(), approvals: new Map(), policy: null, mode: null };
 +    for (const entry of array(saved["turns"])) {
 +      const turn = object(entry);
 +      for (const item of array(turn["items"])) this.item(thread, { ...object(item), turnId: turn["id"] ?? "", turnStatus: turn["status"] ?? "", turnDurationMs: turn["durationMs"] ?? null, turnStartedAt: turn["startedAt"] ?? null, turnCompletedAt: turn["completedAt"] ?? null });
++    }
++    if (existing !== undefined) {
++      existing.items = thread.items; existing.inputHistory = thread.inputHistory; existing.version++;
++      if (typeof saved["model"] === "string") existing.model = text(saved["model"]);
++      if (typeof saved["reasoningEffort"] === "string") existing.effort = text(saved["reasoningEffort"]);
++      return existing;
 +    }
 +    // Do not cache external history: its owner can persist more items between polls.
 +    return thread;
@@ -3389,8 +3701,8 @@ index 0000000000000000000000000000000000000000..2f698172d475ecbbe809160397f75022
 +    const opening = state.opening.get(id);
 +    if (opening !== undefined) return opening;
 +    const existing = state.threads.get(id);
-+    if (existing !== undefined) return existing;
-+    const promise = this.restore(state, id, selectedPolicy);
++    if (existing !== undefined && existing.needsResume !== true) return existing;
++    const promise = this.restore(state, id, existing?.queue[0]?.policy ?? selectedPolicy);
 +    state.opening.set(id, promise);
 +    try { return await promise; } finally { state.opening.delete(id); }
 +  }
@@ -3399,7 +3711,10 @@ index 0000000000000000000000000000000000000000..2f698172d475ecbbe809160397f75022
 +    if (resolve(string(object(read["thread"])["cwd"], "thread cwd", 4096)) !== state.cwd) throw new Error("Conversation belongs to another workspace");
 +    const thread = this.remember(state, id);
 +    try {
++      if (thread.needsResume === true) { thread.items.clear(); thread.inputHistory.clear(); thread.turnTimes?.clear(); }
 +      const resumed = await state.connection.request("thread/resume", { threadId: id, cwd: state.cwd, ...selectedPolicy });
++      thread.needsResume = false;
++      thread.error = "";
 +      thread.policy = selectedPolicy;
 +      this.settings(thread, resumed);
 +      for (const entry of array(object(resumed["thread"])["turns"])) {
@@ -3411,7 +3726,8 @@ index 0000000000000000000000000000000000000000..2f698172d475ecbbe809160397f75022
 +      thread.version++; this.notify(thread);
 +      return thread;
 +    } catch (error) {
-+      state.threads.delete(id);
++      if (thread.queue.length === 0) state.threads.delete(id);
++      else { thread.needsResume = true; thread.error = errorText(error); thread.version++; this.notify(thread); }
 +      if (errorText(error).includes("already has an active writer")) {
 +        throw new Error("This conversation is open in another Codex instance. Close it there before continuing here, or create a new conversation.", { cause: error });
 +      }
@@ -3519,6 +3835,8 @@ index 0000000000000000000000000000000000000000..2f698172d475ecbbe809160397f75022
 +      thread.status = text(turn["status"]);
 +      thread.busy = method === "turn/started";
 +      if (!thread.busy) {
++        thread.stopRequested = false;
++        if (thread.status !== "completed") thread.queuePaused = true;
 +        thread.approvals.clear();
 +        for (const item of thread.items.values()) {
 +          if (item["turnId"] !== thread.turnId) continue;
@@ -3555,6 +3873,8 @@ index 0000000000000000000000000000000000000000..2f698172d475ecbbe809160397f75022
 +      thread.approvals.delete(JSON.stringify(params["requestId"]));
 +    }
 +    thread.version++; this.notify(thread);
++    if (method === "turn/started") void this.interruptRequestedTurn(state, thread).catch(() => { /* The failure is exposed in the thread snapshot. */ });
++    if (method === "turn/completed") void this.drainQueue(state, thread);
 +  }
 +}
 diff --git a/pi-web-plugins/codex/server/protocol.ts b/pi-web-plugins/codex/server/protocol.ts
