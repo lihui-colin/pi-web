@@ -343,13 +343,13 @@ index 0000000000000000000000000000000000000000..3b1a125b51c67515101330b8ec6a7ee3
 +}
 diff --git a/pi-web-plugins/codex/CodexPanel.test.ts b/pi-web-plugins/codex/CodexPanel.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..0b2299748666df79e50a3008950793198d6e60e9
+index 0000000000000000000000000000000000000000..f8a8e4533afa17dda637948d8e1196d8c73d862e
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.test.ts
-@@ -0,0 +1,1287 @@
+@@ -0,0 +1,1393 @@
 +// @vitest-environment happy-dom
 +import { afterEach, describe, expect, it, vi } from "vitest";
-+import type { PluginPeerChannelOptions, FileTreeResponse, JsonValue, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
++import type { PluginPeerChannelOptions, FileContentResponse, FileTreeResponse, JsonValue, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
 +import { CodexPanel } from "./CodexPanel.js";
 +import { CodexBrowserRuntime } from "./CodexBrowserRuntime.js";
 +import type { RecordValue } from "./server/protocol.js";
@@ -1260,6 +1260,108 @@ index 0000000000000000000000000000000000000000..0b2299748666df79e50a300895079319
 +    expect(textarea.value).toBe("keep this draft");
 +  });
 +
++  it("opens reply file links in Review at the referenced line without losing drafts or diffs", async () => {
++    const { panel, view, scope, textarea } = await fixture();
++    const readFile = vi.spyOn(scope.files, "readFile").mockResolvedValue(reviewContent("src/app.ts", "first\n<script>visible source</script>\nlast"));
++    textarea.value = "keep draft"; textarea.dispatchEvent(new Event("input"));
++    view.snapshot = { items: [
++      { id: "reply", kind: "agentMessage", text: "[**source**](/repo/src/app.ts:2) [site](https://example.com)" },
++      { id: "diff", kind: "diff", text: "+new" },
++    ] };
++    panel.requestUpdate(); await panel.updateComplete;
++    required(panel.shadowRoot?.querySelector<HTMLElement>(".file-link strong")).click();
++    await vi.waitFor(() => { expect(panel.shadowRoot?.querySelector(".selected-line")?.textContent).toBe("<script>visible source</script>"); });
++    expect(readFile.mock.calls[0]?.[0]).toBe("src/app.ts");
++    expect(readFile.mock.calls[0]?.[1]?.signal).toBeInstanceOf(AbortSignal);
++    expect(panel.shadowRoot?.querySelector(".selected-line")?.getAttribute("data-line")).toBe("2");
++    expect(panel.shadowRoot?.querySelector("aside script")).toBeNull();
++    expect(textarea.value).toBe("keep draft");
++    const external = required(panel.shadowRoot?.querySelector<HTMLAnchorElement>('a[href="https://example.com"]'));
++    const click = new MouseEvent("click", { bubbles: true, cancelable: true });
++    external.dispatchEvent(click);
++    expect(click.defaultPrevented).toBe(false);
++    expect(readFile).toHaveBeenCalledTimes(1);
++    required(panel.shadowRoot?.querySelector<HTMLButtonElement>(".file-heading button")).click();
++    await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelector("aside .addition")?.textContent).toBe("+new");
++  });
++
++  it("ignores stale file responses and cancels reads when Review closes", async () => {
++    const { panel, view, scope } = await fixture();
++    const pending = new Map<string, (file: FileContentResponse) => void>();
++    const readFile = vi.spyOn(scope.files, "readFile").mockImplementation((path: string) => new Promise<FileContentResponse>((resolve) => { pending.set(path, resolve); }));
++    view.snapshot = { items: [{ id: "reply", kind: "agentMessage", text: "[first](first.ts) [second](second.ts)" }] };
++    panel.requestUpdate(); await panel.updateComplete;
++    const buttons = [...required(panel.shadowRoot).querySelectorAll<HTMLButtonElement>(".file-link")];
++    required(buttons[0]).click(); await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelector("aside")?.textContent).toContain("Loading file");
++    required(buttons[1]).click(); await panel.updateComplete;
++    expect(readFile.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
++    required(pending.get("second.ts"))(reviewContent("second.ts", "second response"));
++    await vi.waitFor(() => { expect(panel.shadowRoot?.querySelector(".file-source")?.textContent).toBe("second response"); });
++    required(pending.get("first.ts"))(reviewContent("first.ts", "stale response"));
++    await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelector(".file-source")?.textContent).toBe("second response");
++    required(buttons[0]).click(); await panel.updateComplete;
++    required(panel.shadowRoot?.querySelector<HTMLButtonElement>('[aria-label="Close review panel"]')).click();
++    await panel.updateComplete;
++    expect(readFile.mock.calls[2]?.[1]?.signal?.aborted).toBe(true);
++    required(pending.get("first.ts"))(reviewContent("first.ts", "late response"));
++    await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelector("aside")).toBeNull();
++  });
++
++  it.each(["conversation", "workspace"])("discards file previews when switching %s", async (selection) => {
++    const { panel, view, scope, runtime, request } = await fixture();
++    let finish!: (file: FileContentResponse) => void;
++    const readFile = vi.spyOn(scope.files, "readFile").mockImplementation(() => new Promise<FileContentResponse>((resolve) => { finish = resolve; }));
++    const items = [{ id: "reply", kind: "agentMessage", text: "[source](/repo/a.ts)" }];
++    view.snapshot = { items };
++    panel.requestUpdate(); await panel.updateComplete;
++    required(panel.shadowRoot?.querySelector<HTMLButtonElement>(".file-link")).click();
++    await panel.updateComplete;
++    if (selection === "conversation") runtime.select(view, "other");
++    else {
++      const next = context(request, "remote", "/other");
++      runtime.view(next).threadId = "thread";
++      runtime.view(next).snapshot = { items };
++      panel.context = next;
++    }
++    await panel.updateComplete;
++    expect(readFile.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
++    finish(reviewContent("a.ts", "private old file"));
++    await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelector("aside")).toBeNull();
++    expect(panel.shadowRoot?.querySelector(".file-link")).toBeNull();
++  });
++
++  it("reports missing files with Retry and marks truncated or unavailable source lines", async () => {
++    const { panel, view, scope } = await fixture();
++    const readFile = vi.spyOn(scope.files, "readFile").mockRejectedValueOnce(new Error("File not found"))
++      .mockResolvedValueOnce({ ...reviewContent("a.ts", "partial"), truncated: true });
++    view.snapshot = { items: [{ id: "reply", kind: "agentMessage", text: "[source](a.ts:5000)" }] };
++    panel.requestUpdate(); await panel.updateComplete;
++    required(panel.shadowRoot?.querySelector<HTMLButtonElement>(".file-link")).click();
++    await vi.waitFor(() => { expect(panel.shadowRoot?.querySelector("aside [role=alert]")?.textContent).toContain("File not found"); });
++    required([...required(panel.shadowRoot).querySelectorAll<HTMLButtonElement>("aside button")].find((b) => b.textContent === "Retry")).click();
++    await vi.waitFor(() => { expect(panel.shadowRoot?.querySelector(".file-source")?.textContent).toBe("partial"); });
++    expect(readFile).toHaveBeenCalledTimes(2);
++    expect(panel.shadowRoot?.querySelector("aside")?.textContent).toContain("File content is truncated");
++    expect(panel.shadowRoot?.querySelector("aside")?.textContent).toContain("Line 5000 is not available");
++  });
++
++  it.each([true, false])("bounds source rendering and never renders binary content (binary=%s)", async (binary) => {
++    const { panel, view, scope } = await fixture();
++    vi.spyOn(scope.files, "readFile").mockResolvedValue({ ...reviewContent("a.ts", "source\n".repeat(10000)), binary });
++    view.snapshot = { items: [{ id: "reply", kind: "agentMessage", text: "[source](a.ts#L5000)" }] };
++    panel.requestUpdate(); await panel.updateComplete;
++    required(panel.shadowRoot?.querySelector<HTMLButtonElement>(".file-link")).click();
++    await vi.waitFor(() => { expect(panel.shadowRoot?.querySelector("aside")?.textContent).not.toContain("Loading file"); });
++    expect(panel.shadowRoot?.querySelectorAll(".file-source>span")).toHaveLength(binary ? 0 : 1000);
++    if (binary) expect(panel.shadowRoot?.querySelector("aside")?.textContent).toContain("Binary files cannot be displayed");
++    else expect(panel.shadowRoot?.querySelector(".selected-line")?.getAttribute("data-line")).toBe("5000");
++  });
++
 +  it("keeps model settings open on selection and dismisses on outside interaction and Escape", async () => {
 +    const { panel, view, textarea } = await fixture();
 +    view.models = [{ model: "test", supportedReasoningEfforts: [{ reasoningEffort: "low" }, { reasoningEffort: "high" }] }];
@@ -1634,21 +1736,26 @@ index 0000000000000000000000000000000000000000..0b2299748666df79e50a300895079319
 +  });
 +
 +});
++
++function reviewContent(path: string, content: string): FileContentResponse {
++  return { path, content, encoding: "utf8", size: content.length, modifiedAt: "2026-10-17T00:00:00Z", binary: false, truncated: false };
++}
 diff --git a/pi-web-plugins/codex/CodexPanel.ts b/pi-web-plugins/codex/CodexPanel.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..a49003b73e2b4768a913c1fa532bed6c024d6c65
+index 0000000000000000000000000000000000000000..622fbf12c8a68aee70f3ee43f2f0c84c12188868
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.ts
-@@ -0,0 +1,818 @@
+@@ -0,0 +1,896 @@
 +import { LitElement, css, html, svg, nothing } from "lit";
 +import { property } from "lit/decorators.js";
 +import { repeat } from "lit/directives/repeat.js";
 +import { unsafeHTML } from "lit/directives/unsafe-html.js";
-+import type { FileTreeEntry, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
++import type { FileContentResponse, FileTreeEntry, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
 +import { CodexBrowserRuntime, type CodexView } from "./CodexBrowserRuntime.js";
 +import { array, errorText, object, text, type PermissionMode, type RecordValue } from "./server/protocol.js";
 +import { writeClipboardText } from "../terminal/clipboard.js";
 +import { renderWorkspaceMarkdownHtml } from "./markdown.js";
++import { workspaceFileLink, type WorkspaceFileLink } from "./fileLinks.js";
 +
 +export class CodexPanel extends LitElement {
 +  @property({ attribute: false }) context: WorkspacePanelContext | undefined;
@@ -1668,6 +1775,14 @@ index 0000000000000000000000000000000000000000..a49003b73e2b4768a913c1fa532bed6c
 +  private browseRequest = 0;
 +  private browseFilter = "";
 +  private reviewOpen = false;
++  private reviewFile: WorkspaceFileLink | undefined;
++  private reviewContent: FileContentResponse | undefined;
++  private reviewError = "";
++  private reviewLoading = false;
++  private reviewAbort: AbortController | undefined;
++  private reviewGeneration = -1;
++  private reviewScroll = false;
++  private reviewStart = 0;
 +  private modelListOpen = false;
 +  private historyExpanded = false;
 +  private archiveConfirmation = "";
@@ -1705,6 +1820,7 @@ index 0000000000000000000000000000000000000000..a49003b73e2b4768a913c1fa532bed6c
 +    this.requestUpdate();
 +  }
 +  override disconnectedCallback(): void {
++    this.clearReviewFile();
 +    this.ownerDocument.removeEventListener("pointerdown", this.dismissMenus, true);
 +    this.ownerDocument.removeEventListener("click", this.dismissMenus, true);
 +    this.ownerDocument.removeEventListener("focusin", this.dismissMenus, true);
@@ -1717,6 +1833,11 @@ index 0000000000000000000000000000000000000000..a49003b73e2b4768a913c1fa532bed6c
 +  protected override willUpdate(): void {
 +    if (this.context === undefined || this.runtime === undefined) return;
 +    const view = this.runtime.view(this.context);
++    if (view !== this.view || view.generation !== this.reviewGeneration) {
++      this.clearReviewFile(); this.reviewOpen = false;
++      this.reviewGeneration = view.generation;
++      this.markdown.clear();
++    }
 +    if (view !== this.view || view.threadId !== "" || !view.connected || !view.threads.some((thread) => text(thread["id"]) === this.archiveConfirmation && thread["busy"] !== true)) this.archiveConfirmation = "";
 +    if (view === this.view && this.unsubscribe !== undefined) return;
 +    this.unsubscribe?.();
@@ -1729,6 +1850,15 @@ index 0000000000000000000000000000000000000000..a49003b73e2b4768a913c1fa532bed6c
 +    this.unsubscribe = this.runtime.subscribe(view, () => { this.requestUpdate(); });
 +  }
 +  protected override updated(): void {
++    if (this.reviewScroll && this.reviewOpen && !this.reviewLoading) {
++      this.reviewScroll = false;
++      const source = this.renderRoot.querySelector<HTMLElement>(".file-source");
++      source?.focus({ preventScroll: true });
++      const selected = source?.querySelector<HTMLElement>(".selected-line");
++      if (source) source.scrollTop = selected ? source.scrollTop + selected.getBoundingClientRect().top - source.getBoundingClientRect().top - (source.clientHeight - selected.offsetHeight) / 2 : 0;
++      const review = this.renderRoot.querySelector(".review-content");
++      if (review) review.scrollTop = 0;
++    }
 +    const scope = this.renderRoot.querySelector<HTMLElement>(".scope");
 +    const fullPath = scope?.querySelector<HTMLElement>(".scope-measure");
 +    if (scope && fullPath && scope.clientWidth > 0) {
@@ -1822,11 +1952,63 @@ index 0000000000000000000000000000000000000000..a49003b73e2b4768a913c1fa532bed6c
 +    const body = text(item["text"]);
 +    let cached = this.markdown.get(id);
 +    if (cached?.text !== body) {
-+      cached = { text: body, html: renderWorkspaceMarkdownHtml(body) };
++      cached = { text: body, html: renderWorkspaceMarkdownHtml(body, (href) => workspaceFileLink(href, this.view?.context.workspace.path ?? "")) };
 +      if (this.markdown.size > 512) this.markdown.clear();
 +      this.markdown.set(id, cached);
 +    }
 +    return cached.html;
++  }
++  private clearReviewFile(): void {
++    this.reviewAbort?.abort(); this.reviewAbort = undefined;
++    this.reviewFile = undefined; this.reviewContent = undefined;
++    this.reviewError = ""; this.reviewLoading = false; this.reviewScroll = false;
++  }
++  private readonly openMessageFile = (event: MouseEvent): void => {
++    const button = event.target instanceof Element ? event.target.closest<HTMLButtonElement>("button.file-link") : null;
++    const path = button?.dataset["filePath"];
++    if (path === undefined) return;
++    event.preventDefault();
++    const line = button?.dataset["fileLine"];
++    void this.openReviewFile({ path, line: line === undefined ? undefined : Number(line) });
++  };
++  private async openReviewFile(file: WorkspaceFileLink): Promise<void> {
++    const view = this.view;
++    if (view === undefined) return;
++    this.clearReviewFile();
++    const abort = new AbortController();
++    const generation = view.generation;
++    this.reviewAbort = abort; this.reviewFile = file;
++    this.reviewStart = Math.max(0, (file.line ?? 1) - 201);
++    this.reviewOpen = true; this.reviewLoading = true; this.requestUpdate();
++    try {
++      const content = await view.context.files.readFile(file.path, { signal: abort.signal });
++      if (abort.signal.aborted || view !== this.view || generation !== view.generation) return;
++      this.reviewContent = content; this.reviewScroll = true;
++    } catch (error) {
++      if (abort.signal.aborted || view !== this.view || generation !== view.generation) return;
++      this.reviewError = errorText(error);
++    } finally {
++      if (!abort.signal.aborted && view === this.view && generation === view.generation) {
++        this.reviewLoading = false; this.requestUpdate();
++      }
++    }
++  }
++  private renderReviewFile(file: WorkspaceFileLink) {
++    const content = this.reviewContent;
++    const lines = content?.binary === false ? content.content.split("\n") : [];
++    const line = file.line ?? 1;
++    const available = line <= lines.length;
++    // Bound DOM size even for files containing hundreds of thousands of short lines.
++    const start = Math.min(this.reviewStart, Math.max(0, lines.length - 1000));
++    const end = Math.min(lines.length, start + 1000);
++    return html`<section class="review-file" aria-label="File preview">
++      <div class="file-heading"><button @click=${() => { this.clearReviewFile(); this.requestUpdate(); }}>← Changes</button><strong title=${file.path}>${file.path}</strong>${file.line === undefined ? nothing : html`<span>Line ${file.line}</span>`}</div>
++      ${this.reviewLoading ? html`<p role="status">Loading file…</p>` : this.reviewError !== "" ? html`<p class="error" role="alert">${this.reviewError}</p><button @click=${() => { void this.openReviewFile(file); }}>Retry</button>` : content === undefined ? nothing : content.binary ? html`<p role="status">Binary files cannot be displayed as text.</p>` : html`
++        ${content.truncated ? html`<p role="status">File content is truncated.</p>` : nothing}
++        ${!available ? html`<p role="status">Line ${line} is not available in this preview.</p>` : nothing}
++        ${start > 0 || end < lines.length ? html`<p>Showing lines ${start + 1}–${end} of ${lines.length}.</p><div class="file-pages"><button ?disabled=${start === 0} @click=${() => { this.reviewStart = Math.max(0, start - 1000); this.reviewScroll = true; this.requestUpdate(); }}>Previous lines</button><button ?disabled=${end === lines.length} @click=${() => { this.reviewStart = end; this.reviewScroll = true; this.requestUpdate(); }}>Next lines</button></div>` : nothing}
++        <pre class="file-source" tabindex="0" aria-label=${`Contents of ${file.path}`}>${lines.slice(start, end).map((value, index) => html`<span class=${start + index + 1 === file.line ? "selected-line" : ""} data-line=${start + index + 1}>${value || " "}</span>`)}</pre>`}
++    </section>`;
 +  }
 +  private async browse(path: string): Promise<void> {
 +    const view = this.view;
@@ -2087,7 +2269,7 @@ index 0000000000000000000000000000000000000000..a49003b73e2b4768a913c1fa532bed6c
 +    const reviewOpen = !home && this.reviewOpen;
 +    const changes = items.filter((item) => ["fileChange", "diff"].includes(text(item["kind"])));
 +    const currentThread = view.threads.find((thread) => thread["id"] === view.threadId);
-+    const headerActions = html`<button class="review-toggle" ?disabled=${home} aria-label="Toggle review panel" aria-expanded=${reviewOpen} @click=${() => { this.closeMenus(true); this.reviewOpen = !reviewOpen; this.requestUpdate(); }}>Review${changes.length > 0 ? html` <span class="count">${changes.length}</span>` : nothing}</button>
++    const headerActions = html`<button class="review-toggle" ?disabled=${home} aria-label="Toggle review panel" aria-expanded=${reviewOpen} @click=${() => { this.closeMenus(true); this.reviewOpen = !reviewOpen; if (!this.reviewOpen) this.clearReviewFile(); this.requestUpdate(); }}>Review${changes.length > 0 ? html` <span class="count">${changes.length}</span>` : nothing}</button>
 +        <button class="reconnect" aria-label="Reconnect" title="Reconnect" ?disabled=${view.pending} @click=${() => { this.closeMenus(true); this.action((runtime, state) => runtime.initialize(state)); }}>${this.isMobileComposer() ? "Reconnect" : html`<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 7a8 8 0 1 0 0 10M20 3v5h-5"></path></svg>`}</button>`;
 +    return html`
 +      <div class="layout" ?data-review-open=${reviewOpen}>
@@ -2098,7 +2280,7 @@ index 0000000000000000000000000000000000000000..a49003b73e2b4768a913c1fa532bed6c
 +      <main>
 +      ${view.notice === "" ? nothing : html`<p role="status">${view.notice}</p>`}
 +      ${view.error === "" && text(snapshot["error"]) === "" ? nothing : html`<p class="error" role="alert">${view.error || text(snapshot["error"])}</p>`}
-+      ${home ? this.renderConversationHome(view) : html`<div class="transcript" @scroll=${(event: Event) => { const target = event.target; if (target instanceof HTMLElement) { const follow = target.scrollHeight - target.scrollTop - target.clientHeight < 60; if (follow !== this.follow) { this.follow = follow; this.requestUpdate(); } } }}>
++      ${home ? this.renderConversationHome(view) : html`<div class="transcript" @click=${this.openMessageFile} @scroll=${(event: Event) => { const target = event.target; if (target instanceof HTMLElement) { const follow = target.scrollHeight - target.scrollTop - target.clientHeight < 60; if (follow !== this.follow) { this.follow = follow; this.requestUpdate(); } } }}>
 +        ${typeof snapshot["total"] === "number" && snapshot["total"] > items.length + view.offset ? html`<button @click=${() => { view.offset = Math.min(512, view.offset + 40); view.snapshot = { ...view.snapshot, version: -1 }; this.requestUpdate(); void this.runtime?.refresh(view); }}>Earlier messages</button>` : nothing}
 +        ${view.offset > 0 ? html`<button @click=${() => { view.offset = Math.max(0, view.offset - 40); view.snapshot = { ...view.snapshot, version: -1 }; this.requestUpdate(); void this.runtime?.refresh(view); }}>Newer messages</button>` : nothing}
 +        ${snapshot["total"] === 512 ? html`<p>Showing the most recent 512 items. Older history remains available in Codex CLI.</p>` : nothing}
@@ -2137,8 +2319,8 @@ index 0000000000000000000000000000000000000000..a49003b73e2b4768a913c1fa532bed6c
 +      <div class="connection-status" role="status">${view.pending ? "Working…" : text(snapshot["status"]) || (view.connected ? "Ready" : "Connecting…")}</div>
 +      </main>
 +      ${reviewOpen ? html`<aside aria-label="Review changes">
-+        <div class="review-header"><span>Review <span class="count">${changes.length}</span></span><button aria-label="Close review panel" @click=${() => { this.reviewOpen = false; this.requestUpdate(); }}>×</button></div>
-+        <div class="review-content">${changes.length === 0 ? html`<p class="empty">File changes will appear here.</p>` : changes.map((item) => html`
++        <div class="review-header"><span>Review <span class="count">${changes.length}</span></span><button aria-label="Close review panel" @click=${() => { this.reviewOpen = false; this.clearReviewFile(); this.requestUpdate(); }}>×</button></div>
++        <div class="review-content">${this.reviewFile !== undefined ? this.renderReviewFile(this.reviewFile) : changes.length === 0 ? html`<p class="empty">File changes will appear here.</p>` : changes.map((item) => html`
 +          <details class="change" open><summary>${text(item["kind"]) === "diff" ? "Turn diff" : "File changes"} <span>${text(item["status"])}</span></summary>
 +            <pre class="diff">${text(item["text"]).split("\n").map((line) => html`<span class=${line.startsWith("+") && !line.startsWith("+++") ? "addition" : line.startsWith("-") && !line.startsWith("---") ? "deletion" : line.startsWith("@@") ? "hunk" : "context"}>${line || " "}</span>`)}</pre>
 +          </details>`)}</div>
@@ -2300,7 +2482,7 @@ index 0000000000000000000000000000000000000000..a49003b73e2b4768a913c1fa532bed6c
 +    .agentMessage { padding:0; } .user-text { white-space:pre-wrap; overflow-wrap:anywhere; } .label { display:flex; justify-content:flex-end; height:0; overflow:hidden; } article:hover .label,article:focus-within .label { height:auto; } .label button { font-size:11px; color:var(--pi-muted,#777); }
 +    pre { white-space:pre-wrap; overflow-wrap:anywhere; margin:0; font:12px/1.6 monospace; } .userMessage pre { font:inherit; }
 +    .transcript details { margin:12px 0; color:var(--pi-muted,#777); } .transcript details pre { padding:12px; background:var(--pi-surface,#f7f7f7); border-radius:8px; }
-+    summary { padding:6px; } .markdown { overflow-wrap:anywhere; } .markdown p { margin:0 0 12px; } .markdown pre { padding:12px; overflow:auto; background:var(--pi-surface,#f7f7f7); border-radius:8px; } .markdown a { color:var(--pi-accent,#4569ae); } .markdown table { border-collapse:collapse; display:block; overflow:auto; } .markdown td,.markdown th { border:1px solid var(--pi-border,#ddd); padding:4px; }
++    summary { padding:6px; } .markdown { overflow-wrap:anywhere; } .markdown p { margin:0 0 12px; } .markdown pre { padding:12px; overflow:auto; background:var(--pi-surface,#f7f7f7); border-radius:8px; } .markdown .file-link { display:inline; border:0; padding:0; border-radius:0; background:none; text-decoration:underline; font:inherit; text-align:inherit; overflow-wrap:anywhere; cursor:pointer; } .markdown a,.markdown .file-link { color:var(--pi-accent,#4569ae); } .markdown table { border-collapse:collapse; display:block; overflow:auto; } .markdown td,.markdown th { border:1px solid var(--pi-border,#ddd); padding:4px; }
 +    footer { position:relative; flex:none; margin:12px 16px 0; padding:12px 8px 7px; background:var(--pi-surface,#f7f7f7); border:1px solid var(--pi-border-muted,#e4e4e4); border-radius:22px; box-shadow:0 4px 18px #00000005; }
 +    textarea { display:block; width:100%; resize:vertical; min-height:70px; max-height:180px; padding:3px 7px 12px; border:0; background:transparent; }
 +    textarea::placeholder { color:var(--pi-muted,#858585); } .composer-controls { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:8px; } .composer-controls select { font-size:12px; max-width:180px; min-width:0; padding:4px; color:var(--pi-muted,#707070); }
@@ -2412,6 +2594,8 @@ index 0000000000000000000000000000000000000000..a49003b73e2b4768a913c1fa532bed6c
 +    .approval { margin:8px 16px; padding:12px; border:1px solid var(--pi-accent,#8ab4ff); border-radius:10px; } .approval strong,small { overflow-wrap:anywhere; } small { display:block; font-size:11px; color:var(--pi-muted,#777); } .approval pre { margin:8px 0; } label { display:block; } label input,label select { display:block; width:100%; border-color:var(--pi-border,#ddd); }
 +    .error { color:var(--pi-danger,#c33); overflow-wrap:anywhere; max-height:120px; overflow:auto; } main>p { margin:8px 16px; } .empty { color:var(--pi-muted,#888); margin:12px 0; }
 +    aside { min-width:0; min-height:0; border-left:1px solid var(--pi-border-muted,#ececec); display:flex; flex-direction:column; background:var(--pi-bg,#fff); }
++    .review-file { max-height:none; overflow:visible; } .review-file .file-heading { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:8px; } .review-file .file-heading strong { overflow-wrap:anywhere; font-size:12px; } .review-file .file-heading>span { color:var(--pi-muted,#666); font-size:11px; }
++    .file-source { white-space:pre; overflow:auto; max-height:65vh; font:12px/1.6 ui-monospace,monospace; margin:0; padding:6px 0; } .file-source>span { display:block; min-width:max-content; padding-right:8px; } .file-source>span::before { content:attr(data-line); display:inline-block; width:6ch; padding-right:1ch; text-align:right; color:var(--pi-muted,#777); user-select:none; } .file-source .selected-line { background:var(--pi-warning-surface,#fff0bd); box-shadow:inset 3px 0 var(--pi-accent,#4569ae); }
 +    .review-header { display:flex; align-items:center; justify-content:space-between; padding:8px 12px; border-bottom:1px solid var(--pi-border-muted,#ececec); color:var(--pi-muted,#666); } .count { display:inline-block; padding:0 5px; background:var(--pi-surface,#f3f3f3); border-radius:4px; font-size:11px; }
 +    .review-content { overflow:auto; padding:8px; flex:1; } .review-content .empty { padding:8px; font-size:12px; } .change { border-bottom:1px solid var(--pi-border-muted,#ececec); margin-bottom:10px; } .change summary { font-size:12px; } .change summary span { color:var(--pi-muted,#888); font-size:10px; } .diff { overflow:auto; padding:4px 0 10px; font-size:11px; } .diff span { display:block; padding:0 8px; white-space:pre-wrap; } .addition { background:var(--pi-success-surface,#e3f1e8); } .deletion { background:var(--pi-danger-surface,#fae8e8); } .hunk { background:var(--pi-surface,#f0f0f0); color:var(--pi-muted,#777); }
 +    @container (max-width:850px) { .layout[data-review-open] { grid-template-columns:minmax(0,1fr); } aside { position:absolute; z-index:2; top:46px; bottom:0; right:0; width:min(340px,90%); box-shadow:-8px 0 24px #0001; } .transcript { padding:24px 20px; } }
@@ -2457,6 +2641,104 @@ index 0000000000000000000000000000000000000000..a49003b73e2b4768a913c1fa532bed6c
 +      .review-header button { min-height:44px; }
 +    }
 +  `;
++}
+diff --git a/pi-web-plugins/codex/fileLinks.test.ts b/pi-web-plugins/codex/fileLinks.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..2fc850847aaefd076257c39ba6942a429cad3cfd
+--- /dev/null
++++ b/pi-web-plugins/codex/fileLinks.test.ts
+@@ -0,0 +1,49 @@
++// @vitest-environment happy-dom
++import { describe, expect, it } from "vitest";
++import { workspaceFileLink } from "./fileLinks.js";
++import { renderWorkspaceMarkdownHtml, sanitizeWorkspaceMarkdownHtml } from "./markdown.js";
++
++describe("Codex workspace file links", () => {
++  it.each([
++    ["/repo/src/app.ts:12", "src/app.ts", 12],
++    ["src/app.ts:12:4", "src/app.ts", 12],
++    ["README.md:3", "README.md", 3],
++    ["Makefile:2", "Makefile", 2],
++    ["./src/../README.md", "README.md", undefined],
++    ["src/app.ts#L12", "src/app.ts", 12],
++    ["src/app.ts#L12C3-L14C8", "src/app.ts", 12],
++    ["file:///repo/docs/My%20File.md#L2", "docs/My File.md", 2],
++    ["/repo/docs/%E8%AF%B4%E6%98%8E.md", "docs/说明.md", undefined],
++    ["notes%23one.txt", "notes#one.txt", undefined],
++  ])("resolves %s within its workspace", (href, path, line) => {
++    expect(workspaceFileLink(href, "/repo/")).toEqual({ path, line });
++  });
++
++  it.each([
++    "", "https://example.com/repo/a.ts:2", "mailto:a@example.com", "javascript:alert(1)",
++    "javascript:1", "data:text/html,test", "vscode://file/repo/a.ts", "//example.com/a.ts",
++    "file://host/repo/a.ts", "../secret.txt", "/repo-other/a.ts", "/repo/../secret.txt",
++    "%2e%2e/secret.txt", "%2f%2fhost/a.ts", "src\\app.ts", "a%00.ts", "bad%ZZ.ts",
++    "#section", "README.md#section", "a.ts?download=1", "a.ts:0", "a.ts:999999999999999999", "/repo",
++  ])("does not turn %s into a workspace read", (href) => {
++    expect(workspaceFileLink(href, "/repo")).toBeUndefined();
++  });
++
++  it("creates file controls only with workspace context and keeps Web links external", () => {
++    const root = document.createElement("div");
++    root.innerHTML = renderWorkspaceMarkdownHtml("[**source**](/repo/a.ts:2) [site](https://example.com) [outside](/other/a.ts)", (href) => workspaceFileLink(href, "/repo"));
++    const button = root.querySelector("button.file-link");
++    expect(button?.getAttribute("data-file-path")).toBe("a.ts");
++    expect(button?.getAttribute("data-file-line")).toBe("2");
++    expect(button?.querySelector("strong")?.textContent).toBe("source");
++    expect(root.querySelector('a[href="https://example.com"]')?.getAttribute("rel")).toBe("noopener noreferrer");
++    expect(root.querySelector('a[href="/other/a.ts"]')).toBeNull();
++    expect(renderWorkspaceMarkdownHtml("[source](/repo/a.ts)")).not.toContain("file-link");
++  });
++
++  it("strips forged controls and active content before exposing local links", () => {
++    const html = sanitizeWorkspaceMarkdownHtml('<a href="/repo/a.ts" data-file-path="../secret" onclick="alert(1)"><strong onclick="alert(1)">source</strong><img src="/tracking"></a><button class="file-link" data-file-path="../secret">forged</button>', (href) => workspaceFileLink(href, "/repo"));
++    expect(html).toContain('data-file-path="a.ts"');
++    for (const forbidden of ["../secret", "onclick", "<img", "forged"]) expect(html).not.toContain(forbidden);
++  });
++});
+diff --git a/pi-web-plugins/codex/fileLinks.ts b/pi-web-plugins/codex/fileLinks.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..68e333b1a88ef6720ba050819b7a05911df8eeaa
+--- /dev/null
++++ b/pi-web-plugins/codex/fileLinks.ts
+@@ -0,0 +1,37 @@
++export interface WorkspaceFileLink {
++  readonly path: string;
++  readonly line: number | undefined;
++}
++
++/** Resolve message links within the selected workspace, never against the Web origin. */
++export function workspaceFileLink(href: string, workspacePath: string): WorkspaceFileLink | undefined {
++  let value = href.trim();
++  if (value.startsWith("file:///")) value = value.slice(7);
++  else if (/^(?:https?|mailto|javascript|data|vbscript):/i.test(value)) return undefined;
++  if (value === "" || value.startsWith("#") || value.includes("?")) return undefined;
++  const location = /(?::(\d+)(?::\d+)?|#L(\d+)(?:C\d+)?(?:-L?\d+(?:C\d+)?)?)$/.exec(value);
++  const line = location === null ? undefined : Number(location[1] ?? location[2]);
++  if (line !== undefined && (!Number.isSafeInteger(line) || line < 1)) return undefined;
++  if (location !== null) value = value.slice(0, location.index);
++  if (/^[a-z][a-z\d+.-]*:/i.test(value)) return undefined;
++  if (value.includes("#")) return undefined;
++  try { value = decodeURIComponent(value); } catch { return undefined; }
++  if (value === "" || value.startsWith("//") || value.includes("\\")) return undefined;
++  for (let index = 0; index < value.length; index++) {
++    const code = value.charCodeAt(index);
++    if (code <= 31 || code === 127) return undefined;
++  }
++  if (!workspacePath.startsWith("/")) return undefined;
++  const normalize = (path: string): string[] => {
++    const parts: string[] = [];
++    for (const part of path.split("/")) {
++      if (part === "..") parts.pop();
++      else if (part !== "" && part !== ".") parts.push(part);
++    }
++    return parts;
++  };
++  const root = normalize(workspacePath);
++  const target = normalize(value.startsWith("/") ? value : `${workspacePath}/${value}`);
++  if (target.length <= root.length || root.some((part, index) => target[index] !== part)) return undefined;
++  return { path: target.slice(root.length).join("/"), line };
 +}
 diff --git a/pi-web-plugins/codex/markdown.ts b/pi-web-plugins/codex/markdown.ts
 new file mode 120000
@@ -4060,6 +4342,70 @@ index 0000000000000000000000000000000000000000..eba8e32d3745d2f14afbd86fb26bd249
 +  },
 +};
 +export default plugin;
+diff --git a/pi-web-plugins/files/workspaceMarkdown.ts b/pi-web-plugins/files/workspaceMarkdown.ts
+index 42e25cf03fb70e5a5384908b3d5e4d83251cb132..c22d6e4c089031aabd9d195a071bdf1e1e2dd9de 100644
+--- a/pi-web-plugins/files/workspaceMarkdown.ts
++++ b/pi-web-plugins/files/workspaceMarkdown.ts
+@@ -1,5 +1,7 @@
+ import { marked } from "marked";
+ 
++type FileLinkResolver = (href: string) => { readonly path: string; readonly line: number | undefined } | undefined;
++
+ const renderer = new marked.Renderer();
+ 
+ // Workspace file bytes are untrusted. Raw HTML must remain visible as text,
+@@ -46,21 +48,21 @@ const SAFE_TABLE_ALIGNMENTS = new Set(["left", "center", "right"]);
+ const TABLE_SCROLL_CLASS = "table-scroll";
+ 
+ /** Render untrusted workspace Markdown through the dedicated allowlist policy. */
+-export function renderWorkspaceMarkdownHtml(markdown: string): string {
++export function renderWorkspaceMarkdownHtml(markdown: string, resolveFileLink?: FileLinkResolver): string {
+   const generated = marked.parse(markdown, {
+     async: false,
+     breaks: true,
+     gfm: true,
+     renderer,
+   });
+-  return sanitizeWorkspaceMarkdownHtml(generated);
++  return sanitizeWorkspaceMarkdownHtml(generated, resolveFileLink);
+ }
+ 
+ /**
+  * Sanitize HTML generated from workspace Markdown. This seam is exported so
+  * the element, attribute, and URL policy can be contract-tested directly.
+  */
+-export function sanitizeWorkspaceMarkdownHtml(generatedHtml: string): string {
++export function sanitizeWorkspaceMarkdownHtml(generatedHtml: string, resolveFileLink?: FileLinkResolver): string {
+   const template = document.createElement("template");
+   template.innerHTML = generatedHtml;
+ 
+@@ -72,6 +74,7 @@ export function sanitizeWorkspaceMarkdownHtml(generatedHtml: string): string {
+       continue;
+     }
+ 
++    const file = tag === "a" ? resolveFileLink?.(element.getAttribute("href") ?? "") : undefined;
+     for (const attribute of [...element.attributes]) {
+       const name = attribute.name.toLowerCase();
+       if (!allowedAttributes.has(name) || !isAllowedAttributeValue(tag, name, attribute.value)) {
+@@ -79,7 +82,17 @@ export function sanitizeWorkspaceMarkdownHtml(generatedHtml: string): string {
+       }
+     }
+ 
+-    if (tag === "a") secureWorkspaceMarkdownLink(element);
++    if (file !== undefined) {
++      // Only this renderer can create file controls; untrusted attributes are discarded.
++      const button = document.createElement("button");
++      button.type = "button";
++      button.className = "file-link";
++      button.dataset["filePath"] = file.path;
++      if (file.line !== undefined) button.dataset["fileLine"] = String(file.line);
++      button.title = `Open ${file.path}${file.line === undefined ? "" : `:${String(file.line)}`} in Review`;
++      button.append(...element.childNodes);
++      element.replaceWith(button);
++    } else if (tag === "a") secureWorkspaceMarkdownLink(element);
+   }
+ 
+   wrapTablesInScrollRegions(template.content);
 diff --git a/pi-web-plugins/pluginPublicApi.test.ts b/pi-web-plugins/pluginPublicApi.test.ts
 index 7f230bed7360104ca64174d51ba36294fd9b80d2..4338c8478ccc165371dfa0fb1c2378116924f0e9 100644
 --- a/pi-web-plugins/pluginPublicApi.test.ts
