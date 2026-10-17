@@ -343,10 +343,10 @@ index 0000000000000000000000000000000000000000..3b1a125b51c67515101330b8ec6a7ee3
 +}
 diff --git a/pi-web-plugins/codex/CodexPanel.test.ts b/pi-web-plugins/codex/CodexPanel.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..f8a8e4533afa17dda637948d8e1196d8c73d862e
+index 0000000000000000000000000000000000000000..fa400d84ac27461fab7cb981af1674339cac5a26
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.test.ts
-@@ -0,0 +1,1393 @@
+@@ -0,0 +1,1438 @@
 +// @vitest-environment happy-dom
 +import { afterEach, describe, expect, it, vi } from "vitest";
 +import type { PluginPeerChannelOptions, FileContentResponse, FileTreeResponse, JsonValue, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
@@ -1400,6 +1400,51 @@ index 0000000000000000000000000000000000000000..f8a8e4533afa17dda637948d8e1196d8
 +    expect(picker.open).toBe(false);
 +  });
 +
++  it.each(["footer", ".composer-controls", ".composer-leading", ".composer-trailing"])("focuses the editor from composer whitespace (%s)", async (selector) => {
++    const { panel, runtime, view, textarea } = await fixture();
++    runtime.saveDraft(view, "first second");
++    panel.requestUpdate(); await panel.updateComplete;
++    textarea.focus();
++    textarea.setSelectionRange(5, 5);
++    const picker = required(panel.shadowRoot?.querySelector<HTMLDetailsElement>(".context-picker"));
++    const add = required(picker.querySelector("summary"));
++    add.focus(); picker.open = true;
++
++    required(panel.shadowRoot?.querySelector<HTMLElement>(selector)).click();
++    await panel.updateComplete;
++    expect(panel.shadowRoot?.activeElement).toBe(textarea);
++    expect([textarea.selectionStart, textarea.selectionEnd]).toEqual([5, 5]);
++    expect(picker.open).toBe(false);
++  });
++
++  it("does not redirect menu, context or queued-message clicks to the editor", async () => {
++    const { panel, view, textarea } = await fixture();
++    view.references = ["src/example.ts"];
++    view.snapshot = { busy: true, queue: [{ id: "next", text: "Queued follow-up" }] };
++    panel.requestUpdate(); await panel.updateComplete;
++    const add = required(panel.shadowRoot?.querySelector<HTMLElement>(".context-picker > summary"));
++    add.focus(); add.click();
++    expect(panel.shadowRoot?.activeElement).toBe(add);
++    for (const selector of [".add-menu", ".context-tray span", ".queued-message p"]) {
++      required(panel.shadowRoot?.querySelector<HTMLElement>(selector)).click();
++      expect(panel.shadowRoot?.activeElement).not.toBe(textarea);
++    }
++    const model = required(panel.shadowRoot?.querySelector<HTMLElement>(".model-picker > summary"));
++    model.focus();
++    required(model.querySelector<SVGElement>("svg")).dispatchEvent(new MouseEvent("click", { bubbles: true, composed: true }));
++    expect(panel.shadowRoot?.activeElement).toBe(model);
++  });
++
++  it("ignores cancelled and secondary composer clicks", async () => {
++    const { panel, textarea } = await fixture();
++    const footer = required(panel.shadowRoot?.querySelector("footer"));
++    const cancelled = new MouseEvent("click", { bubbles: true, cancelable: true });
++    cancelled.preventDefault(); footer.dispatchEvent(cancelled);
++    expect(panel.shadowRoot?.activeElement).not.toBe(textarea);
++    footer.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 2 }));
++    expect(panel.shadowRoot?.activeElement).not.toBe(textarea);
++  });
++
 +  it.each(["", "thread"])("focuses the clicked composer and preserves its caret through updates (thread=%s)", async (threadId) => {
 +    const { panel, view, runtime, textarea } = await fixture();
 +    runtime.select(view, threadId);
@@ -1742,10 +1787,10 @@ index 0000000000000000000000000000000000000000..f8a8e4533afa17dda637948d8e1196d8
 +}
 diff --git a/pi-web-plugins/codex/CodexPanel.ts b/pi-web-plugins/codex/CodexPanel.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..622fbf12c8a68aee70f3ee43f2f0c84c12188868
+index 0000000000000000000000000000000000000000..726c9d87af3dd6b5847219ce5724006f28fdabba
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.ts
-@@ -0,0 +1,896 @@
+@@ -0,0 +1,903 @@
 +import { LitElement, css, html, svg, nothing } from "lit";
 +import { property } from "lit/decorators.js";
 +import { repeat } from "lit/directives/repeat.js";
@@ -1912,6 +1957,16 @@ index 0000000000000000000000000000000000000000..622fbf12c8a68aee70f3ee43f2f0c84c
 +    const runtime = this.runtime;
 +    const view = this.view;
 +    if (runtime !== undefined && view !== undefined) void runtime.run(view, () => action(runtime, view));
++  }
++  private focusComposer(event: MouseEvent): void {
++    if (event.defaultPrevented || event.button !== 0) return;
++    const target = event.composedPath()[0];
++    // The rounded composer includes padding and control gaps outside the textarea.
++    // Only these empty surfaces delegate focus; menus, buttons and queued text keep their behavior.
++    if (!(target instanceof HTMLElement) || !target.matches("footer, textarea, .composer-controls, .composer-leading, .composer-trailing")) return;
++    const editor = this.renderRoot.querySelector<HTMLTextAreaElement>("textarea");
++    // Keep the browser's native caret placement when a tap already focused the editor.
++    if (editor && !editor.matches(":focus")) editor.focus({ preventScroll: true });
 +  }
 +  private composerKeydown(event: KeyboardEvent, view: CodexView): void {
 +    this.navigateInputHistory(event, view);
@@ -2290,7 +2345,7 @@ index 0000000000000000000000000000000000000000..622fbf12c8a68aee70f3ee43f2f0c84c
 +      </div>
 +      ${!this.follow || view.offset > 0 ? html`<button class="latest" @click=${() => { this.follow = true; view.offset = 0; view.snapshot = { ...view.snapshot, version: -1 }; this.requestUpdate(); void this.runtime?.refresh(view); }}>Jump to latest</button>` : nothing}
 +      <section aria-label="Pending requests">${array(snapshot["approvals"]).some((approval) => object(approval)["method"] === "item/tool/requestUserInput") ? html`<div class="asking-question" role="status">Asking question</div>` : nothing}${repeat(array(snapshot["approvals"]), (approval) => JSON.stringify([view.key, view.threadId, text(object(approval)["id"])]), (approval) => this.renderApproval(view, object(approval)))}</section>`}
-+      <footer ?data-plan=${view.mode === "plan"}>
++      <footer ?data-plan=${view.mode === "plan"} @click=${(event: MouseEvent) => { this.focusComposer(event); }}>
 +        ${queued.length > 0 ? html`<section class="queued-messages" aria-label="Queued messages">
 +          <div class="queue-heading"><span>${snapshot["queuePaused"] === true ? "Queue paused" : "Queued · runs after the current task"}</span>${!busy ? html`<button class="resume-queue" ?disabled=${view.pending || !view.connected} @click=${() => { this.action((runtime, state) => runtime.request(state, "resumeQueue", { threadId: state.threadId })); }}>Run next</button>` : nothing}</div>
 +          ${repeat(queued, (message) => text(message["id"]), (message) => html`<div class="queued-message"><p>${text(message["text"])}</p><div class="queue-actions">
@@ -2300,10 +2355,6 @@ index 0000000000000000000000000000000000000000..622fbf12c8a68aee70f3ee43f2f0c84c
 +        </section>` : nothing}
 +        ${view.references.length > 0 ? html`<div class="context-tray" aria-label="Selected workspace context">${view.references.map((path) => html`<span title=${path}>${path}<button aria-label=${`Remove ${path}`} ?disabled=${view.pending} @click=${() => { this.runtime?.saveReferences(view, view.references.filter((entry) => entry !== path)); }}>×</button></span>`)}</div>` : nothing}
 +        <textarea aria-label="Message Codex" enterkeyhint="enter" placeholder=${queueInput ? "Add to the queue, or use Steer after sending..." : view.mode === "plan" ? "Describe your task to generate a plan..." : home ? "Ask Codex to start a new conversation" : "Ask for follow-up changes"} .value=${view.draft}
-+          @click=${(event: MouseEvent) => {
-+            // Keep focus in the tap gesture, without scrolling or resetting the caret.
-+            if (event.currentTarget instanceof HTMLTextAreaElement) event.currentTarget.focus({ preventScroll: true });
-+          }}
 +          @input=${(event: Event) => { if (event.target instanceof HTMLTextAreaElement) { this.historyNavigation = undefined; this.runtime?.saveDraft(view, event.target.value); this.requestUpdate(); } }}
 +          @compositionstart=${() => { this.composing = true; }} @compositionend=${() => { this.composing = false; }}
 +          @keydown=${(event: KeyboardEvent) => { this.composerKeydown(event, view); }}></textarea>
@@ -2454,7 +2505,8 @@ index 0000000000000000000000000000000000000000..622fbf12c8a68aee70f3ee43f2f0c84c
 +    option,optgroup { background:var(--pi-surface,#fff); color:var(--pi-text,#171717); }
 +    option:checked { background:var(--pi-selection-bg,#ededed); }
 +    button,summary,select { cursor:pointer; } button:hover,summary:hover { background:var(--pi-surface-hover,#ededed); } button:disabled,select:disabled { opacity:.45; cursor:default; }
-+    button:focus-visible,select:focus-visible,summary:focus-visible,input:focus-visible,textarea:focus-visible { outline:2px solid var(--pi-accent,#777); outline-offset:2px; }
++    /* Show editor focus for touch as well as keyboard navigation. */
++    button:focus-visible,select:focus-visible,summary:focus-visible,input:focus-visible,textarea:focus { outline:2px solid var(--pi-accent,#777); outline-offset:2px; }
 +    main { display:flex; flex-direction:column; min-width:0; min-height:0; position:relative; }
 +    .conversation-home { flex:1; min-height:0; overflow:auto; padding:8px 16px 20px; }
 +    .home-content { width:100%; }
@@ -2484,7 +2536,7 @@ index 0000000000000000000000000000000000000000..622fbf12c8a68aee70f3ee43f2f0c84c
 +    .transcript details { margin:12px 0; color:var(--pi-muted,#777); } .transcript details pre { padding:12px; background:var(--pi-surface,#f7f7f7); border-radius:8px; }
 +    summary { padding:6px; } .markdown { overflow-wrap:anywhere; } .markdown p { margin:0 0 12px; } .markdown pre { padding:12px; overflow:auto; background:var(--pi-surface,#f7f7f7); border-radius:8px; } .markdown .file-link { display:inline; border:0; padding:0; border-radius:0; background:none; text-decoration:underline; font:inherit; text-align:inherit; overflow-wrap:anywhere; cursor:pointer; } .markdown a,.markdown .file-link { color:var(--pi-accent,#4569ae); } .markdown table { border-collapse:collapse; display:block; overflow:auto; } .markdown td,.markdown th { border:1px solid var(--pi-border,#ddd); padding:4px; }
 +    footer { position:relative; flex:none; margin:12px 16px 0; padding:12px 8px 7px; background:var(--pi-surface,#f7f7f7); border:1px solid var(--pi-border-muted,#e4e4e4); border-radius:22px; box-shadow:0 4px 18px #00000005; }
-+    textarea { display:block; width:100%; resize:vertical; min-height:70px; max-height:180px; padding:3px 7px 12px; border:0; background:transparent; }
++    textarea { display:block; width:100%; resize:vertical; min-height:70px; max-height:180px; padding:3px 7px 12px; border:0; background:transparent; caret-color:var(--pi-accent,#559ff6); }
 +    textarea::placeholder { color:var(--pi-muted,#858585); } .composer-controls { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:8px; } .composer-controls select { font-size:12px; max-width:180px; min-width:0; padding:4px; color:var(--pi-muted,#707070); }
 +    .composer-leading,.composer-trailing { display:flex; align-items:center; gap:2px; }
 +    .composer-leading { flex:none; } .composer-trailing { min-width:0; margin-left:auto; }
