@@ -11,12 +11,24 @@ index 0000000000000000000000000000000000000000..b864cc1c7375582254410edbe397fcf2
 +Add an optional Codex workspace plugin with persistent conversations, streamed responses, tool output, approvals, and model selection using the workspace machine's Codex CLI. Restart sessiond after installing the plugin.
 diff --git a/pi-web-plugins/codex/CodexBrowserRuntime.ts b/pi-web-plugins/codex/CodexBrowserRuntime.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..3b1a125b51c67515101330b8ec6a7ee303fc0729
+index 00000000..faafad89
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexBrowserRuntime.ts
-@@ -0,0 +1,326 @@
+@@ -0,0 +1,435 @@
 +import type { PluginPeerChannel, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
-+import { array, errorText, object, text, permissionMode, type PermissionMode, chatMode, type ChatMode, type RecordValue } from "./server/protocol.js";
++import { MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, IMAGE_MIME_TYPES, array, errorText, object, text, permissionMode, type PermissionMode, chatMode, type ChatMode, type RecordValue } from "./server/protocol.js";
++
++export interface CodexAttachment {
++  id: string;
++  name: string;
++  kind: "image" | "file";
++  size: number;
++  path: string;
++  preview: string;
++  status: "uploading" | "ready" | "error";
++  progress: number;
++  error: string;
++}
 +
 +export interface CodexView {
 +  context: WorkspacePanelContext;
@@ -24,6 +36,7 @@ index 0000000000000000000000000000000000000000..3b1a125b51c67515101330b8ec6a7ee3
 +  threadId: string;
 +  draft: string;
 +  references: string[];
++  attachments: CodexAttachment[];
 +  model: string;
 +  effort: string;
 +  models: RecordValue[];
@@ -51,6 +64,8 @@ index 0000000000000000000000000000000000000000..3b1a125b51c67515101330b8ec6a7ee3
 +export class CodexBrowserRuntime {
 +  private readonly views = new Map<string, CodexView>();
 +  private disposed = false;
++  private readonly attachmentDrafts = new Map<string, CodexAttachment[]>();
++  private readonly uploads = new Map<CodexAttachment, () => void>();
 +  private readonly channels = new Map<CodexView, { abort: AbortController; channel?: PluginPeerChannel; retry?: ReturnType<typeof setTimeout> }>();
 +  private readonly dirty = new Set<CodexView>();
 +  private readonly syncErrors = new Map<CodexView, string>();
@@ -60,7 +75,8 @@ index 0000000000000000000000000000000000000000..3b1a125b51c67515101330b8ec6a7ee3
 +    let view = this.views.get(key);
 +    if (view === undefined) {
 +      const threadId = "";
-+      view = { context, key, threadId, draft: this.read(`${key}:${threadId}:draft`), references: this.readReferences(key, threadId), model: "", effort: "", models: [], defaultModel: "", defaultEffort: "", threads: [], cursor: "", snapshot: {}, error: "", notice: "", connected: false, pending: false, permissionMode: this.readPermissionMode(key), mode: this.readMode(key, threadId), modeDirty: this.read(`${key}:${threadId}:mode`) !== "", sending: false, offset: 0, listeners: new Set(), timer: undefined, polling: false, generation: 0 };
++      view = { context, key, threadId, draft: this.read(`${key}:${threadId}:draft`), references: this.readReferences(key, threadId), attachments: [], model: this.read(`${key}:${threadId}:model`), effort: this.read(`${key}:${threadId}:effort`), models: [], defaultModel: "", defaultEffort: "", threads: [], cursor: "", snapshot: {}, error: "", notice: "", connected: false, pending: false, permissionMode: this.readPermissionMode(key), mode: this.readMode(key, threadId), modeDirty: this.read(`${key}:${threadId}:mode`) !== "", sending: false, offset: 0, listeners: new Set(), timer: undefined, polling: false, generation: 0 };
++      view.attachments = this.readAttachments(view, threadId);
 +      this.views.set(key, view);
 +    }
 +    view.context = context;
@@ -116,10 +132,11 @@ index 0000000000000000000000000000000000000000..3b1a125b51c67515101330b8ec6a7ee3
 +    this.disconnect(view);
 +    view.generation++;
 +    view.threadId = id;
-+    view.model = "";
-+    view.effort = "";
++    view.model = this.read(`${view.key}:${id}:model`);
++    view.effort = this.read(`${view.key}:${id}:effort`);
 +    view.draft = this.read(`${view.key}:${id}:draft`);
 +    view.references = this.readReferences(view.key, id);
++    view.attachments = this.readAttachments(view, id);
 +    view.mode = this.readMode(view.key, id);
 +    view.modeDirty = this.read(`${view.key}:${id}:mode`) !== "";
 +    view.snapshot = {};
@@ -128,6 +145,12 @@ index 0000000000000000000000000000000000000000..3b1a125b51c67515101330b8ec6a7ee3
 +    this.changed(view);
 +    this.schedule(view, 0);
 +    this.connect(view);
++  }
++  saveModelSettings(view: CodexView, model: string, effort: string): void {
++    view.model = model; view.effort = effort;
++    this.write(`${view.key}:${view.threadId}:model`, model);
++    this.write(`${view.key}:${view.threadId}:effort`, effort);
++    this.changed(view);
 +  }
 +  private readMode(key: string, threadId: string): ChatMode {
 +    try { return chatMode(this.read(`${key}:${threadId}:mode`) || undefined); } catch { return "default"; }
@@ -181,14 +204,87 @@ index 0000000000000000000000000000000000000000..3b1a125b51c67515101330b8ec6a7ee3
 +    view.snapshot = { model: text(result["model"]), effort: text(result["effort"]) };
 +    await this.list(view);
 +  }
++  private readAttachments(view: CodexView, threadId: string): CodexAttachment[] {
++    const key = `${view.key}:${threadId}:attachments`;
++    const cached = this.attachmentDrafts.get(key);
++    if (cached) return cached;
++    const attachments: CodexAttachment[] = [];
++    const files = view.context.files;
++    try {
++      if (files.capabilityVersion === 1) for (const entry of array(JSON.parse(this.read(key) || this.read(`${view.key}:${threadId}:images`) || "[]")).slice(0, MAX_ATTACHMENTS)) {
++        const attachment = object(entry);
++        const kind = attachment["kind"] === "file" ? "file" : "image";
++        const path = text(attachment["path"]);
++        if (path) attachments.push({ id: text(attachment["id"]), name: text(attachment["name"]), kind, size: typeof attachment["size"] === "number" ? attachment["size"] : 0, path, preview: kind === "image" ? files.previewUrl(path) : "", status: "ready", progress: 100, error: "" });
++      }
++    } catch { /* Invalid saved attachments are discarded, like other optional draft state. */ }
++    this.attachmentDrafts.set(key, attachments);
++    return attachments;
++  }
++  private saveAttachments(view: CodexView, attachments: CodexAttachment[], threadId = view.threadId): void {
++    const key = `${view.key}:${threadId}:attachments`;
++    this.attachmentDrafts.set(key, attachments);
++    this.write(key, JSON.stringify(attachments.filter((attachment) => attachment.status === "ready").map(({ id, name, path, kind, size }) => ({ id, name, path, kind, size }))));
++    if (view.threadId === threadId) view.attachments = attachments;
++    this.changed(view);
++  }
++  async addFiles(view: CodexView, selected: File[]): Promise<void> {
++    if (this.disposed || view.sending) return;
++    const files = view.context.files;
++    if (files.capabilityVersion !== 1) throw new Error("File uploads require an updated workspace host.");
++    if (view.attachments.length + selected.length > MAX_ATTACHMENTS) throw new Error(`Attach at most ${String(MAX_ATTACHMENTS)} files.`);
++    for (const file of selected) {
++      if (file.size > MAX_ATTACHMENT_BYTES) throw new Error("Each file must be at most 20 MiB.");
++      if (isImage(file) && file.size === 0) throw new Error("Images must be nonempty.");
++    }
++    const threadId = view.threadId;
++    const attachments = selected.map((file): CodexAttachment => ({
++      id: Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, "0")).join(""),
++      name: file.name, kind: isImage(file) ? "image" : "file", size: file.size, path: "", preview: isImage(file) ? URL.createObjectURL(file) : "", status: "uploading", progress: 0, error: "",
++    }));
++    this.saveAttachments(view, [...view.attachments, ...attachments], threadId);
++    await Promise.all(attachments.map(async (attachment, index) => {
++      const file = selected[index];
++      if (!file) return;
++      const blobUrl = attachment.preview;
++      try {
++        const task = files.uploadFile(file, {
++          destinationFolder: [files.defaultUploadFolder, "codex", attachment.id].filter(Boolean).join("/"), overwrite: false, createDirs: true,
++          onProgress: (progress) => { attachment.progress = Math.round(progress.percent * 100); this.changed(view); },
++        });
++        this.uploads.set(attachment, () => { task.cancel(); });
++        const uploaded = await task.completed;
++        attachment.path = uploaded.path; attachment.preview = attachment.kind === "image" ? files.previewUrl(uploaded.path) : ""; attachment.status = "ready"; attachment.progress = 100;
++      } catch (error) {
++        attachment.status = "error"; attachment.error = errorText(error);
++      } finally {
++        this.uploads.delete(attachment);
++        if (attachment.status === "ready" && blobUrl.startsWith("blob:")) URL.revokeObjectURL(blobUrl);
++        if (!this.disposed) this.saveAttachments(view, this.readAttachments(view, threadId), threadId);
++      }
++    }));
++  }
++  removeAttachment(view: CodexView, id: string): void {
++    const attachment = view.attachments.find((entry) => entry.id === id);
++    if (!attachment || view.sending) return;
++    this.uploads.get(attachment)?.();
++    this.uploads.delete(attachment);
++    if (attachment.preview.startsWith("blob:")) URL.revokeObjectURL(attachment.preview);
++    this.saveAttachments(view, view.attachments.filter((entry) => entry !== attachment));
++  }
 +  async send(view: CodexView): Promise<void> {
 +    if (view.sending) return;
++    if (view.attachments.some((attachment) => attachment.status !== "ready")) throw new Error("Wait for file uploads or remove failed attachments before sending.");
++    const attachments = [...view.attachments];
++    const images = attachments.filter((attachment) => attachment.kind === "image").map((attachment) => attachment.path);
++    const files = attachments.filter((attachment) => attachment.kind === "file").map((attachment) => attachment.path);
 +    const draft = view.draft;
 +    const references = [...view.references];
 +    let threadId = view.threadId;
 +    const model = view.model;
 +    const effort = view.effort || (model === "" ? "" : text(view.models.find((entry) => text(entry["model"]) === model)?.["defaultReasoningEffort"]));
 +    const mode = view.mode;
++    if (!draft.trim() && references.length === 0 && attachments.length === 0) return;
 +    view.sending = true; this.changed(view);
 +    try {
 +      if (threadId === "") {
@@ -200,13 +296,17 @@ index 0000000000000000000000000000000000000000..3b1a125b51c67515101330b8ec6a7ee3
 +        view.snapshot = { model: text(result["model"]), effort: text(result["effort"]) };
 +        this.saveDraft(view, currentDraft);
 +        this.saveReferences(view, references);
++        this.saveAttachments(view, attachments);
++        this.saveAttachments(view, [], "");
 +        this.saveMode(view, mode, true);
-+        view.model = model; view.effort = effort;
++        this.saveModelSettings(view, model, effort);
++        this.write(`${view.key}::model`, "");
++        this.write(`${view.key}::effort`, "");
 +        this.write(`${view.key}::draft`, "");
 +        this.write(`${view.key}::references`, "[]");
 +        this.write(`${view.key}::mode`, "default");
 +      }
-+      const result = await this.request(view, "send", { threadId, text: draft, mode, ...this.permissionInput(view), ...(references.length > 0 ? { references } : {}), ...(model === "" ? {} : { model }), ...(effort === "" ? {} : { effort }) });
++      const result = await this.request(view, "send", { threadId, text: draft, mode, ...this.permissionInput(view), ...(images.length > 0 ? { images } : {}), ...(files.length > 0 ? { files } : {}), ...(references.length > 0 ? { references } : {}), ...(model === "" ? {} : { model }), ...(effort === "" ? {} : { effort }) });
 +      if (draft.trim() !== "") {
 +        const history = this.inputHistory(view, threadId);
 +        if (history.at(-1) !== draft) history.push(draft);
@@ -215,10 +315,10 @@ index 0000000000000000000000000000000000000000..3b1a125b51c67515101330b8ec6a7ee3
 +      }
 +      if (view.threadId === threadId) {
 +        this.saveMode(view, result["mode"] === "plan" || result["mode"] === "default" ? result["mode"] : mode, false);
-+        view.model = "";
-+        view.effort = "";
++        this.saveModelSettings(view, model, effort);
 +        if (view.draft === draft) this.saveDraft(view, "");
 +        this.saveReferences(view, view.references.filter((path) => !references.includes(path)));
++        this.saveAttachments(view, view.attachments.filter((attachment) => !attachments.includes(attachment)));
 +        view.snapshot = { ...view.snapshot, ...(result["queued"] === true ? {} : { busy: true, status: "starting" }), version: -1 };
 +      }
 +    } finally {
@@ -236,6 +336,10 @@ index 0000000000000000000000000000000000000000..3b1a125b51c67515101330b8ec6a7ee3
 +  }
 +  dispose(): void {
 +    this.disposed = true;
++    for (const cancel of this.uploads.values()) cancel();
++    this.uploads.clear();
++    for (const images of this.attachmentDrafts.values()) for (const image of images) if (image.preview.startsWith("blob:")) URL.revokeObjectURL(image.preview);
++    this.attachmentDrafts.clear();
 +    for (const view of this.channels.keys()) this.disconnect(view);
 +    this.dirty.clear(); this.syncErrors.clear();
 +    for (const view of this.views.values()) { if (view.timer !== undefined) clearTimeout(view.timer); view.listeners.clear(); }
@@ -341,22 +445,27 @@ index 0000000000000000000000000000000000000000..3b1a125b51c67515101330b8ec6a7ee3
 +    try { localStorage.setItem(`pi-web:codex:${key}`, value); } catch { /* Optional browser persistence. */ }
 +  }
 +}
++
++function isImage(file: File): boolean {
++  return IMAGE_MIME_TYPES.includes(file.type)
++    || ((file.type === "" || file.type === "application/octet-stream") && /\.(?:png|jpe?g|webp|gif)$/iu.test(file.name));
++}
 diff --git a/pi-web-plugins/codex/CodexPanel.test.ts b/pi-web-plugins/codex/CodexPanel.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..fa400d84ac27461fab7cb981af1674339cac5a26
+index 00000000..46d52ac1
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.test.ts
-@@ -0,0 +1,1438 @@
+@@ -0,0 +1,1678 @@
 +// @vitest-environment happy-dom
 +import { afterEach, describe, expect, it, vi } from "vitest";
-+import type { PluginPeerChannelOptions, FileContentResponse, FileTreeResponse, JsonValue, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
++import type { WorkspaceFileUploadOptions, WorkspaceFileUploadTask, PluginPeerChannelOptions, FileContentResponse, FileTreeResponse, JsonValue, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
 +import { CodexPanel } from "./CodexPanel.js";
 +import { CodexBrowserRuntime } from "./CodexBrowserRuntime.js";
 +import type { RecordValue } from "./server/protocol.js";
 +
 +customElements.define("codex-panel-test", CodexPanel);
 +const runtimes: CodexBrowserRuntime[] = [];
-+afterEach(() => { for (const runtime of runtimes) runtime.dispose(); runtimes.length = 0; document.body.replaceChildren(); localStorage.clear(); vi.useRealTimers(); vi.unstubAllGlobals(); });
++afterEach(() => { for (const runtime of runtimes) runtime.dispose(); runtimes.length = 0; document.body.replaceChildren(); localStorage.clear(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 +function context(request: (operation: string, input: JsonValue) => Promise<JsonValue>, machine = "local", workspacePath = "/repo"): WorkspacePanelContext {
 +  return {
 +    navigate: () => Promise.resolve(), machine: { id: machine, name: machine, kind: "local" },
@@ -392,6 +501,201 @@ index 0000000000000000000000000000000000000000..fa400d84ac27461fab7cb981af167433
 +  if (!option) throw new Error("Expected model option");
 +  option.click(); await panel.updateComplete;
 +}
++
++async function attachmentFixture() {
++  const f = await fixture();
++  vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:image-preview");
++  const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
++  const upload = vi.fn<(file: File, options?: WorkspaceFileUploadOptions) => WorkspaceFileUploadTask>((file, options) => {
++    const path = `${options?.destinationFolder ?? "uploads"}/${file.name}`;
++    options?.onProgress?.({ loaded: file.size, total: file.size, percent: 1, lengthComputable: true });
++    return { path, cancel: vi.fn(), completed: Promise.resolve({ path, size: file.size, created: true, modifiedAt: "now" }) };
++  });
++  const scope: WorkspacePanelContext = { ...f.scope, files: { ...f.scope.files, capabilityVersion: 1, defaultUploadFolder: ".pi-web/uploads", maxInlinePreviewBytes: 1024,
++    previewUrl: (path) => `https://example.test/app/image?path=${encodeURIComponent(path)}`, downloadUrl: () => "", uploadFile: upload } };
++  f.runtime.view(scope); f.panel.context = scope; await f.panel.updateComplete;
++  return { ...f, scope, upload, revoke };
++}
++
++function imageTransfer() {
++  const transfer = new DataTransfer();
++  transfer.items.add(new File([new Uint8Array(300_000)], "screenshot.png", { type: "image/png" }));
++  return transfer;
++}
++
++describe("Codex ordinary file input", () => {
++  it.each(["picker", "drop", "paste"])("uploads ordinary files via %s without requiring text", async (action) => {
++    const { panel, textarea, view, request, upload } = await attachmentFixture();
++    const transfer = new DataTransfer();
++    transfer.items.add(new File(["name,total\nA,42"], "report.csv", { type: "text/csv" }));
++    transfer.items.add(new File([new Uint8Array([0, 255, 1, 2])], "archive.zip", { type: "application/zip" }));
++    const picker = required(panel.shadowRoot?.querySelector<HTMLInputElement>(".file-input"));
++    expect(picker.accept).toBe("");
++    if (action === "picker") { picker.files = transfer.files; picker.dispatchEvent(new Event("change")); }
++    else {
++      const event = action === "paste" ? new ClipboardEvent("paste", { clipboardData: transfer, cancelable: true }) : new Event("drop", { cancelable: true });
++      if (action === "drop") Object.defineProperty(event, "dataTransfer", { value: transfer });
++      (action === "paste" ? textarea : required(panel.shadowRoot?.querySelector("footer"))).dispatchEvent(event);
++      expect(event.defaultPrevented).toBe(true);
++    }
++    await vi.waitFor(() => { expect(view.attachments.every((file) => file.status === "ready")).toBe(true); expect(view.attachments).toHaveLength(2); });
++    await panel.updateComplete;
++    expect(upload).toHaveBeenCalledTimes(2);
++    expect(panel.shadowRoot?.querySelectorAll(".attachment img")).toHaveLength(0);
++    expect(panel.shadowRoot?.querySelector(".attachment-tray")?.textContent).toContain("report.csv");
++    expect(panel.shadowRoot?.querySelector(".attachment-tray")?.textContent).toContain("archive.zip");
++    required(panel.shadowRoot?.querySelector<HTMLButtonElement>('[aria-label="Remove file report.csv"]')).click();
++    await panel.updateComplete;
++    const path = required(view.attachments[0]).path;
++    request.mockResolvedValue({ accepted: true });
++    required(panel.shadowRoot?.querySelector<HTMLButtonElement>(".primary")).click();
++    await vi.waitFor(() => { expect(request).toHaveBeenCalledWith("send", { threadId: "thread", text: "", mode: "default", files: [path] }); expect(view.attachments).toEqual([]); });
++  });
++
++  it.each([false, true])("sends mixed images and documents with their original modalities (busy=%s)", async (busy) => {
++    const { runtime, view, panel, request } = await attachmentFixture();
++    view.snapshot = { busy };
++    await runtime.addFiles(view, [required(imageTransfer().files[0]), new File(["%PDF-1.7"], "spec.pdf", { type: "application/pdf" })]);
++    await panel.updateComplete;
++    const [image, file] = view.attachments;
++    expect(panel.shadowRoot?.querySelectorAll(".attachment img")).toHaveLength(1);
++    expect(required(image).kind).toBe("image"); expect(required(file).kind).toBe("file");
++    runtime.saveDraft(view, "Compare the picture and document");
++    request.mockResolvedValue({ accepted: true, queued: busy }); await runtime.send(view);
++    expect(request).toHaveBeenCalledWith("send", { threadId: "thread", text: "Compare the picture and document", mode: "default", images: [required(image).path], files: [required(file).path] });
++  });
++
++  it("migrates saved image drafts and does not resurrect removed legacy attachments", async () => {
++    const { view, scope } = await attachmentFixture();
++    localStorage.setItem(`pi-web:codex:${view.key}:legacy:images`, JSON.stringify([{ id: "old", name: "old.png", path: "uploads/old.png" }]));
++    const runtime = new CodexBrowserRuntime(); runtimes.push(runtime);
++    const restored = runtime.view(scope); runtime.select(restored, "legacy");
++    expect(restored.attachments[0]).toMatchObject({ id: "old", kind: "image", path: "uploads/old.png" });
++    runtime.removeAttachment(restored, "old");
++    const reloaded = new CodexBrowserRuntime(); runtimes.push(reloaded);
++    const fresh = reloaded.view(scope); reloaded.select(fresh, "legacy");
++    expect(fresh.attachments).toEqual([]);
++  });
++
++  it("accepts unknown MIME types and empty ordinary files while inferring common image extensions", async () => {
++    const { runtime, view } = await attachmentFixture();
++    await runtime.addFiles(view, [new File([], ".gitkeep"), new File(["x"], "schema.custom"), new File(["x"], "vector.svg", { type: "image/svg+xml" }), new File(["png"], "screenshot.PNG")]);
++    expect(view.attachments.map((file) => file.kind)).toEqual(["file", "file", "file", "image"]);
++  });
++});
++
++describe("Codex image input", () => {
++  it.each([false, true])("uploads a local image, previews it and submits image-only input (busy=%s)", async (busy) => {
++    const { panel, runtime, view, request, upload, revoke } = await attachmentFixture();
++    view.snapshot = { busy }; panel.requestUpdate(); await panel.updateComplete;
++    const picker = required(panel.shadowRoot?.querySelector<HTMLInputElement>(".file-input"));
++    expect(picker.multiple).toBe(true);
++    const click = vi.spyOn(picker, "click");
++    required(panel.shadowRoot?.querySelector<HTMLButtonElement>(".add-files-upload")).click();
++    expect(click).toHaveBeenCalledOnce();
++    picker.files = imageTransfer().files; picker.dispatchEvent(new Event("change"));
++    await vi.waitFor(() => { expect(view.attachments[0]?.status).toBe("ready"); });
++    await panel.updateComplete;
++    expect(upload).toHaveBeenCalledWith(expect.objectContaining({ name: "screenshot.png", size: 300_000 }), expect.objectContaining({ overwrite: false, createDirs: true }));
++    expect(panel.shadowRoot?.querySelector(".attachment img")?.getAttribute("src")).toContain("/app/image?path=");
++    const path = required(view.attachments[0]).path;
++    expect(required(panel.shadowRoot?.querySelector<HTMLButtonElement>(".primary")).disabled).toBe(false);
++    expect(panel.shadowRoot?.querySelector(".primary")?.getAttribute("aria-label")).toBe(busy ? "Queue message" : "Send message");
++    request.mockResolvedValue({ accepted: true, queued: busy });
++    required(panel.shadowRoot?.querySelector<HTMLButtonElement>(".primary")).click();
++    await vi.waitFor(() => { expect(request).toHaveBeenCalledWith("send", { threadId: "thread", text: "", mode: "default", images: [path] }); });
++    await vi.waitFor(() => { expect(view.attachments).toEqual([]); });
++    expect(runtime.inputHistory(view)).toEqual([]);
++    expect(revoke).toHaveBeenCalledWith("blob:image-preview");
++  });
++
++  it.each(["paste", "drop"])("accepts screenshots via %s while leaving ordinary text paste alone", async (action) => {
++    const { panel, textarea, view, upload } = await attachmentFixture();
++    const ordinary = new ClipboardEvent("paste", { cancelable: true }); textarea.dispatchEvent(ordinary);
++    expect(ordinary.defaultPrevented).toBe(false);
++    const event = action === "paste" ? new ClipboardEvent("paste", { clipboardData: imageTransfer(), cancelable: true }) : new DragEvent("drop", { dataTransfer: imageTransfer(), cancelable: true });
++    // happy-dom does not implement DragEvent.dataTransfer. Supply the browser boundary explicitly.
++    if (action === "drop") Object.defineProperty(event, "dataTransfer", { value: imageTransfer() });
++    (action === "paste" ? textarea : required(panel.shadowRoot?.querySelector("footer"))).dispatchEvent(event);
++    expect(event.defaultPrevented).toBe(true);
++    await vi.waitFor(() => { expect(view.attachments[0]?.status).toBe("ready"); });
++    expect(upload).toHaveBeenCalledOnce();
++  });
++
++  it.each(["image", "file"])("keeps uploaded %s after send failure, restores it per conversation and transfers home attachments", async (kind) => {
++    const { runtime, view, request, scope } = await attachmentFixture();
++    runtime.select(view, "");
++    await runtime.addFiles(view, kind === "image" ? Array.from(imageTransfer().files) : [new File(["report"], "report.pdf", { type: "application/pdf" })]);
++    const path = required(view.attachments[0]).path;
++    request.mockImplementation((operation) => operation === "create" ? Promise.resolve({ id: "created" }) : operation === "send" ? Promise.reject(new Error("offline")) : Promise.resolve({ changed: false }));
++    await expect(runtime.send(view)).rejects.toThrow("offline");
++    expect(view.threadId).toBe("created"); expect(view.attachments[0]?.path).toBe(path);
++    runtime.select(view, ""); expect(view.attachments).toEqual([]);
++    runtime.select(view, "created"); expect(view.attachments[0]?.path).toBe(path);
++    const restored = new CodexBrowserRuntime(); runtimes.push(restored);
++    const other = restored.view(scope); restored.select(other, "created");
++    expect(other.attachments[0]?.path).toBe(path);
++    expect(restored.view(context(request, "another-machine")).attachments).toEqual([]);
++    request.mockResolvedValue({ accepted: true }); await runtime.send(view);
++    expect(view.attachments).toEqual([]);
++  });
++
++  it("blocks sending during upload, cancels removed files and keeps late completion out of another conversation", async () => {
++    const { runtime, view, panel, upload } = await attachmentFixture();
++    let finish!: (value: { path: string; size: number; created: boolean; modifiedAt: string }) => void;
++    const cancel = vi.fn();
++    upload.mockReturnValue({ path: "uploads/image.png", cancel, completed: new Promise((resolve) => { finish = resolve; }) });
++    const uploading = runtime.addFiles(view, Array.from(imageTransfer().files));
++    await panel.updateComplete;
++    expect(required(panel.shadowRoot?.querySelector<HTMLButtonElement>(".primary")).disabled).toBe(true);
++    await expect(runtime.send(view)).rejects.toThrow("Wait for file uploads");
++    required(panel.shadowRoot?.querySelector<HTMLButtonElement>('[aria-label="Remove file screenshot.png"]')).click();
++    expect(cancel).toHaveBeenCalledOnce();
++    runtime.select(view, "other");
++    finish({ path: "uploads/image.png", size: 300_000, created: true, modifiedAt: "now" }); await uploading;
++    expect(view.attachments).toEqual([]);
++    runtime.select(view, "thread"); expect(view.attachments).toEqual([]);
++  });
++
++  it("finishes an upload in its original conversation after navigation and cancels uploads on disposal", async () => {
++    const { runtime, view, upload } = await attachmentFixture();
++    let finish!: (value: { path: string; size: number; created: boolean; modifiedAt: string }) => void;
++    const cancel = vi.fn();
++    upload.mockReturnValue({ path: "uploads/image.png", cancel, completed: new Promise((resolve) => { finish = resolve; }) });
++    const uploading = runtime.addFiles(view, Array.from(imageTransfer().files));
++    runtime.select(view, "other");
++    finish({ path: "uploads/image.png", size: 300_000, created: true, modifiedAt: "now" }); await uploading;
++    expect(view.attachments).toEqual([]);
++    runtime.select(view, "thread"); expect(view.attachments[0]?.path).toBe("uploads/image.png");
++    let reject!: (error: Error) => void;
++    upload.mockReturnValue({ path: "uploads/next.png", cancel, completed: new Promise((_resolve, fail) => { reject = fail; }) });
++    const pending = runtime.addFiles(view, Array.from(imageTransfer().files));
++    runtime.dispose(); expect(cancel).toHaveBeenCalledOnce();
++    reject(new Error("aborted")); await pending;
++  });
++
++  it("retains upload failures visibly and rejects empty images, oversized and excess files", async () => {
++    const { runtime, view, panel, upload } = await attachmentFixture();
++    upload.mockReturnValue({ path: "uploads/image.png", cancel: vi.fn(), completed: Promise.reject(new Error("Upload failed")) });
++    await runtime.addFiles(view, Array.from(imageTransfer().files)); await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelector(".attachment-tray [role=alert]")?.textContent).toContain("Upload failed");
++    expect(view.attachments).toHaveLength(1);
++    await expect(runtime.send(view)).rejects.toThrow("remove failed attachments");
++    await expect(runtime.addFiles(view, [new File([], "empty.png", { type: "image/png" })])).rejects.toThrow("nonempty");
++    await expect(runtime.addFiles(view, [new File([new Uint8Array(20 * 1024 * 1024 + 1)], "large.png", { type: "image/png" })])).rejects.toThrow("20 MiB");
++    await expect(runtime.addFiles(view, Array.from({ length: 10 }, () => required(imageTransfer().files[0])))).rejects.toThrow("at most 10");
++    expect(upload).toHaveBeenCalledOnce();
++  });
++
++  it("renders uploaded history images through the workspace preview API", async () => {
++    const { panel, view } = await attachmentFixture();
++    view.snapshot = { items: [{ id: "picture", kind: "userMessage", text: "", images: [{ path: "/repo/.pi-web/uploads/test.png" }, { path: "/elsewhere/private.png" }] }] };
++    panel.requestUpdate(); await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelectorAll(".message-image")).toHaveLength(1);
++    expect(panel.shadowRoot?.querySelector(".message-image")?.getAttribute("src")).toContain(encodeURIComponent(".pi-web/uploads/test.png"));
++    expect(panel.shadowRoot?.querySelector(".message-image-label")?.textContent).toContain("private.png");
++  });
++});
 +
 +describe("Codex panel", () => {
 +  it("does not reuse an unsent custom answer for a different approval", async () => {
@@ -1154,6 +1458,51 @@ index 0000000000000000000000000000000000000000..fa400d84ac27461fab7cb981af167433
 +    await runtime.send(view);
 +    expect(request).toHaveBeenCalledWith("send", expect.objectContaining({ threadId: id || "created", mode, model: "chosen", effort: explicit ? "xhigh" : "high" }));
 +  });
++  it.each(["", "thread"])("persists model and effort across reloads for conversation %s", async (id) => {
++    const { runtime, view, panel, scope, request } = await fixture();
++    runtime.select(view, id);
++    view.models = [{ model: "chosen", defaultReasoningEffort: "low", supportedReasoningEfforts: [{ reasoningEffort: "low" }, { reasoningEffort: "high" }] }];
++    panel.requestUpdate(); await panel.updateComplete;
++    await chooseModel(panel, "chosen");
++    const slider = required(panel.shadowRoot?.querySelector<HTMLInputElement>('input[aria-label="Reasoning effort"]'));
++    slider.value = "1"; slider.dispatchEvent(new Event("input")); await panel.updateComplete;
++    const reload = () => {
++      const next = new CodexBrowserRuntime(); runtimes.push(next);
++      const restored = next.view(scope);
++      next.select(restored, id);
++      return { next, restored };
++    };
++    const { next, restored } = reload();
++    expect(restored).toMatchObject({ model: "chosen", effort: "high" });
++    next.select(restored, "other");
++    expect(restored).toMatchObject({ model: "", effort: "" });
++    next.select(restored, id);
++    expect(restored).toMatchObject({ model: "chosen", effort: "high" });
++    expect(next.view(context(request, "remote"))).toMatchObject({ model: "", effort: "" });
++    expect(next.view(context(request, "local", "/other"))).toMatchObject({ model: "", effort: "" });
++    required(panel.shadowRoot?.querySelector<HTMLButtonElement>('[aria-label="Reset model and effort"]')).click();
++    expect(reload().restored).toMatchObject({ model: "", effort: "" });
++  });
++  it("retains selected settings after sending a new conversation and reloading", async () => {
++    const { runtime, view, scope, request } = await fixture();
++    runtime.select(view, "");
++    runtime.saveModelSettings(view, "chosen", "high");
++    runtime.saveDraft(view, "hello");
++    request.mockImplementation((operation) => Promise.resolve(operation === "create" ? { id: "created", model: "old", effort: "low" } : { changed: false }));
++    await runtime.send(view);
++    const next = new CodexBrowserRuntime(); runtimes.push(next);
++    const restored = next.view(scope);
++    expect(restored).toMatchObject({ model: "", effort: "" });
++    next.select(restored, "created");
++    expect(restored).toMatchObject({ model: "chosen", effort: "high" });
++    request.mockImplementation((operation) => Promise.resolve(operation === "snapshot" ? { changed: true, model: "old", effort: "low" } : { changed: false }));
++    await next.initialize(restored);
++    expect(restored.snapshot).toMatchObject({ model: "old", effort: "low" });
++    expect(restored).toMatchObject({ model: "chosen", effort: "high" });
++    next.saveDraft(restored, "continue");
++    await next.send(restored);
++    expect(request).toHaveBeenLastCalledWith("send", expect.objectContaining({ model: "chosen", effort: "high" }));
++  });
 +  it("uses supported effort stops, resets overrides, and disables changes while running", async () => {
 +    const { view, panel } = await fixture();
 +    view.snapshot = { model: "astra", effort: "medium" };
@@ -1787,19 +2136,19 @@ index 0000000000000000000000000000000000000000..fa400d84ac27461fab7cb981af167433
 +}
 diff --git a/pi-web-plugins/codex/CodexPanel.ts b/pi-web-plugins/codex/CodexPanel.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..726c9d87af3dd6b5847219ce5724006f28fdabba
+index 00000000..4c5deabd
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.ts
-@@ -0,0 +1,903 @@
+@@ -0,0 +1,954 @@
 +import { LitElement, css, html, svg, nothing } from "lit";
 +import { property } from "lit/decorators.js";
 +import { repeat } from "lit/directives/repeat.js";
 +import { unsafeHTML } from "lit/directives/unsafe-html.js";
 +import type { FileContentResponse, FileTreeEntry, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
 +import { CodexBrowserRuntime, type CodexView } from "./CodexBrowserRuntime.js";
-+import { array, errorText, object, text, type PermissionMode, type RecordValue } from "./server/protocol.js";
++import { MAX_ATTACHMENTS, array, errorText, object, text, type PermissionMode, type RecordValue } from "./server/protocol.js";
 +import { writeClipboardText } from "../terminal/clipboard.js";
-+import { renderWorkspaceMarkdownHtml } from "./markdown.js";
++import { renderWorkspaceMarkdownHtml } from "../files/workspaceMarkdown.js";
 +import { workspaceFileLink, type WorkspaceFileLink } from "./fileLinks.js";
 +
 +export class CodexPanel extends LitElement {
@@ -1975,7 +2324,7 @@ index 0000000000000000000000000000000000000000..726c9d87af3dd6b5847219ce5724006f
 +    // Leave the native newline intact; mobile users submit with the send/queue button.
 +    if (this.ownerDocument.defaultView?.matchMedia("(pointer: coarse), (max-width: 760px)").matches === true) return;
 +    event.preventDefault();
-+    if (!view.pending && !view.sending && view.connected && (view.draft.trim() !== "" || view.references.length > 0)) this.action((runtime, state) => runtime.send(state));
++    if (!view.pending && !view.sending && view.attachments.every((image) => image.status === "ready") && view.connected && (view.draft.trim() !== "" || view.references.length > 0 || view.attachments.length > 0)) this.action((runtime, state) => runtime.send(state));
 +  }
 +  private navigateInputHistory(event: KeyboardEvent, view: CodexView): void {
 +    if (!["ArrowUp", "ArrowDown"].includes(event.key) || event.isComposing || this.composing || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
@@ -2118,7 +2467,7 @@ index 0000000000000000000000000000000000000000..726c9d87af3dd6b5847219ce5724006f
 +  }
 +  private async selectModel(view: CodexView, model: string, effort = ""): Promise<void> {
 +    if (view.pending || view.sending || view.snapshot["busy"] === true || !model) return;
-+    view.model = model; view.effort = effort;
++    this.runtime?.saveModelSettings(view, model, effort);
 +    this.modelListOpen = false; this.requestUpdate(); await this.updateComplete;
 +    this.renderRoot.querySelector<HTMLButtonElement>(".effort-selection")?.focus();
 +  }
@@ -2175,7 +2524,7 @@ index 0000000000000000000000000000000000000000..726c9d87af3dd6b5847219ce5724006f
 +            (this.renderRoot.querySelector<HTMLButtonElement>('.model-options [aria-checked="true"]') ?? this.renderRoot.querySelector<HTMLButtonElement>(".model-options button:not(:disabled)"))?.focus();
 +          }}><strong class="effort-title">${this.effortLabel(effectiveEffort)}</strong><span class="model-choice"><span class="model-name">${modelLabel}</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg></span></button>
 +          <button class="effort-reset" aria-label="Reset model and effort" title=${view.threadId === "" ? "Reset to workspace defaults" : "Reset to current conversation settings"} ?disabled=${disabled || (!view.model && !view.effort)} @click=${() => {
-+            if (!disabled) { view.model = ""; view.effort = ""; this.requestUpdate(); }
++            if (!disabled) { this.runtime?.saveModelSettings(view, "", ""); this.requestUpdate(); }
 +          }}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10a9 9 0 1 1 1 8M3 4v6h6"/></svg></button>
 +        </div>
 +        <div class="effort-slider" style=${`--effort-progress:${String(progress / 100)}`} ?data-unset=${selectedIndex < 0} ?data-disabled=${disabled || efforts.length < 2}>
@@ -2183,7 +2532,7 @@ index 0000000000000000000000000000000000000000..726c9d87af3dd6b5847219ce5724006f
 +          <input type="range" min="0" max=${Math.max(0, efforts.length - 1)} step="1" .value=${String(index)} aria-label="Reasoning effort" aria-valuetext=${efforts.length === 0 ? "No reasoning levels available" : this.effortLabel(effectiveEffort)} ?disabled=${disabled || efforts.length < 2} @input=${(event: Event) => {
 +            if (disabled || efforts.length < 2 || !(event.target instanceof HTMLInputElement)) return;
 +            const value = efforts[Number(event.target.value)];
-+            if (value !== undefined) { view.effort = value; this.requestUpdate(); }
++            if (value !== undefined) { this.runtime?.saveModelSettings(view, modelName, value); this.requestUpdate(); }
 +          }}>
 +        </div>
 +        ${efforts.length === 0 ? html`<p class="effort-unavailable">No reasoning levels available</p>` : nothing}
@@ -2193,6 +2542,45 @@ index 0000000000000000000000000000000000000000..726c9d87af3dd6b5847219ce5724006f
 +  }
 +  private renderComposerSettings(view: CodexView) {
 +    return html`<div class="settings-menu">${this.renderPermissionPicker(view)}${!this.isMobileComposer() ? this.renderPlanStatus(view) : nothing}</div>`;
++  }
++  private addFiles(view: CodexView, files: File[]): void {
++    if (files.length === 0 || view.pending || view.sending) return;
++    view.error = "";
++    void this.runtime?.addFiles(view, files).catch((error: unknown) => { view.error = errorText(error); this.requestUpdate(); });
++  }
++  private pasteFiles(event: ClipboardEvent, view: CodexView): void {
++    const files = Array.from(event.clipboardData?.files ?? []);
++    if (files.length === 0) return;
++    event.preventDefault();
++    this.addFiles(view, files);
++  }
++  private dropFiles(event: DragEvent, view: CodexView): void {
++    const files = event.dataTransfer?.files;
++    if (files === undefined || files.length === 0) return;
++    event.preventDefault();
++    this.addFiles(view, Array.from(files));
++  }
++  private renderAttachmentTray(view: CodexView) {
++    return view.attachments.length === 0 ? nothing : html`<div class="attachment-tray" aria-label="Attached files">
++      ${repeat(view.attachments, (attachment) => attachment.id, (attachment) => html`<div class="attachment">
++        ${attachment.kind === "image" ? html`<img src=${attachment.preview} alt=${attachment.name}>` : html`<span class="attachment-icon" aria-hidden="true">▤</span>`}
++        <div><span class="attachment-name" title=${attachment.name}>${attachment.name}</span><small>${attachment.size < 1024 ? `${String(attachment.size)} B` : attachment.size < 1024 * 1024 ? `${(attachment.size / 1024).toFixed(1)} KiB` : `${(attachment.size / (1024 * 1024)).toFixed(1)} MiB`}</small>
++          ${attachment.status === "uploading" ? html`<small role="status">Uploading ${attachment.progress}%</small>` : attachment.status === "error" ? html`<small class="error" role="alert">${attachment.error} · Remove and select again to retry.</small>` : nothing}
++        </div>
++        <button aria-label=${`Remove file ${attachment.name}`} ?disabled=${view.sending} @click=${() => { this.runtime?.removeAttachment(view, attachment.id); }}>×</button>
++      </div>`)}
++    </div>`;
++  }
++  private renderMessageImages(item: RecordValue) {
++    const files = this.view?.context.files;
++    const root = this.view?.context.workspace.path.replace(/\\/gu, "/").replace(/\/$/u, "");
++    return html`${array(item["images"]).map((entry) => {
++      const path = text(object(entry)["path"]).replace(/\\/gu, "/");
++      const relativePath = root !== undefined && path.startsWith(`${root}/`) ? path.slice(root.length + 1) : "";
++      const name = path.split("/").filter(Boolean).at(-1) ?? "Image";
++      if (files?.capabilityVersion !== 1 || !relativePath || relativePath.split("/").includes("..")) return html`<span class="message-image-label">📎 ${name}</span>`;
++      return html`<a href=${files.previewUrl(relativePath)} target="_blank" rel="noopener noreferrer"><img class="message-image" src=${files.previewUrl(relativePath)} alt=${name} loading="lazy"></a>`;
++    })}`;
 +  }
 +  private renderContextPicker(view: CodexView) {
 +    const entries = this.browseEntries.filter((entry) => entry.name.toLowerCase().includes(this.browseFilter.toLowerCase()));
@@ -2208,6 +2596,7 @@ index 0000000000000000000000000000000000000000..726c9d87af3dd6b5847219ce5724006f
 +      </div>` : html`
 +          <div class="add-heading">Add</div>
 +          <button class="add-item add-files" ?disabled=${view.pending} @click=${() => { this.addPage = "files"; void this.browse(this.browsePath); }}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 15V6a4 4 0 0 1 8 0v10a6 6 0 0 1-12 0V7m8-1v10a2 2 0 0 1-4 0"/></svg><span>Files and folders</span></button>
++          <button class="add-item add-files-upload" ?disabled=${view.pending || view.sending || view.context.files.capabilityVersion !== 1 || view.attachments.length >= MAX_ATTACHMENTS} @click=${() => { this.closeMenus(false, ".context-picker"); this.renderRoot.querySelector<HTMLInputElement>(".file-input")?.click(); }}><span aria-hidden="true">▧</span><span>Upload files</span><span class="add-description">From this device</span></button>
 +          <button class="add-item add-plan" aria-pressed=${view.mode === "plan"} ?disabled=${view.pending || view.sending || view.snapshot["busy"] === true} @click=${() => { this.togglePlan(view); }}>${this.planIcon()}<span>Plan mode</span><span class="add-description">${view.mode === "plan" ? "Turn plan mode off" : "Turn plan mode on"}</span>${view.mode === "plan" ? html`<span class="add-check" aria-hidden="true">✓</span>` : nothing}</button>
 +          ${this.isMobileComposer() ? this.renderComposerSettings(view) : nothing}
 +        `}
@@ -2319,8 +2708,9 @@ index 0000000000000000000000000000000000000000..726c9d87af3dd6b5847219ce5724006f
 +    const queueInput = busy || queued.length > 0;
 +    const items = array(snapshot["items"]).map(object);
 +    const home = view.threadId === "";
-+    const hasInput = view.draft.trim() !== "" || view.references.length > 0;
++    const hasInput = view.draft.trim() !== "" || view.references.length > 0 || view.attachments.length > 0;
 +    const stopAction = busy && !hasInput;
++    const attachmentsPending = view.attachments.some((image) => image.status !== "ready");
 +    const reviewOpen = !home && this.reviewOpen;
 +    const changes = items.filter((item) => ["fileChange", "diff"].includes(text(item["kind"])));
 +    const currentThread = view.threads.find((thread) => thread["id"] === view.threadId);
@@ -2345,16 +2735,18 @@ index 0000000000000000000000000000000000000000..726c9d87af3dd6b5847219ce5724006f
 +      </div>
 +      ${!this.follow || view.offset > 0 ? html`<button class="latest" @click=${() => { this.follow = true; view.offset = 0; view.snapshot = { ...view.snapshot, version: -1 }; this.requestUpdate(); void this.runtime?.refresh(view); }}>Jump to latest</button>` : nothing}
 +      <section aria-label="Pending requests">${array(snapshot["approvals"]).some((approval) => object(approval)["method"] === "item/tool/requestUserInput") ? html`<div class="asking-question" role="status">Asking question</div>` : nothing}${repeat(array(snapshot["approvals"]), (approval) => JSON.stringify([view.key, view.threadId, text(object(approval)["id"])]), (approval) => this.renderApproval(view, object(approval)))}</section>`}
-+      <footer ?data-plan=${view.mode === "plan"} @click=${(event: MouseEvent) => { this.focusComposer(event); }}>
++      <footer @dragover=${(event: DragEvent) => { if (event.dataTransfer?.types.includes("Files") === true) event.preventDefault(); }} @drop=${(event: DragEvent) => { this.dropFiles(event, view); }} ?data-plan=${view.mode === "plan"} @click=${(event: MouseEvent) => { this.focusComposer(event); }}>
 +        ${queued.length > 0 ? html`<section class="queued-messages" aria-label="Queued messages">
 +          <div class="queue-heading"><span>${snapshot["queuePaused"] === true ? "Queue paused" : "Queued · runs after the current task"}</span>${!busy ? html`<button class="resume-queue" ?disabled=${view.pending || !view.connected} @click=${() => { this.action((runtime, state) => runtime.request(state, "resumeQueue", { threadId: state.threadId })); }}>Run next</button>` : nothing}</div>
-+          ${repeat(queued, (message) => text(message["id"]), (message) => html`<div class="queued-message"><p>${text(message["text"])}</p><div class="queue-actions">
++          ${repeat(queued, (message) => text(message["id"]), (message) => html`<div class="queued-message"><p>${text(message["text"])}${Number(message["imageCount"]) > 0 ? html`<small> · ${message["imageCount"]} image(s)</small>` : nothing}</p><div class="queue-actions">
 +            ${busy ? html`<button class="steer-queued" title="Submit this message to the current response" ?disabled=${view.pending || !view.connected || snapshot["status"] === "starting" || !text(snapshot["turnId"])} @click=${() => { this.action((runtime, state) => runtime.request(state, "steer", { threadId: state.threadId, messageId: message["id"] ?? "", expectedTurnId: snapshot["turnId"] ?? "" })); }}>Steer</button>` : nothing}
 +            <button class="remove-queued" aria-label="Remove queued message" title="Remove queued message" ?disabled=${view.pending || !view.connected} @click=${() => { this.action((runtime, state) => runtime.request(state, "removeQueued", { threadId: state.threadId, messageId: message["id"] ?? "" })); }}>×</button>
 +          </div></div>`)}
 +        </section>` : nothing}
 +        ${view.references.length > 0 ? html`<div class="context-tray" aria-label="Selected workspace context">${view.references.map((path) => html`<span title=${path}>${path}<button aria-label=${`Remove ${path}`} ?disabled=${view.pending} @click=${() => { this.runtime?.saveReferences(view, view.references.filter((entry) => entry !== path)); }}>×</button></span>`)}</div>` : nothing}
-+        <textarea aria-label="Message Codex" enterkeyhint="enter" placeholder=${queueInput ? "Add to the queue, or use Steer after sending..." : view.mode === "plan" ? "Describe your task to generate a plan..." : home ? "Ask Codex to start a new conversation" : "Ask for follow-up changes"} .value=${view.draft}
++        <input class="file-input" type="file" multiple hidden aria-label="Upload files from this device" @change=${(event: Event) => { if (event.target instanceof HTMLInputElement) { const files = Array.from(event.target.files ?? []); event.target.value = ""; this.addFiles(view, files); } }}>
++        ${this.renderAttachmentTray(view)}
++        <textarea @paste=${(event: ClipboardEvent) => { this.pasteFiles(event, view); }} aria-label="Message Codex" enterkeyhint="enter" placeholder=${queueInput ? "Add to the queue, or use Steer after sending..." : view.mode === "plan" ? "Describe your task to generate a plan..." : home ? "Ask Codex to start a new conversation" : "Ask for follow-up changes"} .value=${view.draft}
 +          @input=${(event: Event) => { if (event.target instanceof HTMLTextAreaElement) { this.historyNavigation = undefined; this.runtime?.saveDraft(view, event.target.value); this.requestUpdate(); } }}
 +          @compositionstart=${() => { this.composing = true; }} @compositionend=${() => { this.composing = false; }}
 +          @keydown=${(event: KeyboardEvent) => { this.composerKeydown(event, view); }}></textarea>
@@ -2363,7 +2755,7 @@ index 0000000000000000000000000000000000000000..726c9d87af3dd6b5847219ce5724006f
 +          <div class="composer-trailing">${this.renderModelPicker(view)}
 +          <button class="voice-input" aria-label="Voice input" title="Voice input is not implemented yet" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2" width="6" height="13" rx="3"></rect><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"></path></svg></button>
 +          ${busy && hasInput ? html`<button class="stop-response" aria-label="Stop response" title="Stop response" ?disabled=${view.pending || view.sending || !view.connected} @click=${() => { this.action((runtime, state) => runtime.request(state, "stop", { threadId: state.threadId })); }}><span class="stop-icon" aria-hidden="true"></span></button>` : nothing}
-+          <button class="primary" aria-label=${view.sending ? "Sending message" : stopAction ? "Stop response" : queueInput ? "Queue message" : "Send message"} title=${view.sending ? "Sending message" : stopAction ? "Stop response" : queueInput ? "Queue message" : "Send message"} aria-busy=${view.sending} ?disabled=${view.pending || view.sending || !view.connected || (!busy && !hasInput)} @click=${() => { this.action((runtime, state) => stopAction ? runtime.request(state, "stop", { threadId: state.threadId }) : runtime.send(state)); }}>${view.sending ? html`<span class="send-spinner" aria-hidden="true"></span>` : stopAction ? html`<span class="stop-icon" aria-hidden="true"></span>` : html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20V4m-7 7 7-7 7 7"></path></svg>`}</button>
++          <button class="primary" aria-label=${view.sending ? "Sending message" : stopAction ? "Stop response" : queueInput ? "Queue message" : "Send message"} title=${view.sending ? "Sending message" : stopAction ? "Stop response" : queueInput ? "Queue message" : "Send message"} aria-busy=${view.sending} ?disabled=${view.pending || view.sending || !view.connected || (!stopAction && attachmentsPending) || (!busy && !hasInput)} @click=${() => { this.action((runtime, state) => stopAction ? runtime.request(state, "stop", { threadId: state.threadId }) : runtime.send(state)); }}>${view.sending ? html`<span class="send-spinner" aria-hidden="true"></span>` : stopAction ? html`<span class="stop-icon" aria-hidden="true"></span>` : html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20V4m-7 7 7-7 7 7"></path></svg>`}</button>
 +          </div>
 +        </div>
 +      </footer>
@@ -2439,7 +2831,7 @@ index 0000000000000000000000000000000000000000..726c9d87af3dd6b5847219ce5724006f
 +    const copy = html`<button class="copy-button" aria-label="Copy message or tool output" title="Copy message or tool output" @click=${(event: Event) => { if (event.currentTarget instanceof HTMLButtonElement) void this.copyText(body, event.currentTarget); }}><svg class="copy-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="3" width="13" height="13" rx="3"></rect><rect x="3" y="8" width="13" height="13" rx="3"></rect></svg><svg class="copy-check" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"></path></svg><span class="copy-error" aria-hidden="true">!</span></button>`;
 +    if (kind === "userMessage" || kind === "agentMessage") {
 +      return html`<article class=${`${kind} ${text(item["phase"]) === "commentary" ? "commentary" : ""}`} aria-label=${kind === "userMessage" ? "Your message" : "Codex response"}>
-+        ${kind === "agentMessage" ? html`<div class="markdown">${unsafeHTML(this.markdownHtml(item))}</div>` : html`<div class="user-text">${body}</div>`}
++        ${kind === "agentMessage" ? html`<div class="markdown">${unsafeHTML(this.markdownHtml(item))}</div>` : html`<div class="message-images">${this.renderMessageImages(item)}</div><div class="user-text">${body}</div>`}
 +        <div class="message-actions">${kind === "userMessage" ? html`${this.renderMessageTime(item)}${copy}` : html`${copy}${this.renderMessageTime(item)}`}</div></article>`;
 +    }
 +    const state = this.activityState(item);
@@ -2536,6 +2928,14 @@ index 0000000000000000000000000000000000000000..726c9d87af3dd6b5847219ce5724006f
 +    .transcript details { margin:12px 0; color:var(--pi-muted,#777); } .transcript details pre { padding:12px; background:var(--pi-surface,#f7f7f7); border-radius:8px; }
 +    summary { padding:6px; } .markdown { overflow-wrap:anywhere; } .markdown p { margin:0 0 12px; } .markdown pre { padding:12px; overflow:auto; background:var(--pi-surface,#f7f7f7); border-radius:8px; } .markdown .file-link { display:inline; border:0; padding:0; border-radius:0; background:none; text-decoration:underline; font:inherit; text-align:inherit; overflow-wrap:anywhere; cursor:pointer; } .markdown a,.markdown .file-link { color:var(--pi-accent,#4569ae); } .markdown table { border-collapse:collapse; display:block; overflow:auto; } .markdown td,.markdown th { border:1px solid var(--pi-border,#ddd); padding:4px; }
 +    footer { position:relative; flex:none; margin:12px 16px 0; padding:12px 8px 7px; background:var(--pi-surface,#f7f7f7); border:1px solid var(--pi-border-muted,#e4e4e4); border-radius:22px; box-shadow:0 4px 18px #00000005; }
++    .attachment-tray { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:10px; max-height:180px; overflow:auto; }
++    .attachment { display:flex; align-items:center; gap:7px; padding:5px; border:1px solid var(--pi-border-muted,#ddd); border-radius:8px; max-width:100%; }
++    .attachment-icon { display:grid; place-items:center; width:40px; height:48px; flex-shrink:0; font-size:28px; color:var(--pi-muted,#858585); }
++    .attachment img { width:56px; height:56px; object-fit:contain; border-radius:5px; }
++    .attachment>div { min-width:0; max-width:180px; } .attachment-name { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px; }
++    .attachment small { display:block; font-size:11px; overflow-wrap:anywhere; }
++    .message-images { display:flex; flex-wrap:wrap; gap:8px; } .message-image { display:block; max-width:100%; width:180px; max-height:200px; object-fit:contain; border-radius:8px; margin-bottom:6px; }
++    .message-image-label { font-size:12px; } .file-input[hidden] { display:none; }
 +    textarea { display:block; width:100%; resize:vertical; min-height:70px; max-height:180px; padding:3px 7px 12px; border:0; background:transparent; caret-color:var(--pi-accent,#559ff6); }
 +    textarea::placeholder { color:var(--pi-muted,#858585); } .composer-controls { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:8px; } .composer-controls select { font-size:12px; max-width:180px; min-width:0; padding:4px; color:var(--pi-muted,#707070); }
 +    .composer-leading,.composer-trailing { display:flex; align-items:center; gap:2px; }
@@ -2696,14 +3096,14 @@ index 0000000000000000000000000000000000000000..726c9d87af3dd6b5847219ce5724006f
 +}
 diff --git a/pi-web-plugins/codex/fileLinks.test.ts b/pi-web-plugins/codex/fileLinks.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..2fc850847aaefd076257c39ba6942a429cad3cfd
+index 0000000000000000000000000000000000000000..6bd4d248b3030a22b952fc889c275793518005e9
 --- /dev/null
 +++ b/pi-web-plugins/codex/fileLinks.test.ts
 @@ -0,0 +1,49 @@
 +// @vitest-environment happy-dom
 +import { describe, expect, it } from "vitest";
 +import { workspaceFileLink } from "./fileLinks.js";
-+import { renderWorkspaceMarkdownHtml, sanitizeWorkspaceMarkdownHtml } from "./markdown.js";
++import { renderWorkspaceMarkdownHtml, sanitizeWorkspaceMarkdownHtml } from "../files/workspaceMarkdown.js";
 +
 +describe("Codex workspace file links", () => {
 +  it.each([
@@ -2792,14 +3192,6 @@ index 0000000000000000000000000000000000000000..68e333b1a88ef6720ba050819b7a0591
 +  if (target.length <= root.length || root.some((part, index) => target[index] !== part)) return undefined;
 +  return { path: target.slice(root.length).join("/"), line };
 +}
-diff --git a/pi-web-plugins/codex/markdown.ts b/pi-web-plugins/codex/markdown.ts
-new file mode 120000
-index 0000000000000000000000000000000000000000..217c246316b39e57b99954230cd35663ff80a84a
---- /dev/null
-+++ b/pi-web-plugins/codex/markdown.ts
-@@ -0,0 +1 @@
-+../files/workspaceMarkdown.ts
-\ No newline at end of file
 diff --git a/pi-web-plugins/codex/package.json b/pi-web-plugins/codex/package.json
 new file mode 100644
 index 0000000000000000000000000000000000000000..3fef6ee6103ca52ad0742b0bf051ad18f98acac9
@@ -3030,11 +3422,11 @@ index 0000000000000000000000000000000000000000..d3d0bcbd7c51804463cb85883b66abf1
 +export const createCodexConnection: ConnectionFactory = (cwd, event, exited) => new CodexProcess(cwd, event, exited);
 diff --git a/pi-web-plugins/codex/server/codexService.test.ts b/pi-web-plugins/codex/server/codexService.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..9e4e9042610f54d1ba7e3f5738c2dbd938704c93
+index 0000000000000000000000000000000000000000..3f6903925348ed8c0968ee9fa0c2e176a1b75fb1
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/codexService.test.ts
-@@ -0,0 +1,633 @@
-+import { mkdtemp, mkdir, writeFile, symlink, rm } from "node:fs/promises";
+@@ -0,0 +1,739 @@
++import { mkdtemp, mkdir, writeFile, symlink, truncate, rm } from "node:fs/promises";
 +import { join } from "node:path";
 +import { tmpdir } from "node:os";
 +import { afterEach, describe, expect, it, vi } from "vitest";
@@ -3074,7 +3466,113 @@ index 0000000000000000000000000000000000000000..9e4e9042610f54d1ba7e3f5738c2dbd9
 +  return { call, open, request, connection, reply, reject, emit: (frame: RecordValue) => { emit(frame); }, exit: (message: string) => { exit(message); }, cwd: (value: string) => { cwd = value; } };
 +}
 +
++const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aL1sAAAAASUVORK5CYII=", "base64");
++
++describe("Codex uploaded image input", () => {
++  it.each(["start", "queue", "steer"])("passes uploaded image bytes by localImage on %s and retains history metadata", async (action) => {
++    const cwd = await mkdtemp(join(tmpdir(), "codex-images-"));
++    try {
++      const path = join(cwd, "screenshot.png"); await writeFile(path, png);
++      const f = fixture(); await f.call("create", {}, cwd);
++      if (action !== "start") await f.call("send", { threadId: "new", text: "first task" }, cwd);
++      await f.call("send", { threadId: "new", text: action === "steer" ? "Look here" : "", images: ["screenshot.png"] }, cwd);
++      if (action !== "start") {
++        const snapshot = await f.call("snapshot", { threadId: "new" }, cwd);
++        const queued = object(array(snapshot["queue"])[0]); expect(queued["imageCount"]).toBe(1);
++        if (action === "steer") await f.call("steer", { threadId: "new", messageId: queued["id"] ?? "", expectedTurnId: "turn" }, cwd);
++        else f.emit({ method: "turn/completed", params: { threadId: "new", turn: { id: "turn", status: "completed" } } });
++      }
++      await vi.waitFor(() => {
++        expect(f.request).toHaveBeenCalledWith(action === "steer" ? "turn/steer" : "turn/start", expect.objectContaining({ input: [...(action === "steer" ? [{ type: "text", text: "Look here", text_elements: [] }] : []), { type: "localImage", path }] }));
++      });
++      f.emit({ method: "item/completed", params: { threadId: "new", item: { id: "image-input", type: "userMessage", content: [{ type: "localImage", path }] } } });
++      const snapshot = await f.call("snapshot", { threadId: "new" }, cwd);
++      expect(array(snapshot["items"])).toContainEqual(expect.objectContaining({ id: "image-input", text: "", images: [{ path }] }));
++    } finally { await rm(cwd, { recursive: true, force: true }); }
++  });
++
++  it("rejects unsafe paths, invalid image content, oversized images and malformed image lists before starting", async () => {
++    const root = await mkdtemp(join(tmpdir(), "codex-image-validation-"));
++    const cwd = join(root, "workspace"); await mkdir(cwd);
++    try {
++      await writeFile(join(root, "outside.png"), png); await symlink(join(root, "outside.png"), join(cwd, "escape.png"));
++      await writeFile(join(cwd, "fake.png"), "not an image"); await writeFile(join(cwd, "large.png"), png); await truncate(join(cwd, "large.png"), 20 * 1024 * 1024 + 1);
++      const f = fixture(); await f.call("create", {}, cwd);
++      for (const images of [["../outside.png"], [join(root, "outside.png")], ["escape.png"], ["fake.png"], ["large.png"], ["missing.png"], ["."], [null], "fake.png", Array.from({ length: 11 }, () => "fake.png")]) {
++        await expect(f.call("send", { threadId: "new", text: "", images }, cwd)).rejects.toThrow();
++      }
++      expect(f.request.mock.calls.some(([method]) => method === "turn/start")).toBe(false);
++    } finally { await rm(root, { recursive: true, force: true }); }
++  });
++});
++
++describe("Codex uploaded ordinary files", () => {
++  it.each(["start", "queue", "steer"])("passes uploaded documents and images through %s", async (action) => {
++    const cwd = await mkdtemp(join(tmpdir(), "codex-files-"));
++    try {
++      const filename = 'report with "quotes".pdf';
++      await writeFile(join(cwd, filename), "%PDF-1.7\ncontents"); await writeFile(join(cwd, "image.png"), png);
++      const f = fixture(); await f.call("create", {}, cwd);
++      if (action !== "start") await f.call("send", { threadId: "new", text: "first task" }, cwd);
++      await f.call("send", { threadId: "new", text: "Compare", files: [filename], images: ["image.png"] }, cwd);
++      if (action !== "start") {
++        const snapshot = await f.call("snapshot", { threadId: "new" }, cwd);
++        const queued = object(array(snapshot["queue"])[0]);
++        expect(queued["text"]).toContain(JSON.stringify(filename));
++        if (action === "steer") await f.call("steer", { threadId: "new", messageId: queued["id"] ?? "", expectedTurnId: "turn" }, cwd);
++        else f.emit({ method: "turn/completed", params: { threadId: "new", turn: { id: "turn", status: "completed" } } });
++      }
++      await vi.waitFor(() => {
++        expect(f.request).toHaveBeenCalledWith(action === "steer" ? "turn/steer" : "turn/start", expect.objectContaining({ input: [
++          { type: "text", text: `Compare\nUploaded files (paths relative to the working directory; read as needed):\nFile: ${JSON.stringify(filename)}`, text_elements: [] },
++          { type: "localImage", path: join(cwd, "image.png") },
++        ] }));
++      });
++    } finally { await rm(cwd, { recursive: true, force: true }); }
++  });
++
++  it("accepts an empty ordinary file as the only input", async () => {
++    const cwd = await mkdtemp(join(tmpdir(), "codex-empty-file-"));
++    try {
++      await writeFile(join(cwd, ".gitkeep"), "");
++      const f = fixture(); await f.call("create", {}, cwd);
++      await f.call("send", { threadId: "new", files: [".gitkeep"] }, cwd);
++      expect(f.request).toHaveBeenCalledWith("turn/start", expect.objectContaining({ input: [{ type: "text", text: 'Uploaded files (paths relative to the working directory; read as needed):\nFile: ".gitkeep"', text_elements: [] }] }));
++    } finally { await rm(cwd, { recursive: true, force: true }); }
++  });
++
++  it("rejects escaped, missing, oversized and non-file attachments plus a mixed batch over the limit", async () => {
++    const root = await mkdtemp(join(tmpdir(), "codex-files-validation-"));
++    const cwd = join(root, "workspace"); await mkdir(cwd);
++    try {
++      await writeFile(join(root, "outside.txt"), "private"); await symlink(join(root, "outside.txt"), join(cwd, "escape.txt"));
++      await writeFile(join(cwd, "large.zip"), "x"); await truncate(join(cwd, "large.zip"), 20 * 1024 * 1024 + 1);
++      await writeFile(join(cwd, "report.txt"), "contents"); await writeFile(join(cwd, "image.png"), png);
++      const f = fixture(); await f.call("create", {}, cwd);
++      for (const files of [["../outside.txt"], [join(root, "outside.txt")], ["escape.txt"], ["missing.txt"], ["."], ["large.zip"], [null], "report.txt", Array.from({ length: 11 }, () => "report.txt")]) {
++        await expect(f.call("send", { threadId: "new", files }, cwd)).rejects.toThrow();
++      }
++      await expect(f.call("send", { threadId: "new", files: Array.from({ length: 10 }, () => "report.txt"), images: ["image.png"] }, cwd)).rejects.toThrow("at most 10");
++      expect(f.request.mock.calls.some(([method]) => method === "turn/start")).toBe(false);
++    } finally { await rm(root, { recursive: true, force: true }); }
++  });
++});
++
 +describe("Codex workspace service", () => {
++  it("bounds timeline entries introduced by deltas and retains updates to the newest item", async () => {
++    const f = fixture();
++    await f.call("create");
++    for (let index = 0; index < 520; index++) {
++      f.emit({ method: "item/agentMessage/delta", params: { threadId: "new", itemId: `item-${String(index)}`, delta: "chunk" } });
++    }
++    f.emit({ method: "item/agentMessage/delta", params: { threadId: "new", itemId: "item-519", delta: " tail" } });
++    const snapshot = await f.call("snapshot", { threadId: "new" });
++    expect(snapshot["total"]).toBe(512);
++    expect(array(snapshot["items"]).at(-1)).toMatchObject({ id: "item-519", text: "chunk tail" });
++    const oldest = await f.call("snapshot", { threadId: "new", offset: 472 });
++    expect(array(oldest["items"])[0]).toMatchObject({ id: "item-8" });
++  });
++
 +  it("blocks new turns and duplicate archives while archival is awaiting acknowledgement", async () => {
 +    const f = fixture(); await f.call("create");
 +    const original = f.request.getMockImplementation();
@@ -3669,20 +4167,22 @@ index 0000000000000000000000000000000000000000..9e4e9042610f54d1ba7e3f5738c2dbd9
 +});
 diff --git a/pi-web-plugins/codex/server/codexService.ts b/pi-web-plugins/codex/server/codexService.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..879b35c9b20ff060de33562fed04404cf4795166
+index 0000000000000000000000000000000000000000..54002b1305baeb02b5a322a3356c758b87606f5a
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/codexService.ts
-@@ -0,0 +1,704 @@
+@@ -0,0 +1,765 @@
 +import { randomUUID } from "node:crypto";
++import { imageSize } from "image-size";
 +import { isAbsolute, relative, resolve, sep } from "node:path";
-+import { realpath, stat } from "node:fs/promises";
++import { open, realpath, stat } from "node:fs/promises";
 +import type { JsonValue, ServerPluginPeerRequestContext, ServerPluginPeerChannelOpenContext, ServerPluginPeerChannel } from "@jmfederico/pi-web/server-plugin-api";
 +import { createCodexConnection, type CodexConnection, type ConnectionFactory } from "./codexProtocol.js";
-+import { array, bounded, errorText, object, string, text, permissionMode, type PermissionMode, chatMode, type ChatMode, type RecordValue } from "./protocol.js";
++import { MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, array, bounded, errorText, object, string, text, permissionMode, type PermissionMode, chatMode, type ChatMode, type RecordValue } from "./protocol.js";
 +
 +interface QueuedMessage {
 +  id: string;
 +  prompt: string;
++  input: RecordValue[];
 +  options: RecordValue;
 +  policy: RecordValue;
 +  mode: ChatMode | undefined;
@@ -3768,7 +4268,8 @@ index 0000000000000000000000000000000000000000..879b35c9b20ff060de33562fed04404c
 +    notify();
 +    return { closed, receive: () => { throw new Error("Codex events channel is read-only"); }, close };
 +  }
-+  private notify(thread: ThreadState): void {
++  private changed(thread: ThreadState): void {
++    thread.version++;
 +    for (const subscription of this.subscriptions) {
 +      if (subscription.state.threads.get(subscription.id) === thread) subscription.notify();
 +    }
@@ -3874,7 +4375,7 @@ index 0000000000000000000000000000000000000000..879b35c9b20ff060de33562fed04404c
 +      const offset = typeof input["offset"] === "number" ? Math.max(0, Math.min(512, Math.floor(input["offset"]))) : 0;
 +      const end = Math.max(0, thread.items.size - offset);
 +      return this.boundedSnapshot({ changed: true, id, mode: thread.mode, model: thread.model, effort: thread.effort, version: thread.version, status: thread.status, busy: thread.busy, turnId: thread.turnId, error: thread.error,
-+        queue: thread.queue.map((message) => ({ id: message.id, text: bounded(message.prompt) })), queuePaused: thread.queuePaused,
++        queue: thread.queue.map((message) => ({ id: message.id, text: bounded(message.prompt), imageCount: message.input.filter((entry) => entry["type"] === "localImage").length })), queuePaused: thread.queuePaused,
 +        inputHistory: [...thread.inputHistory.values()], items: [...thread.items.values()].slice(Math.max(0, end - 40), end), offset, total: thread.items.size, approvals: [...thread.approvals.values()], policy: thread.policy });
 +    }
 +    if (context.operation === "send") {
@@ -3900,7 +4401,20 @@ index 0000000000000000000000000000000000000000..879b35c9b20ff060de33562fed04404c
 +          }
 +          prompt = [prompt, "Selected workspace context (paths relative to the working directory; read as needed):", ...selected].filter(Boolean).join("\n");
 +        }
-+        if (prompt.trim() === "") throw new Error("Enter a message or select workspace context");
++        if (input["files"] !== undefined && !Array.isArray(input["files"])) throw new Error("Invalid uploaded files");
++        const files = array(input["files"]);
++        if (files.length + array(input["images"]).length > MAX_ATTACHMENTS) throw new Error(`Attach at most ${String(MAX_ATTACHMENTS)} files`);
++        if (files.length > 0) {
++          const root = await realpath(state.cwd);
++          const selected: string[] = [];
++          for (const entry of files) {
++            const uploaded = await this.attachmentFile(root, entry);
++            selected.push(`File: ${JSON.stringify(relative(root, uploaded.path))}`);
++          }
++          prompt = [prompt, "Uploaded files (paths relative to the working directory; read as needed):", ...selected].filter(Boolean).join("\n");
++        }
++        const images = await this.imageInputs(state, input["images"]);
++        if (prompt.trim() === "" && images.length === 0) throw new Error("Enter a message, attach files or select workspace context");
 +        const options: RecordValue = {
 +          approvalPolicy: selectedPolicy["approvalPolicy"] ?? "never",
 +          approvalsReviewer: selectedPolicy["approvalsReviewer"] ?? "user",
@@ -3919,11 +4433,11 @@ index 0000000000000000000000000000000000000000..879b35c9b20ff060de33562fed04404c
 +            developer_instructions: null,
 +          } };
 +        }
-+        const message: QueuedMessage = { id: randomUUID(), prompt, options, policy: selectedPolicy, mode };
++        const message: QueuedMessage = { id: randomUUID(), prompt, input: [...(prompt.trim() ? [{ type: "text", text: prompt, text_elements: [] }] : []), ...images], options, policy: selectedPolicy, mode };
 +        if (thread.busy || thread.queue.length > 0) {
 +          if (thread.queue.length >= 20) throw new Error("At most 20 messages can be queued per conversation");
 +          thread.queue.push(message);
-+          thread.version++; this.notify(thread);
++          this.changed(thread);
 +          return { accepted: true, queued: true };
 +        }
 +        thread.queuePaused = false;
@@ -3939,20 +4453,20 @@ index 0000000000000000000000000000000000000000..879b35c9b20ff060de33562fed04404c
 +      if (message === undefined) throw new Error("This queued message was already submitted or removed");
 +      if (context.operation === "removeQueued") {
 +        thread.queue.splice(thread.queue.indexOf(message), 1);
-+        thread.version++; this.notify(thread);
++        this.changed(thread);
 +        return { removed: true };
 +      }
 +      const expectedTurnId = string(input["expectedTurnId"], "expectedTurnId");
 +      if (!thread.busy || thread.turnId !== expectedTurnId) throw new Error("The active response changed. The message remains queued.");
 +      thread.sending = true;
 +      try {
-+        await rpc("turn/steer", { threadId: id, expectedTurnId, input: [{ type: "text", text: message.prompt, text_elements: [] }] });
++        await rpc("turn/steer", { threadId: id, expectedTurnId, input: message.input });
 +        // Remove only after acknowledgement, so failed steering keeps the queued input.
 +        thread.queue.splice(thread.queue.indexOf(message), 1);
 +        return { accepted: true };
 +      } finally {
 +        thread.sending = false;
-+        thread.version++; this.notify(thread);
++        this.changed(thread);
 +        void this.drainQueue(state, thread);
 +      }
 +    }
@@ -3967,7 +4481,7 @@ index 0000000000000000000000000000000000000000..879b35c9b20ff060de33562fed04404c
 +      if (!thread.busy) throw new Error("No active turn to stop");
 +      thread.queuePaused = true;
 +      thread.stopRequested = true;
-+      thread.version++; this.notify(thread);
++      this.changed(thread);
 +      await this.interruptRequestedTurn(state, thread);
 +      return { accepted: true };
 +    }
@@ -3991,8 +4505,40 @@ index 0000000000000000000000000000000000000000..879b35c9b20ff060de33562fed04404c
 +    // Keep a failed write retryable. No await before removal, so competing clients cannot decide twice.
 +    state.connection.reply(requestId, response);
 +    thread.approvals.delete(approvalId);
-+    thread.version++; this.notify(thread);
++    this.changed(thread);
 +    return { accepted: true };
++  }
++
++  private async attachmentFile(root: string, value: unknown): Promise<{ path: string; size: number }> {
++    const path = string(value, "attachment path", 4096);
++    if (isAbsolute(path) || path.split(/[\\/]/u).includes("..")) throw new Error("Attachment must be inside the current workspace");
++    const target = await realpath(resolve(root, path));
++    const within = relative(root, target);
++    if (isAbsolute(within) || within === ".." || within.startsWith(`..${sep}`)) throw new Error("Attachment must be inside the current workspace");
++    const info = await stat(target);
++    if (!info.isFile() || info.size > MAX_ATTACHMENT_BYTES) throw new Error("Each attachment must be a file of at most 20 MiB");
++    return { path: target, size: info.size };
++  }
++
++  private async imageInputs(state: WorkspaceState, value: unknown): Promise<RecordValue[]> {
++    if (value === undefined) return [];
++    if (!Array.isArray(value) || value.length > MAX_ATTACHMENTS) throw new Error(`Attach at most ${String(MAX_ATTACHMENTS)} images`);
++    const root = await realpath(state.cwd);
++    const inputs: RecordValue[] = [];
++    for (const entry of value) {
++      const { path: target, size } = await this.attachmentFile(root, entry);
++      if (size === 0) throw new Error("Images must be nonempty");
++      const handle = await open(target, "r");
++      try {
++        const header = Buffer.alloc(Math.min(size, 65536));
++        const { bytesRead } = await handle.read(header, 0, header.length, 0);
++        const metadata = imageSize(Uint8Array.from(header.subarray(0, bytesRead)));
++        if (!["png", "jpg", "webp", "gif"].includes(metadata.type ?? "")) throw new Error("Unsupported image type");
++      } catch { throw new Error("Choose a valid PNG, JPEG, WebP or GIF image"); }
++      finally { await handle.close(); }
++      inputs.push({ type: "localImage", path: target });
++    }
++    return inputs;
 +  }
 +
 +  private async startTurn(state: WorkspaceState, thread: ThreadState, message: QueuedMessage): Promise<RecordValue> {
@@ -4001,9 +4547,9 @@ index 0000000000000000000000000000000000000000..879b35c9b20ff060de33562fed04404c
 +    thread.stopRequested = false;
 +    thread.status = "starting";
 +    thread.error = "";
-+    thread.version++; this.notify(thread);
++    this.changed(thread);
 +    try {
-+      const result = await state.connection.request("turn/start", { threadId: thread.id, input: [{ type: "text", text: message.prompt, text_elements: [] }], ...message.options });
++      const result = await state.connection.request("turn/start", { threadId: thread.id, input: message.input, ...message.options });
 +      thread.policy = message.policy;
 +      if (message.mode !== undefined) thread.mode = message.mode;
 +      const turn = object(result["turn"]);
@@ -4019,7 +4565,7 @@ index 0000000000000000000000000000000000000000..879b35c9b20ff060de33562fed04404c
 +      thread.status = "failed";
 +      thread.error = errorText(error);
 +      throw error;
-+    } finally { thread.version++; this.notify(thread); }
++    } finally { this.changed(thread); }
 +  }
 +  private async interruptRequestedTurn(state: WorkspaceState, thread: ThreadState): Promise<void> {
 +    if (thread.stopRequested !== true || !thread.busy || thread.turnId === "") return;
@@ -4028,7 +4574,7 @@ index 0000000000000000000000000000000000000000..879b35c9b20ff060de33562fed04404c
 +    try {
 +      await state.connection.request("turn/interrupt", { threadId: thread.id, turnId });
 +    } catch (error) {
-+      if (thread.turnId === turnId) { thread.error = errorText(error); thread.version++; this.notify(thread); }
++      if (thread.turnId === turnId) { thread.error = errorText(error); this.changed(thread); }
 +      throw error;
 +    }
 +  }
@@ -4038,7 +4584,7 @@ index 0000000000000000000000000000000000000000..879b35c9b20ff060de33562fed04404c
 +    try {
 +      const current = object((await state.connection.request("thread/read", { threadId: thread.id, includeTurns: false }))["thread"]);
 +      if (this.disposed || state.error !== "" || thread.turnId !== turnId || thread.settingsVersion !== version) return;
-+      if (typeof current["model"] === "string") { this.settings(thread, current); thread.version++; this.notify(thread); }
++      if (typeof current["model"] === "string") { this.settings(thread, current); this.changed(thread); }
 +    } catch { /* Accepted input must not wait for settings; retain the last authoritative values on read failure. */ }
 +  }
 +  private canDrainQueue(state: WorkspaceState, thread: ThreadState): boolean {
@@ -4062,7 +4608,7 @@ index 0000000000000000000000000000000000000000..879b35c9b20ff060de33562fed04404c
 +      }
 +    } finally {
 +      thread.sending = false;
-+      thread.version++; this.notify(thread);
++      this.changed(thread);
 +    }
 +    return undefined;
 +  }
@@ -4142,7 +4688,7 @@ index 0000000000000000000000000000000000000000..879b35c9b20ff060de33562fed04404c
 +      if (this.workspaces.size >= 16) throw new Error("Codex workspace limit reached. Idle instances expire after 15 minutes.");
 +      const connection = this.connect(cwd, (frame) => { this.event(created, frame); }, (message) => {
 +        created.error = message;
-+        for (const thread of threads.values()) { thread.busy = false; thread.status = "interrupted"; thread.queuePaused = true; thread.error = message; thread.approvals.clear(); thread.version++; this.notify(thread); }
++        for (const thread of threads.values()) { thread.busy = false; thread.status = "interrupted"; thread.queuePaused = true; thread.error = message; thread.approvals.clear(); this.changed(thread); }
 +      });
 +      const created: WorkspaceState = { cwd, projectId: context.project.id, workspaceId: context.workspace.id, threads, opening: new Map(), archiving: new Set(), error: "", touched: Date.now(), connection };
 +      state = created;
@@ -4186,7 +4732,7 @@ index 0000000000000000000000000000000000000000..879b35c9b20ff060de33562fed04404c
 +    const thread: ThreadState = { id, model: text(saved["model"]), effort: text(saved["reasoningEffort"]), version: --this.historyVersion, turnId: "", status: "Stored history", error: "", busy: false, sending: false, queue: [], queuePaused: false, items: new Map(), inputHistory: new Map(), approvals: new Map(), policy: null, mode: null };
 +    for (const entry of array(saved["turns"])) {
 +      const turn = object(entry);
-+      for (const item of array(turn["items"])) this.item(thread, { ...object(item), turnId: turn["id"] ?? "", turnStatus: turn["status"] ?? "", turnDurationMs: turn["durationMs"] ?? null, turnStartedAt: turn["startedAt"] ?? null, turnCompletedAt: turn["completedAt"] ?? null });
++      this.restoreTurnItems(thread, turn);
 +    }
 +    if (existing !== undefined) {
 +      existing.items = thread.items; existing.inputHistory = thread.inputHistory; existing.version++;
@@ -4220,19 +4766,28 @@ index 0000000000000000000000000000000000000000..879b35c9b20ff060de33562fed04404c
 +      for (const entry of array(object(resumed["thread"])["turns"])) {
 +        const turn = object(entry);
 +        this.rememberTurnTimes(thread, turn);
-+        for (const item of array(turn["items"])) this.item(thread, { ...object(item), turnId: turn["id"] ?? "", turnStatus: turn["status"] ?? "", turnDurationMs: turn["durationMs"] ?? null, turnStartedAt: turn["startedAt"] ?? null, turnCompletedAt: turn["completedAt"] ?? null }, false);
++        this.restoreTurnItems(thread, turn, false);
 +        if (turn["status"] === "inProgress") { thread.busy = true; thread.turnId = text(turn["id"]); thread.status = "inProgress"; }
 +      }
-+      thread.version++; this.notify(thread);
++      this.changed(thread);
 +      return thread;
 +    } catch (error) {
 +      if (thread.queue.length === 0) state.threads.delete(id);
-+      else { thread.needsResume = true; thread.error = errorText(error); thread.version++; this.notify(thread); }
++      else { thread.needsResume = true; thread.error = errorText(error); this.changed(thread); }
 +      if (errorText(error).includes("already has an active writer")) {
 +        throw new Error("This conversation is open in another Codex instance. Close it there before continuing here, or create a new conversation.", { cause: error });
 +      }
 +      throw error;
 +    }
++  }
++  private restoreTurnItems(thread: ThreadState, turn: RecordValue, replace = true): void {
++    const metadata = { turnId: turn["id"] ?? "", turnStatus: turn["status"] ?? "",
++      turnDurationMs: turn["durationMs"] ?? null, turnStartedAt: turn["startedAt"] ?? null, turnCompletedAt: turn["completedAt"] ?? null };
++    for (const item of array(turn["items"])) this.item(thread, { ...object(item), ...metadata }, replace);
++  }
++  private storeItem(thread: ThreadState, id: string, item: RecordValue): void {
++    thread.items.set(id, item);
++    trimOldest(thread.items, 512);
 +  }
 +  private item(thread: ThreadState, raw: RecordValue, replace = true): void {
 +    const id = string(raw["id"]);
@@ -4242,7 +4797,11 @@ index 0000000000000000000000000000000000000000..879b35c9b20ff060de33562fed04404c
 +    const joined = (value: unknown): string => array(value).map((entry) => typeof entry === "string" ? entry : text(object(entry)["text"])).filter(Boolean).join("\n");
 +    let body = text(raw["text"]);
 +    const details: RecordValue = {};
-+    if (kind === "userMessage") body = joined(raw["content"]);
++    if (kind === "userMessage") {
++      body = joined(raw["content"]);
++      details["images"] = array(raw["content"]).map(object).filter((entry) => ["localImage", "image"].includes(text(entry["type"]))).slice(0, MAX_ATTACHMENTS)
++        .map((entry) => ({ path: bounded(text(entry["path"]), 4096) }));
++    }
 +    else if (kind === "reasoning") {
 +      details["summaryText"] = bounded(joined(raw["summary"]));
 +      details["contentText"] = bounded(joined(raw["content"]));
@@ -4281,14 +4840,10 @@ index 0000000000000000000000000000000000000000..879b35c9b20ff060de33562fed04404c
 +    const status = text(raw["status"]) || text(raw["turnStatus"]) || text(previous?.["status"]);
 +    if (kind === "userMessage" && body.trim() !== "") {
 +      thread.inputHistory.set(id, body);
-+      while (thread.inputHistory.size > 100) {
-+        const first = thread.inputHistory.keys().next().value;
-+        if (first !== undefined) thread.inputHistory.delete(first);
-+      }
++      trimOldest(thread.inputHistory, 100);
 +    }
-+    thread.items.set(id, { ...previous, id, kind, text: bounded(body), status,
++    this.storeItem(thread, id, { ...previous, id, kind, text: bounded(body), status,
 +      ...(turnId ? { turnId } : {}), ...(typeof raw["phase"] === "string" ? { phase: raw["phase"] } : {}), ...details });
-+    while (thread.items.size > 512) { const first = thread.items.keys().next().value; if (first !== undefined) thread.items.delete(first); }
 +  }
 +  private rememberTurnTimes(thread: ThreadState, turn: RecordValue): void {
 +    const id = text(turn["id"]);
@@ -4303,10 +4858,7 @@ index 0000000000000000000000000000000000000000..879b35c9b20ff060de33562fed04404c
 +    for (const item of thread.items.values()) {
 +      if (item["turnId"] === id) Object.assign(item, entry);
 +    }
-+    while (times.size > 512) {
-+      const first = times.keys().next().value;
-+      if (first !== undefined) times.delete(first);
-+    }
++    trimOldest(times, 512);
 +  }
 +  private event(state: WorkspaceState, frame: RecordValue): void {
 +    const params = object(frame["params"] ?? {});
@@ -4317,10 +4869,10 @@ index 0000000000000000000000000000000000000000..879b35c9b20ff060de33562fed04404c
 +      if (thread !== undefined && ["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/tool/requestUserInput"].includes(method)) {
 +        const id = JSON.stringify(requestId);
 +        thread.approvals.set(id, { id, requestId, method, params });
-+        thread.version++; this.notify(thread);
++        this.changed(thread);
 +      } else {
 +        state.connection.reject(requestId, `Unsupported interaction in PI WEB: ${method}`);
-+        if (thread !== undefined) { thread.error = `Unsupported interaction: ${method}`; thread.version++; this.notify(thread); }
++        if (thread !== undefined) { thread.error = `Unsupported interaction: ${method}`; this.changed(thread); }
 +      }
 +      return;
 +    }
@@ -4357,7 +4909,7 @@ index 0000000000000000000000000000000000000000..879b35c9b20ff060de33562fed04404c
 +        item["text"] = text(item["summaryText"]) || text(item["contentText"]);
 +      } else item["text"] = bounded(text(item["text"]) + text(params["delta"]));
 +      if (kind === "commandExecution") item["output"] = bounded(text(item["output"]) + text(params["delta"]));
-+      thread.items.set(id, item);
++      this.storeItem(thread, id, item);
 +    } else if (method === "turn/plan/updated") {
 +      const steps = array(params["plan"]).map((entry) => {
 +        const step = object(entry);
@@ -4372,17 +4924,24 @@ index 0000000000000000000000000000000000000000..879b35c9b20ff060de33562fed04404c
 +    } else if (method === "serverRequest/resolved") {
 +      thread.approvals.delete(JSON.stringify(params["requestId"]));
 +    }
-+    thread.version++; this.notify(thread);
++    this.changed(thread);
 +    if (method === "turn/started") void this.interruptRequestedTurn(state, thread).catch(() => { /* The failure is exposed in the thread snapshot. */ });
 +    if (method === "turn/completed") void this.drainQueue(state, thread);
 +  }
 +}
++
++function trimOldest<T>(entries: Map<string, T>, limit: number): void {
++  while (entries.size > limit) {
++    const first = entries.keys().next().value;
++    if (first !== undefined) entries.delete(first);
++  }
++}
 diff --git a/pi-web-plugins/codex/server/protocol.ts b/pi-web-plugins/codex/server/protocol.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..d4ea9ed4b4f3c7df0c2275147edfb40deb555b24
+index 0000000000000000000000000000000000000000..6d559bb4b33c44a5ccce590038f2bee06e51c4d7
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/protocol.ts
-@@ -0,0 +1,34 @@
+@@ -0,0 +1,38 @@
 +import type { JsonValue } from "@jmfederico/pi-web/server-plugin-api";
 +
 +export type RecordValue = Record<string, JsonValue>;
@@ -4417,6 +4976,10 @@ index 0000000000000000000000000000000000000000..d4ea9ed4b4f3c7df0c2275147edfb40d
 +  if (value === "plan") return "plan";
 +  throw new Error("Invalid collaboration mode");
 +}
++
++export const MAX_ATTACHMENTS = 10;
++export const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
++export const IMAGE_MIME_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
 diff --git a/pi-web-plugins/codex/server/server-plugin.ts b/pi-web-plugins/codex/server/server-plugin.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..eba8e32d3745d2f14afbd86fb26bd2493ab8f1f4

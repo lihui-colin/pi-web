@@ -227,6 +227,18 @@ test('only changing base-commit advances the release to a newer upstream commit'
   assert.match(readFileSync(join(next.stdout.trim(), 'app.txt'), 'utf8'), /new upstream/);
 });
 
+for (const args of [['--local', '--typo'], ['', '--local'], ['--help', '--typo'], ['--typo']]) {
+  test(`sync rejects unexpected arguments before preparing a release: ${JSON.stringify(args)}`, () => {
+    const f = fixture();
+    const result = f.run('sync.sh', args);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Usage:/);
+    assert.equal(existsSync(f.releases), false);
+    assert.equal(existsSync(join(f.source, 'data/pi-web-upstream.git')), false);
+    assert.equal(readFileSync(f.log, 'utf8'), '');
+  });
+}
+
 test('missing local pinned commit asks for synchronization without remote writes', () => {
   const f = fixture();
   const result = f.run('sync.sh', ['--local']);

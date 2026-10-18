@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-if [ "${1:-}" = "--help" ]; then
+usage() {
   cat <<'HELP'
 Usage: sh scripts/sync.sh [--local]
 
@@ -15,12 +15,12 @@ Neither mode updates main or pushes to any remote.
 PI_WEB_UPSTREAM_URL  Official upstream URL override
 PI_WEB_INSTALL_ROOT  Release parent (default: <repo>/data/pi-web-releases)
 HELP
-  exit 0
-fi
-case "${1:-}" in
-  '') sync_remote=true ;;
-  --local) sync_remote=false ;;
-  *) printf 'Usage: sh scripts/sync.sh [--local]\n' >&2; exit 1 ;;
+}
+case "$#:${1:-}" in
+  0:) sync_remote=true ;;
+  1:--local) sync_remote=false ;;
+  1:--help) usage; exit 0 ;;
+  *) usage >&2; exit 1 ;;
 esac
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)

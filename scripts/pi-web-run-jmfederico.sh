@@ -168,13 +168,12 @@ start() {
     # Web/API 服务
     if ! service_running pi-web-server "$server_pid"; then
         echo "启动 pi-web-server -> http://$PI_WEB_HOST:$PI_WEB_PORT"
-        if [[ -n "$PI_WEB_PASSWORD" ]]; then
-            PI_WEB_PASSWORD="$PI_WEB_PASSWORD" PI_WEB_PORT="$PI_WEB_PORT" PI_WEB_HOST="$PI_WEB_HOST" \
-            "${launcher[@]}" pi-web-server </dev/null >"$server_log" 2>&1 &
-        else
-            PI_WEB_PORT="$PI_WEB_PORT" PI_WEB_HOST="$PI_WEB_HOST" \
-            "${launcher[@]}" pi-web-server </dev/null >"$server_log" 2>&1 &
-        fi
+        (
+            export PI_WEB_PORT PI_WEB_HOST
+            if [[ -n "$PI_WEB_PASSWORD" ]]; then export PI_WEB_PASSWORD; fi
+            # Keep credentials out of launcher arguments and preserve the tracked PID.
+            exec "${launcher[@]}" pi-web-server
+        ) </dev/null >"$server_log" 2>&1 &
         echo $! > "$server_pid"
     else
         echo "pi-web-server 已在运行 (PID $(cat "$server_pid"))"
@@ -259,7 +258,7 @@ process_running() {
 }
 
 stop_pid() {
-    local name="$1" pidfile="$2" pid candidate attempt recorded="" failed=0
+    local name="$1" pidfile="$2" pid candidate attempt signal attempts recorded="" failed=0
     local -a pids=()
     if [[ -f "$pidfile" ]]; then
         recorded=$(cat "$pidfile")
@@ -281,18 +280,17 @@ stop_pid() {
         fi
     done
     for pid in "${pids[@]}"; do
-        kill "$pid" 2>/dev/null || true
-        for ((attempt=0; attempt<30; attempt++)); do
-            process_running "$pid" || break
-            sleep 0.1
-        done
-        if process_running "$pid"; then
-            kill -9 "$pid" 2>/dev/null || true
-            for ((attempt=0; attempt<20; attempt++)); do
+        signal=TERM
+        # Give graceful shutdown 3 seconds, then allow 2 seconds after KILL.
+        for attempts in 30 20; do
+            kill -s "$signal" "$pid" 2>/dev/null || true
+            for ((attempt=0; attempt<attempts; attempt++)); do
                 process_running "$pid" || break
                 sleep 0.1
             done
-        fi
+            process_running "$pid" || break
+            signal=KILL
+        done
         if process_running "$pid"; then
             echo "错误：无法停止 $name (PID $pid)，保留 PID 文件" >&2
             printf '%s\n' "$pid" > "$pidfile"
@@ -353,18 +351,10 @@ pkg_version() {
     local pkg="$1"
     { npm ls -g --depth=0 --json "$pkg" 2>/dev/null || true; } \
     | node -e '
-            let s = "";
-            process.stdin.on("data", d => s += d);
-            process.stdin.on("end", () => {
-              try {
-                const j = JSON.parse(s || "{}");
-                const deps = j.dependencies || {};
-                const name = process.argv[1];
-                process.stdout.write((deps[name] && deps[name].version) || "");
-              } catch {
-                process.stdout.write("");
-              }
-            });
+        try {
+            const result = JSON.parse(require("node:fs").readFileSync(0, "utf8") || "{}");
+            process.stdout.write(result.dependencies?.[process.argv[1]]?.version || "");
+        } catch { /* Missing or invalid npm metadata: let the caller try the CLI. */ }
     ' "$pkg"
 }
 

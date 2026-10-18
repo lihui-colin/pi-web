@@ -85,6 +85,35 @@ test('stop reads the same config as start', () => {
   } finally { f.cleanup(); }
 });
 
+for (const password of ['', 'test password $literal']) {
+  test(`server receives configured host, port and ${password ? 'nonempty' : 'empty'} password`, () => {
+    const f = fixture();
+    try {
+      const realNohup = spawnSync('sh', ['-c', 'command -v nohup'], { encoding: 'utf8' }).stdout.trim();
+      assert.ok(realNohup);
+      writeFileSync(join(f.root, 'bin/nohup'), `#!/bin/bash
+printf '%s\\n' "$@" >> "$PI_WEB_RUN_DIR/launcher-args.log"
+exec "$TEST_REAL_NOHUP" "$@"
+`, { mode: 0o755 });
+      writeFileSync(join(f.root, 'bin/pi-web-server'), `#!${process.execPath}
+console.log(JSON.stringify([process.env.PI_WEB_HOST, process.env.PI_WEB_PORT, process.env.PI_WEB_PASSWORD]));
+setInterval(() => {}, 1000);
+`, { mode: 0o755 });
+      const result = f.run('start', '8425', { PI_WEB_HOST: '127.0.0.2', PI_WEB_PASSWORD: password, TEST_REAL_NOHUP: realNohup });
+      const dir = join(f.root, 'data/pi-web/8425');
+      for (const service of ['server', 'sessiond']) {
+        const pidfile = join(dir, `${service}.pid`);
+        if (existsSync(pidfile)) f.pids.push(Number(readFileSync(pidfile, 'utf8')));
+      }
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(JSON.parse(readFileSync(join(dir, 'server.log'), 'utf8')), ['127.0.0.2', '8425', password]);
+      const launcherArgs = readFileSync(join(dir, 'launcher-args.log'), 'utf8');
+      assert.doesNotMatch(launcherArgs, /PI_WEB_PASSWORD=/);
+      if (password) assert.equal(launcherArgs.includes(password), false);
+    } finally { f.cleanup(); }
+  });
+}
+
 for (const [name, ports, port, overrides, target] of [
   ['multiple instances', ['8024', '8425'], undefined, {}, '8024'],
   ['configured port', ['8425'], '8024', {}, '8024'],
@@ -140,6 +169,30 @@ for (const missing of [true, false]) {
     } finally { f.cleanup(); }
   });
 }
+
+test('stop escalates to KILL when a service ignores TERM', () => {
+  const f = fixture();
+  try {
+    writeFileSync(join(f.root, 'bin/pi-web-server'), `#!${process.execPath}
+process.on('SIGTERM', () => console.log('TERM ignored'));
+console.log('ready');
+setInterval(() => {}, 1000);
+`, { mode: 0o755 });
+    const started = f.run('start', '8425');
+    const dir = join(f.root, 'data/pi-web/8425');
+    for (const service of ['server', 'sessiond']) {
+      const pidfile = join(dir, `${service}.pid`);
+      if (existsSync(pidfile)) f.pids.push(Number(readFileSync(pidfile, 'utf8')));
+    }
+    assert.equal(started.status, 0, started.stderr);
+    assert.match(readFileSync(join(dir, 'server.log'), 'utf8'), /ready/);
+    const stopped = f.run('stop');
+    assert.equal(stopped.status, 0, stopped.stderr);
+    assert.match(readFileSync(join(dir, 'server.log'), 'utf8'), /TERM ignored/);
+    for (const service of ['server', 'sessiond']) assert.equal(existsSync(join(dir, `${service}.pid`)), false);
+    assert.equal(f.run('status').status, 1);
+  } finally { f.cleanup(); }
+});
 
 for (const action of ['stop', 'restart']) {
 test(`${action} failure preserves PID files and returns an error`, () => {
