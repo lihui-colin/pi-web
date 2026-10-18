@@ -11,12 +11,12 @@ index 0000000000000000000000000000000000000000..b864cc1c7375582254410edbe397fcf2
 +Add an optional Codex workspace plugin with persistent conversations, streamed responses, tool output, approvals, and model selection using the workspace machine's Codex CLI. Restart sessiond after installing the plugin.
 diff --git a/pi-web-plugins/codex/CodexBrowserRuntime.ts b/pi-web-plugins/codex/CodexBrowserRuntime.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..01a8f8166c14d5b2e9d31ccf396ab1041d7a18e4
+index 0000000000000000000000000000000000000000..2e722b5f634cf715cd0a28b2e4149ac18bd7d2fb
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexBrowserRuntime.ts
-@@ -0,0 +1,437 @@
+@@ -0,0 +1,459 @@
 +import type { PluginPeerChannel, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
-+import { MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, IMAGE_MIME_TYPES, array, errorText, object, text, permissionMode, type PermissionMode, chatMode, type ChatMode, type RecordValue } from "./server/protocol.js";
++import { MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, IMAGE_MIME_TYPES, array, errorText, object, string, text, permissionMode, type PermissionMode, chatMode, type ChatMode, type RecordValue } from "./server/protocol.js";
 +
 +export interface CodexAttachment {
 +  id: string;
@@ -204,6 +204,28 @@ index 0000000000000000000000000000000000000000..01a8f8166c14d5b2e9d31ccf396ab104
 +    const result = await this.request(view, "create", this.permissionInput(view));
 +    this.select(view, text(result["id"]));
 +    view.snapshot = { model: text(result["model"]), effort: text(result["effort"]) };
++    await this.list(view);
++  }
++  async fork(view: CodexView, turnId: string): Promise<void> {
++    if (!view.threadId || view.sending || view.snapshot["busy"] === true) return;
++    const generation = view.generation;
++    const model = view.model;
++    const effort = view.effort;
++    const mode = view.mode;
++    const modeDirty = view.modeDirty;
++    const result = await this.request(view, "fork", { threadId: view.threadId, turnId, ...this.permissionInput(view) });
++    const id = string(result["id"], "branched conversation id");
++    if (this.disposed) return;
++    // Persist the new conversation's settings even if navigation changed while
++    // the fork was in flight. Never navigate away from the user's new selection.
++    this.write(`${view.key}:${id}:model`, model);
++    this.write(`${view.key}:${id}:effort`, effort);
++    this.write(`${view.key}:${id}:mode`, mode);
++    if (view.generation !== generation) { await this.list(view); return; }
++    this.select(view, id);
++    this.saveMode(view, mode, modeDirty);
++    view.snapshot = { model: text(result["model"]), effort: text(result["effort"]) };
++    await this.refresh(view);
 +    await this.list(view);
 +  }
 +  private readAttachments(view: CodexView, threadId: string): CodexAttachment[] {
@@ -454,10 +476,10 @@ index 0000000000000000000000000000000000000000..01a8f8166c14d5b2e9d31ccf396ab104
 +}
 diff --git a/pi-web-plugins/codex/CodexPanel.test.ts b/pi-web-plugins/codex/CodexPanel.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..5b1bb06d397cbf8934ed94125fcc821abb011295
+index 0000000000000000000000000000000000000000..c3901bcf75aa1e092c2a1839cc7d5782bb247a34
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.test.ts
-@@ -0,0 +1,1689 @@
+@@ -0,0 +1,1756 @@
 +// @vitest-environment happy-dom
 +import { afterEach, describe, expect, it, vi } from "vitest";
 +import type { WorkspaceFileUploadOptions, WorkspaceFileUploadTask, PluginPeerChannelOptions, FileContentResponse, FileTreeResponse, JsonValue, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
@@ -2147,12 +2169,79 @@ index 0000000000000000000000000000000000000000..5b1bb06d397cbf8934ed94125fcc821a
 +function reviewContent(path: string, content: string): FileContentResponse {
 +  return { path, content, encoding: "utf8", size: content.length, modifiedAt: "2026-10-17T00:00:00Z", binary: false, truncated: false };
 +}
++
++
++describe("Codex branch button", () => {
++  it("opens the branch from the selected answer and preserves the source draft", async () => {
++    const { panel, view, runtime, request } = await fixture();
++    view.snapshot = { items: [{ id: "answer", kind: "agentMessage", text: "Answer", turnId: "first", status: "completed", turnStatus: "completed", phase: "final_answer" }] };
++    runtime.saveDraft(view, "Unsent original draft");
++    runtime.saveModelSettings(view, "chosen-model", "high");
++    request.mockImplementation((operation) => Promise.resolve(operation === "fork" ? { id: "branch" } : { changed: false }));
++    panel.requestUpdate(); await panel.updateComplete;
++    const button = required(panel.shadowRoot?.querySelector<HTMLButtonElement>('[aria-label="Branch in new chat"]'));
++    button.click(); button.click();
++    await vi.waitFor(() => { expect(view.threadId).toBe("branch"); expect(view.pending).toBe(false); });
++    expect(request.mock.calls.filter(([operation]) => operation === "fork")).toEqual([["fork", { threadId: "thread", turnId: "first" }]]);
++    expect(view.draft).toBe("");
++    expect(view.model).toBe("chosen-model");
++    runtime.select(view, "thread");
++    expect(view.draft).toBe("Unsent original draft");
++  });
++
++  it("keeps the original conversation and displays a branch error", async () => {
++    const { panel, view, request } = await fixture();
++    view.snapshot = { items: [{ id: "answer", kind: "agentMessage", text: "Answer", turnId: "first", status: "completed", turnStatus: "completed" }] };
++    request.mockImplementation((operation) => operation === "fork" ? Promise.reject(new Error("Branch failed")) : Promise.resolve({ changed: false }));
++    panel.requestUpdate(); await panel.updateComplete;
++    required(panel.shadowRoot?.querySelector<HTMLButtonElement>('[aria-label="Branch in new chat"]')).click();
++    await vi.waitFor(() => { expect(view.error).toContain("Branch failed"); });
++    expect(view.threadId).toBe("thread");
++  });
++
++  it("hides branches for commentary and disables them while a response runs", async () => {
++    const { panel, view } = await fixture();
++    view.snapshot = { busy: true, items: [
++      { id: "commentary", kind: "agentMessage", text: "Working", turnId: "first", status: "completed", turnStatus: "completed", phase: "commentary" },
++      { id: "answer", kind: "agentMessage", text: "Answer", turnId: "first", status: "completed", turnStatus: "completed", phase: "final_answer" },
++    ] };
++    panel.requestUpdate(); await panel.updateComplete;
++    const buttons = panel.shadowRoot?.querySelectorAll<HTMLButtonElement>('[aria-label="Branch in new chat"]');
++    expect(buttons?.length).toBe(1);
++    expect(buttons?.[0]?.disabled).toBe(true);
++  });
++
++  it("does not navigate back when a branch finishes after the user changes conversations", async () => {
++    const { view, runtime, request } = await fixture();
++    let finish: (value: JsonValue) => void = () => undefined;
++    runtime.saveModelSettings(view, "selected-model", "high");
++    runtime.setMode(view, "plan");
++    request.mockImplementation((operation) => operation === "fork" ? new Promise((resolve) => { finish = resolve; }) : Promise.resolve(operation === "list" ? { data: [{ id: "branch" }] } : { changed: false }));
++    const branching = runtime.fork(view, "first");
++    runtime.select(view, "elsewhere");
++    finish({ id: "branch" });
++    await branching;
++    expect(view.threadId).toBe("elsewhere");
++    expect(view.threads).toEqual([{ id: "branch" }]);
++    runtime.select(view, "branch");
++    expect(view.model).toBe("selected-model");
++    expect(view.effort).toBe("high");
++    expect(view.mode).toBe("plan");
++  });
++
++  it.each(["inProgress", "failed", "interrupted"])("hides branching when a completed message belongs to a %s turn", async (turnStatus) => {
++    const { panel, view } = await fixture();
++    view.snapshot = { busy: false, items: [{ id: "answer", kind: "agentMessage", text: "Answer", turnId: "first", status: "completed", turnStatus, phase: "final_answer" }] };
++    panel.requestUpdate(); await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelector('[aria-label="Branch in new chat"]')).toBeNull();
++  });
++});
 diff --git a/pi-web-plugins/codex/CodexPanel.ts b/pi-web-plugins/codex/CodexPanel.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..039875a85986cc6c11d6ae7b18201b0d628e252e
+index 0000000000000000000000000000000000000000..0eac46ba2148044517b645adc95fbcc052789d39
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.ts
-@@ -0,0 +1,990 @@
+@@ -0,0 +1,997 @@
 +import { LitElement, css, html, svg, nothing } from "lit";
 +import { property } from "lit/decorators.js";
 +import { repeat } from "lit/directives/repeat.js";
@@ -2870,6 +2959,13 @@ index 0000000000000000000000000000000000000000..039875a85986cc6c11d6ae7b18201b0d
 +  private renderCopyButton(body: string) {
 +    return html`<button class="copy-button" aria-label="Copy message or tool output" title="Copy message or tool output" @click=${(event: Event) => { if (event.currentTarget instanceof HTMLButtonElement) void this.copyText(body, event.currentTarget); }}><svg class="copy-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="3" width="13" height="13" rx="3"></rect><rect x="3" y="8" width="13" height="13" rx="3"></rect></svg><svg class="copy-check" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"></path></svg><span class="copy-error" aria-hidden="true">!</span></button>`;
 +  }
++  private renderBranchButton(item: RecordValue) {
++    const view = this.view;
++    const turnId = text(item["turnId"]);
++    if (!view || !turnId || item["turnStatus"] !== "completed" || item["phase"] === "commentary") return nothing;
++    return html`<button class="branch-button" aria-label="Branch in new chat" title="Branch in new chat" ?disabled=${view.pending || view.sending || view.snapshot["busy"] === true}
++      @click=${() => { this.action((runtime, state) => runtime.fork(state, turnId)); }}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5v14h14M5 15 19 5M12 5h7v7"></path></svg></button>`;
++  }
 +  private renderItem(item: RecordValue) {
 +    const kind = text(item["kind"]);
 +    const body = text(item["text"]);
@@ -2877,7 +2973,7 @@ index 0000000000000000000000000000000000000000..039875a85986cc6c11d6ae7b18201b0d
 +    if (kind === "userMessage" || kind === "agentMessage") {
 +      return html`<article class=${`${kind} ${text(item["phase"]) === "commentary" ? "commentary" : ""}`} aria-label=${kind === "userMessage" ? "Your message" : "Codex response"}>
 +        ${kind === "agentMessage" ? html`<div class="markdown">${unsafeHTML(this.markdownHtml(item))}</div>` : html`<div class="message-images">${this.renderMessageImages(item)}</div><div class="user-text">${body}</div>`}
-+        <div class="message-actions">${kind === "userMessage" ? html`${this.renderMessageTime(item)}${copy}` : html`${copy}${this.renderMessageTime(item)}`}</div></article>`;
++        <div class="message-actions">${kind === "userMessage" ? html`${this.renderMessageTime(item)}${copy}` : html`${copy}${this.renderBranchButton(item)}${this.renderMessageTime(item)}`}</div></article>`;
 +    }
 +    const state = this.activityState(item);
 +    const elapsed = this.duration(item["durationMs"]);
@@ -3012,8 +3108,8 @@ index 0000000000000000000000000000000000000000..039875a85986cc6c11d6ae7b18201b0d
 +    .permission-picker .permission-warning,.permission-warning .permission-description { color:var(--permission-warning); }
 +    .primary { display:grid; place-items:center; flex:none; width:28px; height:28px; padding:0; border-radius:50%; background:light-dark(#dededb,#c4c4c1); color:#242424; line-height:1; } .primary:hover:not(:disabled) { background:light-dark(#cececb,#d6d6d3); } .primary svg { width:18px; height:18px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; } .stop-icon { width:10px; height:10px; border-radius:2px; background:currentColor; }
 +    .message-time { white-space:nowrap; font-size:12px; }
-+    .copy-button { display:inline-flex; align-items:center; justify-content:center; width:28px; height:24px; padding:3px; border-radius:50%; }
-+    .copy-button svg { width:18px; height:18px; fill:none; stroke:currentColor; stroke-width:1.5; }
++    .copy-button,.branch-button { display:inline-flex; align-items:center; justify-content:center; width:28px; height:24px; padding:3px; border-radius:50%; }
++    .copy-button svg,.branch-button svg { width:18px; height:18px; fill:none; stroke:currentColor; stroke-width:1.5; }
 +    .copy-button .copy-check,.copy-button .copy-error { display:none; }
 +    .copy-button[data-copy-state="copied"] .copy-icon,.copy-button[data-copy-state="failed"] .copy-icon { display:none; }
 +    .copy-button[data-copy-state="copied"] .copy-check,.copy-button[data-copy-state="failed"] .copy-error { display:block; }
@@ -3488,10 +3584,10 @@ index 0000000000000000000000000000000000000000..e315f01fdd441c313abe22ea84610eaa
 +export const createCodexConnection: ConnectionFactory = (cwd, event, exited) => new CodexProcess(cwd, event, exited);
 diff --git a/pi-web-plugins/codex/server/codexService.test.ts b/pi-web-plugins/codex/server/codexService.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..085f0465cb722736889f05b9a4b47bce21dd0866
+index 0000000000000000000000000000000000000000..2ee5fe8d6406d19c0727676d9a561ca23fa74bad
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/codexService.test.ts
-@@ -0,0 +1,843 @@
+@@ -0,0 +1,886 @@
 +import { mkdtemp, mkdir, writeFile, symlink, truncate, rm } from "node:fs/promises";
 +import { join } from "node:path";
 +import { tmpdir } from "node:os";
@@ -4009,7 +4105,7 @@ index 0000000000000000000000000000000000000000..085f0465cb722736889f05b9a4b47bce
 +    f.emit({ method: "item/agentMessage/delta", params: { threadId: "saved", itemId: "answer", delta: " plus" } });
 +    f.emit({ method: "item/completed", params: { threadId: "saved", item: { id: "answer", type: "agentMessage", text: "Final" } } });
 +    const snapshot = await f.call("snapshot", { threadId: "saved" });
-+    expect(snapshot["items"]).toEqual([{ id: "answer", kind: "agentMessage", text: "Final", status: "completed", turnId: "turn" }]);
++    expect(snapshot["items"]).toEqual([{ id: "answer", kind: "agentMessage", text: "Final", status: "completed", turnId: "turn", turnStatus: "inProgress" }]);
 +    expect(await f.call("snapshot", { threadId: "saved", version: snapshot["version"] ?? -1 })).toEqual({ changed: false });
 +  });
 +  it("reads externally owned history without resuming, refreshes it, and recovers after a rejected send", async () => {
@@ -4335,12 +4431,55 @@ index 0000000000000000000000000000000000000000..085f0465cb722736889f05b9a4b47bce
 +  });
 +
 +});
++
++
++describe("Codex conversation branches", () => {
++  it("forks through the selected turn without resuming or changing the source", async () => {
++    const f = fixture();
++    const original = f.request.getMockImplementation();
++    f.request.mockImplementation(async (method, params) => {
++      if (method === "thread/fork") return { model: "model", reasoningEffort: "high", thread: { id: "branch", turns: [
++        { id: "old", status: "completed", items: [{ id: "answer", type: "agentMessage", text: "Saved answer" }] },
++      ] } };
++      return original?.(method, params) ?? {};
++    });
++    const before = await f.call("snapshot", { threadId: "saved" });
++    expect(await f.call("fork", { threadId: "saved", turnId: "old", permissionMode: "ask-for-approval" })).toEqual({ id: "branch", model: "model", effort: "high" });
++    expect(f.request).toHaveBeenCalledWith("thread/fork", { threadId: "saved", lastTurnId: "old", cwd: "/work/one", approvalPolicy: "on-request", sandbox: "workspace-write", approvalsReviewer: "user" });
++    const branch = await f.call("snapshot", { threadId: "branch" });
++    expect(branch["items"]).toEqual(before["items"]);
++    expect(branch["busy"]).toBe(false);
++    expect((await f.call("snapshot", { threadId: "saved" }))["items"]).toEqual(before["items"]);
++    expect(f.request).not.toHaveBeenCalledWith("thread/resume", expect.anything());
++  });
++
++  it("rejects foreign workspaces, missing turns and unfinished turns before forking", async () => {
++    const f = fixture();
++    await expect(f.call("fork", { threadId: "saved", turnId: "missing" })).rejects.toThrow("completed response");
++    f.cwd("/another/workspace");
++    await expect(f.call("fork", { threadId: "saved", turnId: "old" })).rejects.toThrow("another workspace");
++    f.request.mockResolvedValue({ thread: { cwd: "/work/one", turns: [{ id: "active", status: "inProgress" }] } });
++    await expect(f.call("fork", { threadId: "saved", turnId: "active" })).rejects.toThrow("completed response");
++    expect(f.request).not.toHaveBeenCalledWith("thread/fork", expect.anything());
++  });
++});
++
++
++it.each(["completed", "failed", "interrupted"])("exposes the final %s turn status even when its message already completed", async (status) => {
++  const f = fixture();
++  await f.call("create");
++  await f.call("send", { threadId: "new", text: "hello" });
++  f.emit({ method: "item/completed", params: { threadId: "new", turnId: "turn", item: { id: "answer", type: "agentMessage", text: "Answer" } } });
++  expect(array((await f.call("snapshot", { threadId: "new" }))["items"])).toContainEqual(expect.objectContaining({ id: "answer", status: "completed", turnStatus: "inProgress" }));
++  f.emit({ method: "turn/completed", params: { threadId: "new", turn: { id: "turn", status } } });
++  expect(array((await f.call("snapshot", { threadId: "new" }))["items"])).toContainEqual(expect.objectContaining({ id: "answer", status: "completed", turnStatus: status }));
++});
 diff --git a/pi-web-plugins/codex/server/codexService.ts b/pi-web-plugins/codex/server/codexService.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..84e0111abdbb397d12d3f0c224494c424a974226
+index 0000000000000000000000000000000000000000..b5d057b86c005236326f98264cb3f134297c36c2
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/codexService.ts
-@@ -0,0 +1,806 @@
+@@ -0,0 +1,829 @@
 +import { randomUUID } from "node:crypto";
 +import { imageSize } from "image-size";
 +import { isAbsolute, relative, resolve, sep } from "node:path";
@@ -4482,7 +4621,7 @@ index 0000000000000000000000000000000000000000..84e0111abdbb397d12d3f0c224494c42
 +
 +  async request(context: ServerPluginPeerRequestContext): Promise<JsonValue> {
 +    if (context.signal.aborted || this.disposed) throw new Error("Codex request cancelled");
-+    const supported = new Set(["status", "activity", "list", "models", "create", "snapshot", "send", "steer", "removeQueued", "resumeQueue", "stop", "answer", "archive"]);
++    const supported = new Set(["status", "activity", "list", "models", "create", "fork", "snapshot", "send", "steer", "removeQueued", "resumeQueue", "stop", "answer", "archive"]);
 +    if (!supported.has(context.operation)) throw new Error("Unsupported Codex operation");
 +    const input = object(context.input);
 +    const selectedPolicy = policies[permissionMode(input["permissionMode"])];
@@ -4531,6 +4670,27 @@ index 0000000000000000000000000000000000000000..84e0111abdbb397d12d3f0c224494c42
 +          state.threads.delete(id);
 +          return { archived: true };
 +        } finally { state.archiving.delete(id); }
++      }
++      case "fork": {
++        const sourceId = string(input["threadId"], "threadId");
++        const lastTurnId = string(input["turnId"], "turnId");
++        // Validate stored history without taking the source conversation's writer.
++        const read = await rpc("thread/read", { threadId: sourceId, includeTurns: true });
++        const source = object(read["thread"]);
++        if (resolve(string(source["cwd"], "thread cwd", 4096)) !== state.cwd) throw new Error("Conversation belongs to another workspace");
++        const turn = array(source["turns"]).map(object).find((entry) => entry["id"] === lastTurnId);
++        if (turn?.["status"] !== "completed") throw new Error("Choose a completed response to branch from");
++        if (state.archiving.has(sourceId)) throw new Error("Conversation is being archived");
++        context.signal.throwIfAborted();
++        const result = await rpc("thread/fork", { threadId: sourceId, lastTurnId, cwd: state.cwd, ...selectedPolicy });
++        const forked = object(result["thread"]);
++        const id = string(forked["id"]);
++        const thread = this.remember(state, id);
++        thread.policy = selectedPolicy;
++        this.settings(thread, result);
++        for (const entry of array(forked["turns"])) this.restoreTurnItems(thread, object(entry));
++        this.changed(thread);
++        return { id, model: thread.model, effort: thread.effort };
 +      }
 +      case "create": {
 +        const result = await rpc("thread/start", { cwd: state.cwd, ...selectedPolicy });
@@ -5042,7 +5202,8 @@ index 0000000000000000000000000000000000000000..84e0111abdbb397d12d3f0c224494c42
 +      thread.inputHistory.set(id, body);
 +      trimOldest(thread.inputHistory, 100);
 +    }
-+    this.storeItem(thread, id, { ...previous, id, kind, text: bounded(body), status,
++    const turnStatus = text(raw["turnStatus"]) || (turnId === thread.turnId ? thread.status : text(previous?.["turnStatus"]));
++    this.storeItem(thread, id, { ...previous, id, kind, text: bounded(body), status, turnStatus,
 +      ...(turnId ? { turnId } : {}), ...(typeof raw["phase"] === "string" ? { phase: raw["phase"] } : {}), ...details });
 +  }
 +  private rememberTurnTimes(thread: ThreadState, turn: RecordValue): void {
@@ -5099,6 +5260,7 @@ index 0000000000000000000000000000000000000000..84e0111abdbb397d12d3f0c224494c42
 +        thread.approvals.clear();
 +        for (const item of thread.items.values()) {
 +          if (item["turnId"] !== thread.turnId) continue;
++          item["turnStatus"] = thread.status;
 +          if (typeof turn["durationMs"] === "number") item["turnDurationMs"] = turn["durationMs"];
 +          if (["inProgress", "running"].includes(text(item["status"]))) item["status"] = thread.status;
 +        }
