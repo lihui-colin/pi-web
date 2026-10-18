@@ -816,7 +816,7 @@ index 0000000000000000000000000000000000000000..76e924443d65d474d2f5d4b891f16501
 +    expect(button.getAttribute("aria-label")).toBe("Copy message or tool output");
 +    expect(writeText).toHaveBeenCalledWith("Answer");
 +  });
-+  it.each(["available", "missing", "undefined", "null", "no-writeText", "denied", "blocked"])("copies messages and code with clipboard %s even during session work", async (clipboardState) => {
++  it.each(["available", "missing", "undefined", "null", "no-writeText", "denied", "blocked"])("copies messages and code with clipboard %s even during chat work", async (clipboardState) => {
 +    const { panel, view } = await fixture();
 +    const writeText = vi.fn().mockImplementation(() => clipboardState === "denied" || clipboardState === "blocked" ? Promise.reject(new Error("Denied")) : Promise.resolve());
 +    vi.stubGlobal("navigator", clipboardState === "missing" ? {} : { clipboard: clipboardState === "undefined" ? undefined : clipboardState === "null" ? null : clipboardState === "no-writeText" ? {} : { writeText } });
@@ -2400,7 +2400,7 @@ index 0000000000000000000000000000000000000000..6d6728cf3b30839518024136b8d3ebbf
 +    try {
 +      copied = await writeClipboardText(value);
 +    } catch {
-+      // Report clipboard failures at the clicked button without changing session state.
++      // Report clipboard failures at the clicked button without changing chat state.
 +    } finally {
 +      button.disabled = false;
 +      button.dataset["copyState"] = copied ? "copied" : "failed";
@@ -2830,7 +2830,7 @@ index 0000000000000000000000000000000000000000..6d6728cf3b30839518024136b8d3ebbf
 +    return html`<div class="conversation-home" aria-label="Conversation history">
 +      <div class="home-content">
 +        ${this.renderStatusReply(view)}
-+        <div class="home-heading"><h1>Sessions</h1></div>
++        <div class="home-heading"><h1>Chats</h1></div>
 +        <div class="conversation-list">${this.renderConversationRows(view, view.threads.slice(0, 5))}</div>
 +        ${view.threads.length === 0 ? html`<p class="home-empty">${view.pending ? "Loading conversations…" : "No conversations yet. Send a message below to start one."}</p>` : nothing}
 +        ${hasMore ? html`<button class="more-conversations" aria-expanded=${this.historyExpanded} aria-controls="older-conversations" ?disabled=${view.pending || !view.connected} @click=${() => {
