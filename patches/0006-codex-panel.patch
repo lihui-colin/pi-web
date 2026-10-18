@@ -11,10 +11,10 @@ index 0000000000000000000000000000000000000000..b864cc1c7375582254410edbe397fcf2
 +Add an optional Codex workspace plugin with persistent conversations, streamed responses, tool output, approvals, and model selection using the workspace machine's Codex CLI. Restart sessiond after installing the plugin.
 diff --git a/pi-web-plugins/codex/CodexBrowserRuntime.ts b/pi-web-plugins/codex/CodexBrowserRuntime.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..2e722b5f634cf715cd0a28b2e4149ac18bd7d2fb
+index 0000000000000000000000000000000000000000..8bd9195edb6a01496b44f641a384bc48d9160578
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexBrowserRuntime.ts
-@@ -0,0 +1,459 @@
+@@ -0,0 +1,460 @@
 +import type { PluginPeerChannel, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
 +import { MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, IMAGE_MIME_TYPES, array, errorText, object, string, text, permissionMode, type PermissionMode, chatMode, type ChatMode, type RecordValue } from "./server/protocol.js";
 +
@@ -224,6 +224,7 @@ index 0000000000000000000000000000000000000000..2e722b5f634cf715cd0a28b2e4149ac1
 +    if (view.generation !== generation) { await this.list(view); return; }
 +    this.select(view, id);
 +    this.saveMode(view, mode, modeDirty);
++    view.notice = text(result["notice"]);
 +    view.snapshot = { model: text(result["model"]), effort: text(result["effort"]) };
 +    await this.refresh(view);
 +    await this.list(view);
@@ -476,10 +477,10 @@ index 0000000000000000000000000000000000000000..2e722b5f634cf715cd0a28b2e4149ac1
 +}
 diff --git a/pi-web-plugins/codex/CodexPanel.test.ts b/pi-web-plugins/codex/CodexPanel.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..c3901bcf75aa1e092c2a1839cc7d5782bb247a34
+index 0000000000000000000000000000000000000000..76e924443d65d474d2f5d4b891f16501496d0434
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.test.ts
-@@ -0,0 +1,1756 @@
+@@ -0,0 +1,1767 @@
 +// @vitest-environment happy-dom
 +import { afterEach, describe, expect, it, vi } from "vitest";
 +import type { WorkspaceFileUploadOptions, WorkspaceFileUploadTask, PluginPeerChannelOptions, FileContentResponse, FileTreeResponse, JsonValue, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
@@ -2236,6 +2237,17 @@ index 0000000000000000000000000000000000000000..c3901bcf75aa1e092c2a1839cc7d5782
 +    expect(panel.shadowRoot?.querySelector('[aria-label="Branch in new chat"]')).toBeNull();
 +  });
 +});
++
++
++it("opens a created branch and shows a naming failure without treating creation as failed", async () => {
++  const { view, runtime, request, panel } = await fixture();
++  request.mockImplementation((operation) => Promise.resolve(operation === "fork" ? { id: "branch", notice: "Branch created, but its name could not be saved" } : { changed: false }));
++  await runtime.run(view, () => runtime.fork(view, "first"));
++  await panel.updateComplete;
++  expect(view.threadId).toBe("branch");
++  expect(view.error).toBe("");
++  expect(panel.shadowRoot?.textContent).toContain("Branch created, but its name could not be saved");
++});
 diff --git a/pi-web-plugins/codex/CodexPanel.ts b/pi-web-plugins/codex/CodexPanel.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..6d6728cf3b30839518024136b8d3ebbf93578db9
@@ -3584,10 +3596,10 @@ index 0000000000000000000000000000000000000000..e315f01fdd441c313abe22ea84610eaa
 +export const createCodexConnection: ConnectionFactory = (cwd, event, exited) => new CodexProcess(cwd, event, exited);
 diff --git a/pi-web-plugins/codex/server/codexService.test.ts b/pi-web-plugins/codex/server/codexService.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..2ee5fe8d6406d19c0727676d9a561ca23fa74bad
+index 0000000000000000000000000000000000000000..550d9603c382d7111db171c2d41450b5c8693920
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/codexService.test.ts
-@@ -0,0 +1,886 @@
+@@ -0,0 +1,971 @@
 +import { mkdtemp, mkdir, writeFile, symlink, truncate, rm } from "node:fs/promises";
 +import { join } from "node:path";
 +import { tmpdir } from "node:os";
@@ -4474,12 +4486,97 @@ index 0000000000000000000000000000000000000000..2ee5fe8d6406d19c0727676d9a561ca2
 +  f.emit({ method: "turn/completed", params: { threadId: "new", turn: { id: "turn", status } } });
 +  expect(array((await f.call("snapshot", { threadId: "new" }))["items"])).toContainEqual(expect.objectContaining({ id: "answer", status: "completed", turnStatus: status }));
 +});
++
++
++describe("Codex branch names", () => {
++  it.each([
++    [{ name: "Original title", preview: "First message" }, "Original title · 分支"],
++    [{ name: "  ", preview: "First\nmessage" }, "First message · 分支"],
++    [{}, "Untitled conversation · 分支"],
++  ])("persists the branch title without renaming its source: %j", async (metadata, name) => {
++    const f = fixture();
++    const original = f.request.getMockImplementation();
++    let savedName = "";
++    f.request.mockImplementation(async (method, params) => {
++      if (method === "thread/fork") return { thread: { id: "branch", turns: [] } };
++      if (method === "thread/name/set") { savedName = typeof params["name"] === "string" ? params["name"] : ""; return {}; }
++      if (method === "thread/list") return { data: [{ id: "branch", cwd: "/work/one", name: savedName, preview: "First message" }] };
++      const result = await original?.(method, params) ?? {};
++      if (method === "thread/read") return { thread: { ...object(result["thread"]), ...metadata } };
++      return result;
++    });
++    await f.call("fork", { threadId: "saved", turnId: "old" });
++    expect(f.request).toHaveBeenCalledWith("thread/name/set", { threadId: "branch", name });
++    expect(f.request).not.toHaveBeenCalledWith("thread/name/set", expect.objectContaining({ threadId: "saved" }));
++    expect(array((await f.call("list"))["data"])).toContainEqual(expect.objectContaining({ id: "branch", preview: name }));
++  });
++
++  it("returns the created branch with a notice if saving its name fails", async () => {
++    const f = fixture();
++    const original = f.request.getMockImplementation();
++    f.request.mockImplementation(async (method, params) => {
++      if (method === "thread/fork") return { thread: { id: "branch", turns: [] } };
++      if (method === "thread/name/set") throw new Error("Name service unavailable");
++      return original?.(method, params) ?? {};
++    });
++    const result = await f.call("fork", { threadId: "saved", turnId: "old" });
++    expect(result["id"]).toBe("branch");
++    expect(result["notice"]).toContain("Name service unavailable");
++    expect((await f.call("snapshot", { threadId: "branch" }))["id"]).toBe("branch");
++  });
++});
++
++
++it("checks every history page and allocates distinct names for concurrent branches", async () => {
++  const f = fixture();
++  const original = f.request.getMockImplementation();
++  let nextId = 0;
++  f.request.mockImplementation(async (method, params) => {
++    if (method === "thread/fork") return { thread: { id: `branch-${String(++nextId)}`, turns: [] } };
++    if (method === "thread/list") return params["cursor"] === "older"
++      ? { data: [{ id: "b2", cwd: "/work/one", name: "Untitled conversation · 分支 2" }] }
++      : { data: [{ id: "b1", cwd: "/work/one", name: "Untitled conversation · 分支" }], nextCursor: "older" };
++    return original?.(method, params) ?? {};
++  });
++  await Promise.all([f.call("fork", { threadId: "saved", turnId: "old" }), f.call("fork", { threadId: "saved", turnId: "old" })]);
++  const names = f.request.mock.calls.filter(([method]) => method === "thread/name/set").map(([, params]) => params["name"]);
++  expect(names).toEqual(["Untitled conversation · 分支 3", "Untitled conversation · 分支 4"]);
++});
++
++it("releases a reserved branch name when saving it fails", async () => {
++  const f = fixture();
++  const original = f.request.getMockImplementation();
++  let failed = false;
++  f.request.mockImplementation(async (method, params) => {
++    if (method === "thread/fork") return { thread: { id: failed ? "branch-2" : "branch-1", turns: [] } };
++    if (method === "thread/name/set" && !failed) { failed = true; throw new Error("Save failed"); }
++    return original?.(method, params) ?? {};
++  });
++  expect((await f.call("fork", { threadId: "saved", turnId: "old" }))["notice"]).toContain("Save failed");
++  await f.call("fork", { threadId: "saved", turnId: "old" });
++  expect(f.request.mock.calls.filter(([method]) => method === "thread/name/set").map(([, params]) => params["name"])).toEqual(["Untitled conversation · 分支", "Untitled conversation · 分支"]);
++});
++
++
++it("counts stored app-server branches after reconnect and includes them in history", async () => {
++  const f = fixture();
++  const original = f.request.getMockImplementation();
++  const stored = { id: "existing-app-branch", cwd: "/work/one", name: "Untitled conversation · 分支" };
++  f.request.mockImplementation(async (method, params) => {
++    if (method === "thread/fork") return { thread: { id: "next-branch", turns: [] } };
++    if (method === "thread/list") return { data: array(params["sourceKinds"]).includes("appServer") ? [stored] : [] };
++    return original?.(method, params) ?? {};
++  });
++  expect(array((await f.call("list"))["data"])).toContainEqual(expect.objectContaining({ id: stored.id, preview: stored.name }));
++  await f.call("fork", { threadId: "saved", turnId: "old" });
++  expect(f.request).toHaveBeenCalledWith("thread/name/set", { threadId: "next-branch", name: "Untitled conversation · 分支 2" });
++});
 diff --git a/pi-web-plugins/codex/server/codexService.ts b/pi-web-plugins/codex/server/codexService.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..b5d057b86c005236326f98264cb3f134297c36c2
+index 0000000000000000000000000000000000000000..b1d564a7bfec79c0f70b5aa535acde19ec25b370
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/codexService.ts
-@@ -0,0 +1,829 @@
+@@ -0,0 +1,862 @@
 +import { randomUUID } from "node:crypto";
 +import { imageSize } from "image-size";
 +import { isAbsolute, relative, resolve, sep } from "node:path";
@@ -4528,6 +4625,7 @@ index 0000000000000000000000000000000000000000..b5d057b86c005236326f98264cb3f134
 +  threads: Map<string, ThreadState>;
 +  opening: Map<string, Promise<ThreadState>>;
 +  archiving: Set<string>;
++  branchNames: Set<string>;
 +  error: string;
 +  touched: number;
 +}
@@ -4537,6 +4635,8 @@ index 0000000000000000000000000000000000000000..b5d057b86c005236326f98264cb3f134
 +  "approve-for-me": { approvalPolicy: "on-request", sandbox: "workspace-write", approvalsReviewer: "auto_review" },
 +};
 +const policy = policies["full-access"];
++// Include conversations created by the native app-server, not just CLI/IDE history.
++const conversationSources = ["cli", "vscode", "appServer"];
 +
 +export class CodexService {
 +  private readonly workspaces = new Map<string, WorkspaceState>();
@@ -4648,7 +4748,7 @@ index 0000000000000000000000000000000000000000..b5d057b86c005236326f98264cb3f134
 +        return { data, defaultModel, defaultEffort };
 +      }
 +      case "list": {
-+        const result = await rpc("thread/list", { cwd: state.cwd, limit: 30, cursor: input["cursor"] === undefined ? null : string(input["cursor"], "cursor", 4096), sortKey: "updated_at", modelProviders: [] });
++        const result = await rpc("thread/list", { cwd: state.cwd, limit: 30, cursor: input["cursor"] === undefined ? null : string(input["cursor"], "cursor", 4096), sortKey: "updated_at", modelProviders: [], sourceKinds: conversationSources });
 +        return { data: array(result["data"]).filter((entry) => text(object(entry)["cwd"]) === state.cwd).map((entry) => {
 +          const thread = object(entry);
 +          return { id: string(thread["id"]), preview: bounded(text(thread["name"]) || text(thread["preview"]), 160), updatedAt: thread["updatedAt"] ?? 0, busy: state.threads.get(text(thread["id"]))?.busy === true };
@@ -4690,7 +4790,15 @@ index 0000000000000000000000000000000000000000..b5d057b86c005236326f98264cb3f134
 +        this.settings(thread, result);
 +        for (const entry of array(forked["turns"])) this.restoreTurnItems(thread, object(entry));
 +        this.changed(thread);
-+        return { id, model: thread.model, effort: thread.effort };
++        const title = (text(source["name"]).trim() || text(source["preview"]).trim() || "Untitled conversation").replace(/\s+/g, " ").slice(0, 140);
++        let notice = "";
++        try { await this.nameBranch(state, id, `${title} · 分支`); }
++        catch (error) {
++          // The fork already exists. Keep it usable instead of reporting a failed
++          // creation and inviting a retry that would create another conversation.
++          notice = `Branch created, but its name could not be saved: ${errorText(error)}`;
++        }
++        return { id, model: thread.model, effort: thread.effort, ...(notice ? { notice } : {}) };
 +      }
 +      case "create": {
 +        const result = await rpc("thread/start", { cwd: state.cwd, ...selectedPolicy });
@@ -4999,6 +5107,28 @@ index 0000000000000000000000000000000000000000..b5d057b86c005236326f98264cb3f134
 +      }
 +    } finally { this.checking = false; }
 +  }
++  private async nameBranch(state: WorkspaceState, id: string, base: string): Promise<void> {
++    const names = new Set<string>();
++    const cursors = new Set<string>();
++    let cursor = "";
++    do {
++      const page = await state.connection.request("thread/list", { cwd: state.cwd, limit: 100, cursor: cursor || null, sortKey: "updated_at", modelProviders: [], sourceKinds: conversationSources });
++      for (const entry of array(page["data"])) {
++        const thread = object(entry);
++        if (thread["id"] !== id && thread["cwd"] === state.cwd) names.add(text(thread["name"]).trim() || text(thread["preview"]).trim());
++      }
++      cursor = text(page["nextCursor"]);
++      if (cursor && cursors.has(cursor)) throw new Error("Cannot enumerate conversation names: repeated history cursor");
++      cursors.add(cursor);
++    } while (cursor);
++    // Reserve synchronously after listing: concurrent forks may have read the
++    // same history, and newly saved names may not yet appear in thread/list.
++    let name = base;
++    for (let count = 2; names.has(name) || state.branchNames.has(name); count++) name = `${base} ${String(count)}`;
++    state.branchNames.add(name);
++    try { await state.connection.request("thread/name/set", { threadId: id, name }); }
++    catch (error) { state.branchNames.delete(name); throw error; }
++  }
 +  private settings(thread: ThreadState, result: RecordValue): void {
 +    thread.settingsVersion = (thread.settingsVersion ?? 0) + 1;
 +    thread.model = text(result["model"]);
@@ -5031,7 +5161,7 @@ index 0000000000000000000000000000000000000000..b5d057b86c005236326f98264cb3f134
 +        created.error = message;
 +        for (const thread of threads.values()) { thread.busy = false; thread.status = "interrupted"; thread.queuePaused = true; thread.error = message; thread.approvals.clear(); this.changed(thread); }
 +      });
-+      const created: WorkspaceState = { cwd, projectId: context.project.id, workspaceId: context.workspace.id, threads, opening: new Map(), archiving: new Set(), error: "", touched: Date.now(), connection };
++      const created: WorkspaceState = { cwd, projectId: context.project.id, workspaceId: context.workspace.id, threads, opening: new Map(), archiving: new Set(), branchNames: new Set(), error: "", touched: Date.now(), connection };
 +      state = created;
 +      this.workspaces.set(key, state);
 +    }
