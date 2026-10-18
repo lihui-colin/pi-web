@@ -2238,7 +2238,7 @@ index 0000000000000000000000000000000000000000..c3901bcf75aa1e092c2a1839cc7d5782
 +});
 diff --git a/pi-web-plugins/codex/CodexPanel.ts b/pi-web-plugins/codex/CodexPanel.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..0eac46ba2148044517b645adc95fbcc052789d39
+index 0000000000000000000000000000000000000000..6d6728cf3b30839518024136b8d3ebbf93578db9
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.ts
 @@ -0,0 +1,997 @@
@@ -2964,7 +2964,7 @@ index 0000000000000000000000000000000000000000..0eac46ba2148044517b645adc95fbcc0
 +    const turnId = text(item["turnId"]);
 +    if (!view || !turnId || item["turnStatus"] !== "completed" || item["phase"] === "commentary") return nothing;
 +    return html`<button class="branch-button" aria-label="Branch in new chat" title="Branch in new chat" ?disabled=${view.pending || view.sending || view.snapshot["busy"] === true}
-+      @click=${() => { this.action((runtime, state) => runtime.fork(state, turnId)); }}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5v14h14M5 15 19 5M12 5h7v7"></path></svg></button>`;
++      @click=${() => { this.action((runtime, state) => runtime.fork(state, turnId)); }}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h5a4 4 0 0 0 2.8-1.2L20 3m-7 0h7v7M13 14l7 7m-7 0h7v-7" stroke-linecap="round" stroke-linejoin="round"></path></svg></button>`;
 +  }
 +  private renderItem(item: RecordValue) {
 +    const kind = text(item["kind"]);
