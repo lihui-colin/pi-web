@@ -27,7 +27,7 @@ script_file="$(readlink -f "${BASH_SOURCE[0]}")"
 project_root="$(cd "$(dirname "$script_file")/.." && pwd)"
 config_file="$project_root/data/pi-web.conf"
 # Service settings come only from the local config, not the calling shell.
-unset PI_WEB_PORT PI_WEB_HOST PI_WEB_PASSWORD PI_WEB_DATA_DIR PI_WEB_RUN_DIR \
+unset PI_WEB_PORT PI_WEB_HOST PI_WEB_PASSWORD PI_WEB_DATA_DIR PI_WEB_RUN_DIR PI_WEB_VOICE_INPUT_ENABLED \
     PI_WEB_SESSIOND_SOCKET PI_WEB_SESSIOND_PORT PI_WEB_SESSIOND_URL
 if [[ -f "$config_file" ]]; then
     set -a
@@ -37,6 +37,7 @@ fi
 PI_WEB_HOST="${PI_WEB_HOST:-0.0.0.0}"
 PI_WEB_PORT="${PI_WEB_PORT:-8024}"
 PI_WEB_PASSWORD="${PI_WEB_PASSWORD:-}"
+export PI_WEB_VOICE_INPUT_ENABLED="${PI_WEB_VOICE_INPUT_ENABLED-false}"
 
 usage() {
     cat <<'EOF'
@@ -66,6 +67,7 @@ PI WEB (jmfederico) 手动运行管理脚本
   PI_WEB_HOST      绑定地址，默认 0.0.0.0
   PI_WEB_PORT      监听端口，默认 8024
   PI_WEB_PASSWORD  设置后（若支持）开启访问保护
+  PI_WEB_VOICE_INPUT_ENABLED  语音输入入口开关，true/false，默认 false
   PI_WEB_DATA_DIR  状态目录，默认 data/pi-web/<port>/state
   PI_WEB_RUN_DIR   日志和 PID 目录，默认 data/pi-web/<port>
   PI_WEB_SESSIOND_SOCKET  默认 <状态目录>/sessiond.sock
@@ -115,6 +117,10 @@ if [[ ! "$PI_WEB_PORT" =~ ^[0-9]{1,5}$ ]] || (( 10#$PI_WEB_PORT < 1 || 10#$PI_WE
     echo "错误：端口必须是 1–65535 的整数" >&2
     exit 2
 fi
+case "$PI_WEB_VOICE_INPUT_ENABLED" in
+    true|false) ;;
+    *) echo "错误：PI_WEB_VOICE_INPUT_ENABLED 必须为 true 或 false" >&2; exit 2 ;;
+esac
 PI_WEB_PORT="$((10#$PI_WEB_PORT))"
 instance_dir="$project_root/data/pi-web/$PI_WEB_PORT"
 export PI_WEB_DATA_DIR="${PI_WEB_DATA_DIR:-$instance_dir/state}"

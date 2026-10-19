@@ -59,6 +59,7 @@ PI_WEB_PORT=25224
 | --- | --- |
 | `PI_WEB_HOST` | 绑定地址，默认 `0.0.0.0`；仅供本机访问可设为 `127.0.0.1` |
 | `PI_WEB_PORT` | 监听端口，默认 `8024` |
+| `PI_WEB_VOICE_INPUT_ENABLED` | 语音输入入口开关，`true` / `false`，默认 `false`（隐藏）；当前开启后仅显示禁用的麦克风按钮 |
 | `PI_WEB_DATA_DIR` | 状态目录，默认仓库 `data/pi-web/<port>/state` |
 | `PI_WEB_RUN_DIR` | 日志和 PID 目录，默认仓库 `data/pi-web/<port>` |
 | `PI_WEB_SESSIOND_SOCKET` | 默认 `<状态目录>/sessiond.sock` |
@@ -88,4 +89,4 @@ bash scripts/pi-web-run-jmfederico.sh update --pi-only    # 只更新 Pi Agent
 
 新增独立 **Codex** 插件，可在 Terminal 后打开 Codex 对话、恢复历史并处理审批。安装前置条件和使用限制见 [Codex 插件说明](docs/codex-usage.md)。
 
-语音识别目前仅保留 [实施计划](docs/语音识别.md) 和 [服务设计存档](docs/voice-service.md)，相关实现已移除。输入框保留麦克风按钮，暂不可用。
+语音识别目前仅保留 [实施计划](docs/语音识别.md) 和 [服务设计存档](docs/voice-service.md)，相关实现已移除。可通过 `data/pi-web.conf` 中的 `PI_WEB_VOICE_INPUT_ENABLED=true` 显示麦克风按钮，默认隐藏；按钮暂不可用。修改后需在允许中断会话时重新启动服务并刷新页面。

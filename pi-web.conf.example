@@ -5,6 +5,9 @@ PI_WEB_PORT=8024
 PI_WEB_HOST=0.0.0.0
 PI_WEB_PASSWORD=''
 
+# 语音输入入口开关：true/false，默认关闭。识别尚未实现，开启后仅显示禁用入口。
+PI_WEB_VOICE_INPUT_ENABLED=false
+
 # 可选：留空或不填写时按端口自动生成绝对路径。
 # PI_WEB_DATA_DIR='/absolute/path/to/state'
 # PI_WEB_RUN_DIR='/absolute/path/to/run'

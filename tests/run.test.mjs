@@ -413,3 +413,43 @@ for (const [host, target] of [['127.0.0.2', '127.0.0.2'], ['0.0.0.0', '127.0.0.1
     } finally { f.cleanup(); }
   });
 }
+
+for (const value of [undefined, 'false', 'true']) {
+  test(`voice input setting reaches both services (configured=${value})`, () => {
+    const f = fixture();
+    try {
+      for (const name of ['pi-web-sessiond', 'pi-web-server']) {
+        writeFileSync(join(f.root, 'bin', name), `#!${process.execPath}
+console.log(process.env.PI_WEB_VOICE_INPUT_ENABLED);
+setInterval(() => {}, 1000);
+`, { mode: 0o755 });
+      }
+      writeFileSync(join(f.root, 'data/pi-web.conf'), `PI_WEB_PORT=8425\n${value === undefined ? '' : 'PI_WEB_VOICE_INPUT_ENABLED=' + value}\n`);
+      const result = spawnSync('bash', [join(f.root, 'scripts/run.sh'), 'start'], {
+        env: { ...process.env, PATH: `${join(f.root, 'bin')}:${process.env.PATH}`, PI_WEB_VOICE_INPUT_ENABLED: 'ignored' },
+        encoding: 'utf8', timeout: 10000,
+      });
+      const dir = join(f.root, 'data/pi-web/8425');
+      for (const service of ['sessiond', 'server']) {
+        const pidfile = join(dir, `${service}.pid`);
+        if (existsSync(pidfile)) f.pids.push(Number(readFileSync(pidfile, 'utf8')));
+      }
+      assert.equal(result.status, 0, result.stderr);
+      for (const service of ['sessiond', 'server']) {
+        assert.equal(readFileSync(join(dir, `${service}.log`), 'utf8').trim(), value ?? 'false');
+      }
+    } finally { f.cleanup(); }
+  });
+}
+
+test('invalid voice input setting is rejected before starting services', () => {
+  const f = fixture();
+  try {
+    for (const value of ['', '1', 'TRUE', 'invalid']) {
+      const result = f.run('start', '8425', { PI_WEB_VOICE_INPUT_ENABLED: value });
+      assert.equal(result.status, 2);
+      assert.match(result.stderr, /PI_WEB_VOICE_INPUT_ENABLED/);
+      assert.equal(existsSync(join(f.root, 'data/pi-web/8425/server.pid')), false);
+    }
+  } finally { f.cleanup(); }
+});

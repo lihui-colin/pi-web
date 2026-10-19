@@ -11,10 +11,10 @@ index 0000000000000000000000000000000000000000..b864cc1c7375582254410edbe397fcf2
 +Add an optional Codex workspace plugin with persistent conversations, streamed responses, tool output, approvals, and model selection using the workspace machine's Codex CLI. Restart sessiond after installing the plugin.
 diff --git a/pi-web-plugins/codex/CodexBrowserRuntime.ts b/pi-web-plugins/codex/CodexBrowserRuntime.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..8bd9195edb6a01496b44f641a384bc48d9160578
+index 0000000000000000000000000000000000000000..d6a26fbc21df8b66e23047351b50d476dfe1805a
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexBrowserRuntime.ts
-@@ -0,0 +1,460 @@
+@@ -0,0 +1,462 @@
 +import type { PluginPeerChannel, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
 +import { MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, IMAGE_MIME_TYPES, array, errorText, object, string, text, permissionMode, type PermissionMode, chatMode, type ChatMode, type RecordValue } from "./server/protocol.js";
 +
@@ -47,6 +47,7 @@ index 0000000000000000000000000000000000000000..8bd9195edb6a01496b44f641a384bc48
 +  snapshot: RecordValue;
 +  error: string;
 +  notice: string;
++  voiceInputEnabled: boolean;
 +  connected: boolean;
 +  pending: boolean;
 +  permissionMode: PermissionMode;
@@ -75,7 +76,7 @@ index 0000000000000000000000000000000000000000..8bd9195edb6a01496b44f641a384bc48
 +    let view = this.views.get(key);
 +    if (view === undefined) {
 +      const threadId = "";
-+      view = { context, key, threadId, draft: this.read(`${key}:${threadId}:draft`), references: this.readReferences(key, threadId), attachments: [], model: this.read(`${key}:${threadId}:model`), effort: this.read(`${key}:${threadId}:effort`), models: [], defaultModel: "", defaultEffort: "", threads: [], cursor: "", snapshot: {}, error: "", notice: "", connected: false, pending: false, permissionMode: this.readPermissionMode(key), mode: this.readMode(key, threadId), modeDirty: this.read(`${key}:${threadId}:mode`) !== "", sending: false, offset: 0, listeners: new Set(), timer: undefined, polling: false, generation: 0 };
++      view = { context, key, threadId, draft: this.read(`${key}:${threadId}:draft`), references: this.readReferences(key, threadId), attachments: [], model: this.read(`${key}:${threadId}:model`), effort: this.read(`${key}:${threadId}:effort`), models: [], defaultModel: "", defaultEffort: "", threads: [], cursor: "", snapshot: {}, error: "", notice: "", voiceInputEnabled: false, connected: false, pending: false, permissionMode: this.readPermissionMode(key), mode: this.readMode(key, threadId), modeDirty: this.read(`${key}:${threadId}:mode`) !== "", sending: false, offset: 0, listeners: new Set(), timer: undefined, polling: false, generation: 0 };
 +      view.attachments = this.readAttachments(view, threadId);
 +      this.views.set(key, view);
 +    }
@@ -102,6 +103,7 @@ index 0000000000000000000000000000000000000000..8bd9195edb6a01496b44f641a384bc48
 +  async initialize(view: CodexView): Promise<void> {
 +    this.disconnect(view); view.generation++;
 +    const status = await this.request(view, "status");
++    view.voiceInputEnabled = status["voiceInputEnabled"] === true;
 +    view.connected = true;
 +    view.notice = status["authenticated"] === false && status["requiresOpenaiAuth"] !== false
 +      ? "Sign in with `codex login` on this workspace's machine, then reconnect." : "";
@@ -477,10 +479,10 @@ index 0000000000000000000000000000000000000000..8bd9195edb6a01496b44f641a384bc48
 +}
 diff --git a/pi-web-plugins/codex/CodexPanel.test.ts b/pi-web-plugins/codex/CodexPanel.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..5a58c3e2f36a7d43e731a713d8ca40c423e734a1
+index 0000000000000000000000000000000000000000..7cf5a7c30fd8dc12b2e18e57aa028051fd35997b
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.test.ts
-@@ -0,0 +1,1810 @@
+@@ -0,0 +1,1823 @@
 +// @vitest-environment happy-dom
 +import { afterEach, describe, expect, it, vi } from "vitest";
 +import type { WorkspaceFileUploadOptions, WorkspaceFileUploadTask, PluginPeerChannelOptions, FileContentResponse, FileTreeResponse, JsonValue, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
@@ -2291,9 +2293,22 @@ index 0000000000000000000000000000000000000000..5a58c3e2f36a7d43e731a713d8ca40c4
 +    await f.panel.updateComplete; expect(f.width()).toBe("");
 +  });
 +});
++
++describe("voice input configuration", () => {
++  it("hides the entry by default and follows server configuration on reconnect", async () => {
++    const { request, runtime, view, panel } = await fixture();
++    expect(panel.shadowRoot?.querySelector(".voice-input")).toBeNull();
++    request.mockImplementation(async (operation) => operation === "status" ? { voiceInputEnabled: true } : { changed: false });
++    await runtime.initialize(view); panel.requestUpdate(); await panel.updateComplete;
++    expect(required(panel.shadowRoot?.querySelector<HTMLButtonElement>(".voice-input")).disabled).toBe(true);
++    request.mockResolvedValue({ changed: false });
++    await runtime.initialize(view); panel.requestUpdate(); await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelector(".voice-input")).toBeNull();
++  });
++});
 diff --git a/pi-web-plugins/codex/CodexPanel.ts b/pi-web-plugins/codex/CodexPanel.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..3c862d018542b3ed3d17a487003a925c82e3d974
+index 0000000000000000000000000000000000000000..4262ab7ae79ff2277e3965e2362dc84f99e9809f
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.ts
 @@ -0,0 +1,1045 @@
@@ -2979,7 +2994,7 @@ index 0000000000000000000000000000000000000000..3c862d018542b3ed3d17a487003a925c
 +        <div class="composer-controls">
 +          <div class="composer-leading">${this.renderContextPicker(view)}${this.isMobileComposer() ? this.renderPlanStatus(view) : this.renderComposerSettings(view)}</div>
 +          <div class="composer-trailing">${this.renderModelPicker(view)}
-+          <button class="voice-input" aria-label="Voice input" title="Voice input is not implemented yet" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2" width="6" height="13" rx="3"></rect><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"></path></svg></button>
++          ${view.voiceInputEnabled ? html`<button class="voice-input" aria-label="Voice input" title="Voice input is not implemented yet" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2" width="6" height="13" rx="3"></rect><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"></path></svg></button>` : nothing}
 +          ${busy && hasInput ? html`<button class="stop-response" aria-label="Stop response" title="Stop response" ?disabled=${view.pending || view.sending || !view.connected} @click=${() => { this.action((runtime, state) => runtime.request(state, "stop", { threadId: state.threadId })); }}><span class="stop-icon" aria-hidden="true"></span></button>` : nothing}
 +          <button class="primary" aria-label=${view.sending ? "Sending message" : stopAction ? "Stop response" : queueInput ? "Queue message" : "Send message"} title=${view.sending ? "Sending message" : stopAction ? "Stop response" : queueInput ? "Queue message" : "Send message"} aria-busy=${view.sending} ?disabled=${view.pending || view.sending || !view.connected || (!stopAction && attachmentsPending) || (!busy && !hasInput)} @click=${() => { this.action((runtime, state) => stopAction ? runtime.request(state, "stop", { threadId: state.threadId }) : runtime.send(state)); }}>${view.sending ? html`<span class="send-spinner" aria-hidden="true"></span>` : stopAction ? html`<span class="stop-icon" aria-hidden="true"></span>` : html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20V4m-7 7 7-7 7 7"></path></svg>`}</button>
 +          </div>
@@ -3687,10 +3702,10 @@ index 0000000000000000000000000000000000000000..e315f01fdd441c313abe22ea84610eaa
 +export const createCodexConnection: ConnectionFactory = (cwd, event, exited) => new CodexProcess(cwd, event, exited);
 diff --git a/pi-web-plugins/codex/server/codexService.test.ts b/pi-web-plugins/codex/server/codexService.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..550d9603c382d7111db171c2d41450b5c8693920
+index 0000000000000000000000000000000000000000..d6db00f6477f38a9b4a9be9eacbc1b98a725c8ca
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/codexService.test.ts
-@@ -0,0 +1,971 @@
+@@ -0,0 +1,981 @@
 +import { mkdtemp, mkdir, writeFile, symlink, truncate, rm } from "node:fs/promises";
 +import { join } from "node:path";
 +import { tmpdir } from "node:os";
@@ -4662,9 +4677,19 @@ index 0000000000000000000000000000000000000000..550d9603c382d7111db171c2d41450b5
 +  await f.call("fork", { threadId: "saved", turnId: "old" });
 +  expect(f.request).toHaveBeenCalledWith("thread/name/set", { threadId: "next-branch", name: "Untitled conversation · 分支 2" });
 +});
++
++describe("voice input configuration", () => {
++  it.each([undefined, "false", "true", "invalid"])("reports the configured flag (%s)", async (value) => {
++    vi.stubEnv("PI_WEB_VOICE_INPUT_ENABLED", value);
++    try {
++      const { call } = fixture();
++      expect(await call("status")).toMatchObject({ voiceInputEnabled: value === "true" });
++    } finally { vi.unstubAllEnvs(); }
++  });
++});
 diff --git a/pi-web-plugins/codex/server/codexService.ts b/pi-web-plugins/codex/server/codexService.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..b1d564a7bfec79c0f70b5aa535acde19ec25b370
+index 0000000000000000000000000000000000000000..a694704afd4552682fa40775db3b3ecea1a2dc7c
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/codexService.ts
 @@ -0,0 +1,862 @@
@@ -4822,7 +4847,7 @@ index 0000000000000000000000000000000000000000..b1d564a7bfec79c0f70b5aa535acde19
 +    switch (context.operation) {
 +      case "status": {
 +        const account = await rpc("account/read", { refreshToken: false });
-+        return { authenticated: account["account"] !== null, requiresOpenaiAuth: account["requiresOpenaiAuth"] ?? true, policy, cwd: state.cwd };
++        return { voiceInputEnabled: process.env["PI_WEB_VOICE_INPUT_ENABLED"] === "true", authenticated: account["account"] !== null, requiresOpenaiAuth: account["requiresOpenaiAuth"] ?? true, policy, cwd: state.cwd };
 +      }
 +      case "activity": return { busyThreadIds: [...state.threads.values()].filter((thread) => thread.busy).map((thread) => thread.id) };
 +      case "models": {
