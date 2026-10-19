@@ -5,8 +5,21 @@ PI_WEB_PORT=8024
 PI_WEB_HOST=0.0.0.0
 PI_WEB_PASSWORD=''
 
-# 语音输入入口开关：true/false，默认关闭。识别尚未实现，开启后仅显示禁用入口。
+# 专用于 pi-web 的系统 Nginx 服务；配置代理和证书后开启统一启停。
+# start 检查配置并启动代理；stop/restart 会停止整个 nginx 服务。
+PI_WEB_NGINX_ENABLED=false
+# 生成配置：bash scripts/pi-web-run-jmfederico.sh nginx-config
+# 修改后需将生成的监听配置安装到 Nginx，安排维护时生效。
+PI_WEB_NGINX_PORT=25224
+# 可选：默认随 PI_WEB_NGINX_PORT 自动生成；自定义地址时取消注释。
+# PI_WEB_NGINX_PROBE_URL=https://127.0.0.1:25224/api/pi-web/health
+
+# 语音输入入口开关：true/false，默认关闭。先运行 scripts/install-voice.sh，通过真实转写验收后再开启。
+# 浏览器需 HTTPS 或 localhost；启用前先通过独立后端的真实转写验收。
 PI_WEB_VOICE_INPUT_ENABLED=false
+PI_WEB_CAPSWRITER_URL=ws://127.0.0.1:6016/
+PI_WEB_VOICE_MAX_SECONDS=120
+PI_WEB_VOICE_FINAL_TIMEOUT_MS=30000
 
 # 可选：留空或不填写时按端口自动生成绝对路径。
 # PI_WEB_DATA_DIR='/absolute/path/to/state'

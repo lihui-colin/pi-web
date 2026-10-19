@@ -1,0 +1,5 @@
+numpy==2.2.6
+websockets==15.0.1
+sherpa-onnx==1.13.8
+rich==14.0.0
+colorama==0.4.6

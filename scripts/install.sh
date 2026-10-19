@@ -12,8 +12,10 @@ Usage: bash scripts/install.sh [install]
 install (default): Run sync.sh to reuse or fetch patches/base-commit and apply patches,
   then test, build and link global pi-web commands.
   Creates data/pi-web.conf from pi-web.conf.example if missing.
+  Installs missing nginx, openssl, curl and ca-certificates on Debian/Ubuntu.
+  System packages may require sudo; existing proxy configuration is preserved.
   Installs Pi Agent if missing; preserves an existing Agent.
-  Does not manage services. No options accepted.
+  Does not start or restart services. No options accepted.
 
 PI_WEB_INSTALL_ROOT  Local release parent (default: <repo>/data/pi-web-releases)
 PI_VERSION          Pi Agent bootstrap target for install (default: latest)
@@ -35,6 +37,12 @@ install_local() (
       mkdir -p "$script_dir/../data"
       cp -n "$script_dir/../pi-web.conf.example" "$local_config"
       printf 'Created local configuration: %s\n' "$local_config"
+    fi
+
+    # Application-only updates must not install or upgrade system packages.
+    if [[ "${1:-local}" == local ]]; then
+      printf '\nChecking reverse-proxy and HTTPS dependencies\n'
+      bash "$script_dir/install-system-deps.sh"
     fi
 
     printf '\n[1/3] Synchronizing upstream and preparing patched release\n'
@@ -72,6 +80,7 @@ install_local() (
     npm install --global --ignore-scripts --install-links=false --legacy-peer-deps "$release_dir"
 
     printf '\nInstalled and linked from %s\nGlobal commands: %s/bin/pi-web (also pi-web-server and pi-web-sessiond)\n' "$release_dir" "$(npm prefix --global)"
+    printf 'Reverse proxy template: %s/../deploy/nginx/pi-web.conf.example\nSee docs/usage.md for HTTPS setup.\n' "$script_dir"
 
 )
 
@@ -91,7 +100,7 @@ case "$action" in
             exit 2
         fi
         install_local
-        echo "No services were registered or started. Stop and start existing services manually to use the new build."
+        echo "PI WEB services were not registered or started; system package service startup was suppressed. Stop and start existing services manually to use the new build."
         exit 0
         ;;
     *) echo "Unknown command: $action (service options are no longer accepted)" >&2; install_usage >&2; exit 2 ;;

@@ -453,3 +453,207 @@ test('invalid voice input setting is rejected before starting services', () => {
     }
   } finally { f.cleanup(); }
 });
+
+for (const webRunning of [false, true]) {
+  test(`stop also stops the voice service (web running=${webRunning})`, () => {
+    const f = fixture();
+    try {
+      if (webRunning) {
+        assert.equal(f.run('start', '8425').status, 0);
+        for (const name of ['server', 'sessiond']) f.pids.push(Number(readFileSync(join(f.root, 'data/pi-web/8425', `${name}.pid`), 'utf8')));
+      }
+      mkdirSync(join(f.root, 'data/voice'));
+      writeFileSync(join(f.root, 'data/voice/pid.json'), '{}');
+      // The parent passes a normalized absolute deployment path.
+      writeFileSync(join(f.root, 'scripts/voice-service.sh'), '#!/bin/bash\n[[ "$1" == stop && "$2" == --root && "$3" == "$(cd "$(dirname "$0")/.." && pwd)/data/voice" ]] || exit 9\nrm -f "$3/pid.json"\necho voice-stopped\n');
+      const result = f.run('stop', '8425');
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /voice-stopped/);
+      assert.equal(existsSync(join(f.root, 'data/voice/pid.json')), false);
+      for (const name of ['server', 'sessiond']) assert.equal(existsSync(join(f.root, 'data/pi-web/8425', `${name}.pid`)), false);
+    } finally { f.cleanup(); }
+  });
+}
+
+for (const action of ['stop', 'restart']) {
+  test(`${action} reports voice stop failure and still stops web services`, () => {
+    const f = fixture();
+    try {
+      assert.equal(f.run('start', '8425').status, 0);
+      for (const name of ['server', 'sessiond']) f.pids.push(Number(readFileSync(join(f.root, 'data/pi-web/8425', `${name}.pid`), 'utf8')));
+      mkdirSync(join(f.root, 'data/voice'));
+      writeFileSync(join(f.root, 'data/voice/pid.json'), '{}');
+      writeFileSync(join(f.root, 'scripts/voice-service.sh'), '#!/bin/bash\nexit 7\n');
+      const result = f.run(action, '8425');
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /语音服务停止失败/);
+      assert.doesNotMatch(result.stdout, /启动 pi-web/);
+      assert.equal(existsSync(join(f.root, 'data/voice/pid.json')), true);
+      for (const name of ['server', 'sessiond']) assert.equal(existsSync(join(f.root, 'data/pi-web/8425', `${name}.pid`)), false);
+    } finally { f.cleanup(); }
+  });
+}
+
+test('stop skips voice management when no voice PID record exists', () => {
+  const f = fixture();
+  try {
+    writeFileSync(join(f.root, 'scripts/voice-service.sh'), '#!/bin/bash\necho unexpected-voice-call\nexit 7\n');
+    const result = f.run('stop', '8425');
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.stdout, /unexpected-voice-call/);
+  } finally { f.cleanup(); }
+});
+
+test('voice transport settings are validated from the config file', () => {
+  const f = fixture();
+  try {
+    for (const settings of [{ PI_WEB_CAPSWRITER_URL: 'http://localhost:6016' }, { PI_WEB_VOICE_MAX_SECONDS: '121' }, { PI_WEB_VOICE_FINAL_TIMEOUT_MS: '999' }]) {
+      const result = f.run('start', '8425', settings);
+      assert.equal(result.status, 2);
+      assert.equal(existsSync(join(f.root, 'data/pi-web/8425/server.pid')), false);
+    }
+    writeFileSync(join(f.root, 'data/pi-web.conf'), 'PI_WEB_PORT=8425\nPI_WEB_VOICE_INPUT_ENABLED=true\nPI_WEB_CAPSWRITER_URL=ws://127.0.0.1:6017/\nPI_WEB_VOICE_MAX_SECONDS=60\nPI_WEB_VOICE_FINAL_TIMEOUT_MS=15000\n');
+    for (const name of ['pi-web-sessiond', 'pi-web-server']) writeFileSync(join(f.root, 'bin', name), `#!${process.execPath}
+console.log(JSON.stringify([process.env.PI_WEB_CAPSWRITER_URL, process.env.PI_WEB_VOICE_MAX_SECONDS, process.env.PI_WEB_VOICE_FINAL_TIMEOUT_MS]));
+setInterval(() => {}, 1000);
+`, { mode: 0o755 });
+    const result = spawnSync('bash', [join(f.root, 'scripts/run.sh'), 'start'], { env: { ...process.env, PATH: `${join(f.root, 'bin')}:${process.env.PATH}`, PI_WEB_CAPSWRITER_URL: 'ignored' }, encoding: 'utf8', timeout: 10000 });
+    for (const name of ['server', 'sessiond']) {
+      const path = join(f.root, 'data/pi-web/8425', `${name}.pid`);
+      if (existsSync(path)) f.pids.push(Number(readFileSync(path, 'utf8')));
+    }
+    assert.equal(result.status, 0, result.stderr);
+    for (const name of ['server', 'sessiond']) assert.deepEqual(JSON.parse(readFileSync(join(f.root, 'data/pi-web/8425', `${name}.log`), 'utf8')), ['ws://127.0.0.1:6017/', '60', '15000']);
+  } finally { f.cleanup(); }
+});
+
+function nginxFixture(f) {
+  const bin = join(f.root, 'bin');
+  const state = join(f.root, 'nginx.running');
+  const calls = join(f.root, 'nginx.calls');
+  const script = (name, body) => writeFileSync(join(bin, name), `#!/bin/bash\n${body}\n`, { mode: 0o755 });
+  script('sudo', '[[ "$1" != -n ]] || shift; [[ "$1" != -- ]] || shift; exec "$@"');
+  script('nginx', 'echo "check $*" >> "$TEST_NGINX_LOG"; [[ "$TEST_NGINX_FAIL" != config ]]');
+  script('service', `
+[[ "$1" == nginx ]] || exit 99
+printf '%s\\n' "$2" >> "$TEST_NGINX_LOG"
+case "$2" in
+  status) [[ -f "$TEST_NGINX_STATE" ]] && exit 0; exit 3 ;;
+  start)
+    [[ -f "$PI_WEB_RUN_DIR/server.pid" && -f "$PI_WEB_RUN_DIR/sessiond.pid" ]] || exit 97
+    [[ "$TEST_NGINX_FAIL" != start ]] || exit 11
+    touch "$TEST_NGINX_STATE" ;;
+  stop)
+    [[ "$TEST_NGINX_FAIL" != stop ]] || exit 12
+    [[ ! -f "$PI_WEB_RUN_DIR/server.pid" ]] || echo 'stop-before-backend' >> "$TEST_NGINX_LOG"
+    rm -f "$TEST_NGINX_STATE" ;;
+  *) exit 98 ;;
+esac`);
+  script('curl', `
+if [[ "$*" == *'/api/pi-web/health'* ]]; then
+  [[ "$TEST_NGINX_FAIL" != probe ]] || { printf '<html>default site</html>'; exit 0; }
+  printf '{"ok":true}'
+else
+  /bin/sleep 0.05; printf 200
+fi`);
+  const options = {
+    PI_WEB_NGINX_ENABLED: 'true',
+    PI_WEB_NGINX_PROBE_URL: 'https://127.0.0.1:25224/api/pi-web/health',
+    TEST_NGINX_STATE: state, TEST_NGINX_LOG: calls, TEST_NGINX_FAIL: '',
+  };
+  const savePids = () => {
+    for (const name of ['server', 'sessiond']) {
+      const file = join(f.root, 'data/pi-web/8425', `${name}.pid`);
+      if (existsSync(file)) f.pids.push(Number(readFileSync(file, 'utf8')));
+    }
+  };
+  return { options, calls, state, savePids };
+}
+
+test('dedicated nginx starts after backend, is idempotent, and stops before backend on restart', () => {
+  const f = fixture(); const n = nginxFixture(f);
+  try {
+    let result = f.run('start', '8425', n.options); n.savePids();
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /代理健康检查通过/);
+    assert.equal(f.run('start', '8425', n.options).status, 0);
+    assert.equal(readFileSync(n.calls, 'utf8').split('\n').filter(line => line === 'start').length, 1);
+    result = f.run('restart', '8425', n.options); n.savePids();
+    assert.equal(result.status, 0, result.stderr);
+    const calls = readFileSync(n.calls, 'utf8');
+    assert.match(calls, /stop\nstop-before-backend/);
+    assert.equal(calls.split('\n').filter(line => line === 'start').length, 2);
+    assert.equal(f.run('stop', '8425', n.options).status, 0);
+    assert.equal(existsSync(n.state), false);
+    assert.equal(f.run('status', '8425', n.options).status, 1);
+    assert.equal(f.run('stop', '8425', n.options).status, 0);
+  } finally { f.cleanup(); }
+});
+
+test('invalid nginx configuration aborts start before launching either backend', () => {
+  const f = fixture(); const n = nginxFixture(f);
+  try {
+    const result = f.run('start', '8425', { ...n.options, TEST_NGINX_FAIL: 'config' });
+    assert.equal(result.status, 1);
+    assert.equal(existsSync(join(f.root, 'data/pi-web/8425/server.pid')), false);
+    assert.equal(existsSync(n.state), false);
+  } finally { f.cleanup(); }
+});
+
+test('nginx stop failure prevents restart and preserves existing backend sessions', () => {
+  const f = fixture(); const n = nginxFixture(f);
+  try {
+    assert.equal(f.run('start', '8425', n.options).status, 0); n.savePids();
+    const result = f.run('restart', '8425', { ...n.options, TEST_NGINX_FAIL: 'stop' });
+    assert.equal(result.status, 1);
+    for (const pid of f.pids) process.kill(pid, 0);
+    assert.equal(readFileSync(n.calls, 'utf8').split('\n').filter(line => line === 'start').length, 1);
+  } finally { f.cleanup(); }
+});
+
+for (const failure of ['start', 'probe']) {
+  test(`nginx ${failure} failure is reported without stopping running backend`, () => {
+    const f = fixture(); const n = nginxFixture(f);
+    try {
+      writeFileSync(join(f.root, 'bin/sleep'), '#!/bin/sh\n/bin/sleep 0.01\n', { mode: 0o755 });
+      const result = f.run('start', '8425', { ...n.options, TEST_NGINX_FAIL: failure }); n.savePids();
+      assert.equal(result.status, 1, result.stderr);
+      assert.equal(f.pids.length, 2);
+      for (const pid of f.pids) process.kill(pid, 0);
+      if (failure === 'probe') assert.match(result.stderr, /代理未就绪/);
+    } finally { f.cleanup(); }
+  });
+}
+
+test('nginx-config renders configured ports and preserves nginx variables without managing services', () => {
+  const f = fixture();
+  try {
+    mkdirSync(join(f.root, 'deploy/nginx'), { recursive: true });
+    copyFileSync('deploy/nginx/pi-web.conf.example', join(f.root, 'deploy/nginx/pi-web.conf.example'));
+    const result = f.run('nginx-config', '8425', { PI_WEB_NGINX_PORT: '09443' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /listen 9443 ssl;/);
+    assert.match(result.stdout, /proxy_pass http:\/\/127.0.0.1:8425;/);
+    assert.ok(result.stdout.includes('proxy_set_header Host $http_host;'));
+    assert.equal(existsSync(join(f.root, 'data/pi-web/8425')), false);
+    for (const port of ['0', '65536', '-1', 'abc', '1;echo bad']) {
+      const invalid = f.run('nginx-config', '8425', { PI_WEB_NGINX_PORT: port });
+      assert.equal(invalid.status, 2);
+      assert.match(invalid.stderr, /PI_WEB_NGINX_PORT/);
+    }
+  } finally { f.cleanup(); }
+});
+
+test('nginx health URL follows configured port unless explicitly overridden', () => {
+  const f = fixture(); const n = nginxFixture(f);
+  try {
+    writeFileSync(join(f.root, 'bin/curl'), '#!/bin/bash\nprintf "%s\\n" "${@: -1}" >> "$TEST_NGINX_LOG"\nprintf \'{"ok":true}\'\n', { mode: 0o755 });
+    writeFileSync(n.state, '');
+    const options = { ...n.options, PI_WEB_NGINX_PORT: '9443' };
+    delete options.PI_WEB_NGINX_PROBE_URL;
+    f.run('status', '8425', options);
+    assert.match(readFileSync(n.calls, 'utf8'), /https:\/\/127.0.0.1:9443\/api\/pi-web\/health/);
+    f.run('status', '8425', { ...options, PI_WEB_NGINX_PROBE_URL: 'https://custom:8443/api/pi-web/health' });
+    assert.match(readFileSync(n.calls, 'utf8'), /https:\/\/custom:8443\/api\/pi-web\/health/);
+  } finally { f.cleanup(); }
+});

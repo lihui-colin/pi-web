@@ -1,0 +1,7 @@
+{
+  "host": "127.0.0.1",
+  "port": 6016,
+  "threads": 4,
+  "max_seconds": 120,
+  "final_timeout_seconds": 30
+}

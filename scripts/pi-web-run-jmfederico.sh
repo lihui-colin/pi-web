@@ -27,6 +27,8 @@ script_file="$(readlink -f "${BASH_SOURCE[0]}")"
 project_root="$(cd "$(dirname "$script_file")/.." && pwd)"
 config_file="$project_root/data/pi-web.conf"
 # Service settings come only from the local config, not the calling shell.
+unset PI_WEB_CAPSWRITER_URL PI_WEB_VOICE_MAX_SECONDS PI_WEB_VOICE_FINAL_TIMEOUT_MS
+unset PI_WEB_NGINX_ENABLED PI_WEB_NGINX_PORT PI_WEB_NGINX_PROBE_URL
 unset PI_WEB_PORT PI_WEB_HOST PI_WEB_PASSWORD PI_WEB_DATA_DIR PI_WEB_RUN_DIR PI_WEB_VOICE_INPUT_ENABLED \
     PI_WEB_SESSIOND_SOCKET PI_WEB_SESSIOND_PORT PI_WEB_SESSIOND_URL
 if [[ -f "$config_file" ]]; then
@@ -37,7 +39,12 @@ fi
 PI_WEB_HOST="${PI_WEB_HOST:-0.0.0.0}"
 PI_WEB_PORT="${PI_WEB_PORT:-8024}"
 PI_WEB_PASSWORD="${PI_WEB_PASSWORD:-}"
+PI_WEB_NGINX_ENABLED="${PI_WEB_NGINX_ENABLED:-false}"
+PI_WEB_NGINX_PORT="${PI_WEB_NGINX_PORT:-25224}"
 export PI_WEB_VOICE_INPUT_ENABLED="${PI_WEB_VOICE_INPUT_ENABLED-false}"
+export PI_WEB_CAPSWRITER_URL="${PI_WEB_CAPSWRITER_URL-ws://127.0.0.1:6016/}"
+export PI_WEB_VOICE_MAX_SECONDS="${PI_WEB_VOICE_MAX_SECONDS-120}"
+export PI_WEB_VOICE_FINAL_TIMEOUT_MS="${PI_WEB_VOICE_FINAL_TIMEOUT_MS-30000}"
 
 usage() {
     cat <<'EOF'
@@ -50,6 +57,7 @@ PI WEB (jmfederico) 手动运行管理脚本
   ./scripts/pi-web-run-jmfederico.sh update [更新选项]    # 升级 pi 和 pi-web
   ./scripts/pi-web-run-jmfederico.sh status               # 查看状态
   ./scripts/pi-web-run-jmfederico.sh logs                 # 跟随服务日志
+  ./scripts/pi-web-run-jmfederico.sh nginx-config         # 输出 Nginx 配置模板
   ./scripts/pi-web-run-jmfederico.sh --help               # 显示本帮助
 
 参数:
@@ -67,6 +75,9 @@ PI WEB (jmfederico) 手动运行管理脚本
   PI_WEB_HOST      绑定地址，默认 0.0.0.0
   PI_WEB_PORT      监听端口，默认 8024
   PI_WEB_PASSWORD  设置后（若支持）开启访问保护
+  PI_WEB_NGINX_ENABLED  是否统一启停专用 nginx 服务，默认 false
+  PI_WEB_NGINX_PORT  反向代理 HTTPS 端口，默认 25224；nginx-config 生成监听配置
+  PI_WEB_NGINX_PROBE_URL  可选健康地址，默认使用 PI_WEB_NGINX_PORT
   PI_WEB_VOICE_INPUT_ENABLED  语音输入入口开关，true/false，默认 false
   PI_WEB_DATA_DIR  状态目录，默认 data/pi-web/<port>/state
   PI_WEB_RUN_DIR   日志和 PID 目录，默认 data/pi-web/<port>
@@ -91,7 +102,7 @@ while [[ $# -gt 0 ]]; do
             echo "错误：不再支持 --port，请在 $config_file 中设置 PI_WEB_PORT" >&2
             exit 2
         ;;
-        start|stop|restart|update|status|logs)
+        start|stop|restart|update|status|logs|nginx-config)
             if [[ -n "$ACTION" ]]; then
                 echo "错误：一次只能执行一个命令（已指定 $ACTION，又收到 $1）" >&2
                 exit 2
@@ -117,10 +128,32 @@ if [[ ! "$PI_WEB_PORT" =~ ^[0-9]{1,5}$ ]] || (( 10#$PI_WEB_PORT < 1 || 10#$PI_WE
     echo "错误：端口必须是 1–65535 的整数" >&2
     exit 2
 fi
+if [[ ! "$PI_WEB_NGINX_PORT" =~ ^[0-9]{1,5}$ ]] || (( 10#$PI_WEB_NGINX_PORT < 1 || 10#$PI_WEB_NGINX_PORT > 65535 )); then
+    echo "错误：PI_WEB_NGINX_PORT 必须是 1–65535 的整数" >&2
+    exit 2
+fi
+PI_WEB_NGINX_PORT="$((10#$PI_WEB_NGINX_PORT))"
+PI_WEB_NGINX_PROBE_URL="${PI_WEB_NGINX_PROBE_URL:-https://127.0.0.1:$PI_WEB_NGINX_PORT/api/pi-web/health}"
 case "$PI_WEB_VOICE_INPUT_ENABLED" in
     true|false) ;;
     *) echo "错误：PI_WEB_VOICE_INPUT_ENABLED 必须为 true 或 false" >&2; exit 2 ;;
 esac
+case "$PI_WEB_NGINX_ENABLED" in
+    true|false) ;;
+    *) echo "错误：PI_WEB_NGINX_ENABLED 必须为 true 或 false" >&2; exit 2 ;;
+esac
+if [[ ! "$PI_WEB_NGINX_PROBE_URL" =~ ^https?://[^[:space:]]+$ ]]; then
+    echo "错误：PI_WEB_NGINX_PROBE_URL 必须为 http:// 或 https:// 健康地址" >&2; exit 2
+fi
+if [[ ! "$PI_WEB_CAPSWRITER_URL" =~ ^wss?://[^[:space:]]+$ ]]; then
+    echo "错误：PI_WEB_CAPSWRITER_URL 必须为 ws:// 或 wss:// 地址" >&2; exit 2
+fi
+if [[ ! "$PI_WEB_VOICE_MAX_SECONDS" =~ ^[0-9]{1,3}$ ]] || (( 10#$PI_WEB_VOICE_MAX_SECONDS < 1 || 10#$PI_WEB_VOICE_MAX_SECONDS > 120 )); then
+    echo "错误：PI_WEB_VOICE_MAX_SECONDS 必须为 1–120" >&2; exit 2
+fi
+if [[ ! "$PI_WEB_VOICE_FINAL_TIMEOUT_MS" =~ ^[0-9]{4,6}$ ]] || (( 10#$PI_WEB_VOICE_FINAL_TIMEOUT_MS < 1000 || 10#$PI_WEB_VOICE_FINAL_TIMEOUT_MS > 120000 )); then
+    echo "错误：PI_WEB_VOICE_FINAL_TIMEOUT_MS 必须为 1000–120000" >&2; exit 2
+fi
 PI_WEB_PORT="$((10#$PI_WEB_PORT))"
 instance_dir="$project_root/data/pi-web/$PI_WEB_PORT"
 export PI_WEB_DATA_DIR="${PI_WEB_DATA_DIR:-$instance_dir/state}"
@@ -149,6 +182,9 @@ check_port_free() {
 
 start() {
     require_bins
+    if [[ "$PI_WEB_NGINX_ENABLED" == true ]]; then
+        nginx_preflight || return 1
+    fi
     mkdir -p "$log_dir"
     # nohup ignores SIGHUP, but does not detach the process group from an
     # automation runner. Start a separate session where setsid is available.
@@ -189,6 +225,9 @@ start() {
     # must not make a failed Web startup look successful.
     for _ in $(seq 1 30); do
         if service_running pi-web-server "$server_pid" && service_running pi-web-sessiond "$sessiond_pid" && http_ready; then
+            if [[ "$PI_WEB_NGINX_ENABLED" == true ]]; then
+                start_nginx || return 1
+            fi
             status
             return 0
         fi
@@ -196,6 +235,80 @@ start() {
     done
     status || true
     echo "错误：服务未就绪，请检查 $server_log 和 $sessiond_log" >&2
+    return 1
+}
+
+as_root() {
+    if [[ "$(id -u)" == 0 ]]; then
+        "$@"
+    elif command -v sudo >/dev/null; then
+        local result
+        if sudo -n -- "$@"; then return 0; else result=$?; fi
+        if [[ "$result" != 3 ]]; then
+            echo "错误：Nginx 管理失败；如缺少 sudo 凭据，请先在终端执行 sudo -v 后重试。" >&2
+        fi
+        return "$result"
+    else
+        echo "错误：管理系统 Nginx 需要 root 或 sudo。" >&2
+        return 1
+    fi
+}
+
+nginx_service() {
+    local service_bin
+    service_bin=$(command -v service || true)
+    [[ -n "$service_bin" ]] || service_bin=/usr/sbin/service
+    [[ -x "$service_bin" ]] || { echo "错误：未找到 service，请安装系统 Nginx 服务。" >&2; return 1; }
+    as_root "$service_bin" nginx "$1"
+}
+
+nginx_preflight() {
+    local nginx_bin
+    nginx_bin=$(command -v nginx || true)
+    [[ -n "$nginx_bin" ]] || nginx_bin=/usr/sbin/nginx
+    [[ -x "$nginx_bin" ]] || { echo "错误：未找到 nginx，请运行 scripts/install-system-deps.sh。" >&2; return 1; }
+    as_root "$nginx_bin" -t
+}
+
+nginx_ready() {
+    local body
+    # Readiness checks routing, not device trust of the internal CA certificate.
+    body=$(curl --noproxy '*' --insecure --fail --silent --max-time 2 "$PI_WEB_NGINX_PROBE_URL") || return 1
+    [[ "$body" =~ \"ok\"[[:space:]]*:[[:space:]]*true ]]
+}
+
+start_nginx() {
+    if nginx_service status >/dev/null 2>&1; then
+        echo "nginx 已在运行"
+    else
+        echo "启动 nginx ..."
+        nginx_service start || return 1
+    fi
+    for _ in $(seq 1 20); do
+        if nginx_service status >/dev/null 2>&1 && nginx_ready; then return 0; fi
+        sleep 0.5
+    done
+    echo "错误：Nginx 代理未就绪：$PI_WEB_NGINX_PROBE_URL；后端保持运行，请检查代理配置。" >&2
+    return 1
+}
+
+stop_nginx() {
+    [[ "$PI_WEB_NGINX_ENABLED" == true ]] || return 0
+    # Always issue stop: a failed status may mean missing privileges, not absence.
+    echo "停止 nginx ..."
+    nginx_service stop || return 1
+    local state
+    for _ in $(seq 1 20); do
+        if nginx_service status >/dev/null 2>&1; then state=0; else state=$?; fi
+        # Debian init scripts and systemctl use 3 for an inactive service.
+        if [[ "$state" == 3 ]]; then return 0; fi
+        if [[ "$state" != 0 ]]; then
+            echo "错误：无法确认 Nginx 已停止（状态码 $state），停止流程中止。" >&2
+            return 1
+        fi
+        sleep 0.5
+    done
+    echo "错误：Nginx 停止超时，停止流程中止。" >&2
     return 1
 }
 
@@ -309,13 +422,42 @@ stop_pid() {
     rm -f "$pidfile"
 }
 
+stop_voice() {
+    local voice_root="$project_root/data/voice"
+    [[ -f "$voice_root/pid.json" ]] || return 0
+    if [[ ! -f "$project_root/scripts/voice-service.sh" ]]; then
+        echo "错误：发现语音服务 PID 记录，但缺少 scripts/voice-service.sh，无法停止语音服务" >&2
+        return 1
+    fi
+    echo "停止本仓库的语音服务..."
+    if ! bash "$project_root/scripts/voice-service.sh" stop --root "$voice_root"; then
+        echo "错误：语音服务停止失败" >&2
+        return 1
+    fi
+}
+
 stop() {
-    stop_pid "pi-web-server"   "$server_pid"
-    stop_pid "pi-web-sessiond" "$sessiond_pid"
+    local failed=0
+    stop_nginx || return 1
+    # Stop the shared voice backend before sessiond can terminate this session.
+    stop_voice || failed=1
+    stop_pid "pi-web-server"   "$server_pid" || return 1
+    stop_pid "pi-web-sessiond" "$sessiond_pid" || return 1
+    return "$failed"
 }
 
 status() {
     local any=0
+    local proxy_failed=0
+    if [[ "$PI_WEB_NGINX_ENABLED" == true ]]; then
+        if nginx_service status >/dev/null 2>&1; then
+            echo "nginx          运行中 -> $PI_WEB_NGINX_PROBE_URL"
+            if nginx_ready; then echo "   代理健康检查通过"; else echo "   代理健康检查失败"; proxy_failed=1; fi
+        else
+            echo "nginx          未运行或无法查询状态"
+            proxy_failed=1
+        fi
+    fi
     if service_running pi-web-server "$server_pid"; then
         echo "pi-web-server   运行中 (PID $(cat "$server_pid")) -> http://$PI_WEB_HOST:$PI_WEB_PORT"
         curl --noproxy '*' --max-time 1 -s -o /dev/null -w "   HTTP 状态: %{http_code}\n" "$(probe_url)" 2>/dev/null || echo "   探测失败"
@@ -329,7 +471,7 @@ status() {
     else
         echo "pi-web-sessiond 未在运行"
     fi
-    [[ $any -eq 1 ]]
+    [[ $any -eq 1 && $proxy_failed -eq 0 ]]
 }
 
 logs() {
@@ -530,6 +672,11 @@ case "$ACTION" in
     update)  update ;;
     status)  status ;;
     logs)    logs ;;
+    nginx-config)
+        sed -e "s/listen 25224 ssl;/listen $PI_WEB_NGINX_PORT ssl;/" \
+            -e "s|proxy_pass http://127.0.0.1:8024;|proxy_pass http://127.0.0.1:$PI_WEB_PORT;|" \
+            "$project_root/deploy/nginx/pi-web.conf.example"
+    ;;
     *)
         echo "用法: $0 {start|stop|restart|update|status|logs}" >&2
         exit 2

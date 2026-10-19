@@ -50,7 +50,11 @@ function fixture({ conflict = false, failure = '', agent = true, agentVersion = 
   writeFileSync(join(source, 'patches', 'base-commit'), (conflict ? git(upstream, 'rev-parse', 'HEAD') : baseCommit) + '\n');
   mkdirSync(join(source, 'scripts'));
   copyFileSync(join(repo, 'pi-web.conf.example'), join(source, 'pi-web.conf.example'));
-  for (const file of ['install.sh', 'sync.sh', 'pi-web-run-jmfederico.sh']) copyFileSync(join(repo, 'scripts', file), join(source, 'scripts', file));
+  for (const file of ['install.sh', 'install-system-deps.sh', 'sync.sh', 'pi-web-run-jmfederico.sh']) copyFileSync(join(repo, 'scripts', file), join(source, 'scripts', file));
+  // Never invoke the host package manager from application install fixtures.
+  for (const name of ['nginx', 'openssl', 'curl', 'update-ca-certificates']) {
+    writeFileSync(join(bin, name), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  }
   writeFileSync(join(source, '.gitignore'), '/data\n');
   git(source, 'add', '.');
   git(source, 'commit', '-m', 'patch-only root');
@@ -539,5 +543,15 @@ test('install stops before syncing if config and template are missing', () => {
   const result = f.run();
   assert.notEqual(result.status, 0);
   assert.equal(existsSync(join(f.source, 'data/pi-web-upstream.git')), false);
+  assert.equal(readFileSync(f.log, 'utf8'), '');
+});
+
+test('missing system dependency installation failure stops before source sync and npm', () => {
+  const f = fixture();
+  writeFileSync(join(f.source, 'scripts/install-system-deps.sh'), '#!/bin/bash\necho dependency-install-failed >&2\nexit 19\n');
+  const result = f.run();
+  assert.equal(result.status, 19, result.stderr);
+  assert.match(result.stderr, /dependency-install-failed/);
+  assert.equal(existsSync(f.releases), false);
   assert.equal(readFileSync(f.log, 'utf8'), '');
 });

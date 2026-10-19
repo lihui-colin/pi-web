@@ -11,10 +11,11 @@ index 0000000000000000000000000000000000000000..b864cc1c7375582254410edbe397fcf2
 +Add an optional Codex workspace plugin with persistent conversations, streamed responses, tool output, approvals, and model selection using the workspace machine's Codex CLI. Restart sessiond after installing the plugin.
 diff --git a/pi-web-plugins/codex/CodexBrowserRuntime.ts b/pi-web-plugins/codex/CodexBrowserRuntime.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..d6a26fbc21df8b66e23047351b50d476dfe1805a
+index 0000000000000000000000000000000000000000..14f932a66ea1cc256803c2528369fadb008b8f2b
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexBrowserRuntime.ts
-@@ -0,0 +1,462 @@
+@@ -0,0 +1,496 @@
++import { VoiceController } from "./voice/VoiceController.js";
 +import type { PluginPeerChannel, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
 +import { MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, IMAGE_MIME_TYPES, array, errorText, object, string, text, permissionMode, type PermissionMode, chatMode, type ChatMode, type RecordValue } from "./server/protocol.js";
 +
@@ -48,6 +49,7 @@ index 0000000000000000000000000000000000000000..d6a26fbc21df8b66e23047351b50d476
 +  error: string;
 +  notice: string;
 +  voiceInputEnabled: boolean;
++  voice: VoiceController | undefined;
 +  connected: boolean;
 +  pending: boolean;
 +  permissionMode: PermissionMode;
@@ -76,7 +78,7 @@ index 0000000000000000000000000000000000000000..d6a26fbc21df8b66e23047351b50d476
 +    let view = this.views.get(key);
 +    if (view === undefined) {
 +      const threadId = "";
-+      view = { context, key, threadId, draft: this.read(`${key}:${threadId}:draft`), references: this.readReferences(key, threadId), attachments: [], model: this.read(`${key}:${threadId}:model`), effort: this.read(`${key}:${threadId}:effort`), models: [], defaultModel: "", defaultEffort: "", threads: [], cursor: "", snapshot: {}, error: "", notice: "", voiceInputEnabled: false, connected: false, pending: false, permissionMode: this.readPermissionMode(key), mode: this.readMode(key, threadId), modeDirty: this.read(`${key}:${threadId}:mode`) !== "", sending: false, offset: 0, listeners: new Set(), timer: undefined, polling: false, generation: 0 };
++      view = { context, key, threadId, draft: this.read(`${key}:${threadId}:draft`), references: this.readReferences(key, threadId), attachments: [], model: this.read(`${key}:${threadId}:model`), effort: this.read(`${key}:${threadId}:effort`), models: [], defaultModel: "", defaultEffort: "", threads: [], cursor: "", snapshot: {}, error: "", notice: "", voiceInputEnabled: false, voice: undefined, connected: false, pending: false, permissionMode: this.readPermissionMode(key), mode: this.readMode(key, threadId), modeDirty: this.read(`${key}:${threadId}:mode`) !== "", sending: false, offset: 0, listeners: new Set(), timer: undefined, polling: false, generation: 0 };
 +      view.attachments = this.readAttachments(view, threadId);
 +      this.views.set(key, view);
 +    }
@@ -87,7 +89,7 @@ index 0000000000000000000000000000000000000000..d6a26fbc21df8b66e23047351b50d476
 +    view.listeners.add(listener);
 +    if (!view.connected && !view.pending) void this.run(view, () => this.initialize(view));
 +    else { this.schedule(view, 0); this.connect(view); }
-+    return () => { view.listeners.delete(listener); if (view.listeners.size === 0 && view.snapshot["busy"] !== true) this.disconnect(view); };
++    return () => { view.listeners.delete(listener); if (view.listeners.size === 0) this.cancelVoice(view); if (view.listeners.size === 0 && view.snapshot["busy"] !== true) this.disconnect(view); };
 +  }
 +  badge(context: WorkspacePanelContext): string | number | undefined {
 +    const view = this.view(context);
@@ -101,7 +103,12 @@ index 0000000000000000000000000000000000000000..d6a26fbc21df8b66e23047351b50d476
 +    return object(await peer.request(operation, input));
 +  }
 +  async initialize(view: CodexView): Promise<void> {
++    this.cancelVoice(view);
 +    this.disconnect(view); view.generation++;
++    try {
++      const voice = await this.request(view, "voice.status");
++      view.voiceInputEnabled = voice["enabled"] === true; this.changed(view);
++    } catch { view.voiceInputEnabled = false; }
 +    const status = await this.request(view, "status");
 +    view.voiceInputEnabled = status["voiceInputEnabled"] === true;
 +    view.connected = true;
@@ -130,6 +137,7 @@ index 0000000000000000000000000000000000000000..d6a26fbc21df8b66e23047351b50d476
 +    this.changed(view);
 +  }
 +  select(view: CodexView, id: string): void {
++    this.cancelVoice(view);
 +    this.saveDraft(view, view.draft);
 +    this.disconnect(view);
 +    view.generation++;
@@ -181,6 +189,7 @@ index 0000000000000000000000000000000000000000..d6a26fbc21df8b66e23047351b50d476
 +    return view.permissionMode === "full-access" ? {} : { permissionMode: view.permissionMode };
 +  }
 +  saveDraft(view: CodexView, draft: string): void {
++    if (view.voice && view.voice.phase !== "idle") return;
 +    view.draft = draft;
 +    this.write(`${view.key}:${view.threadId}:draft`, draft);
 +  }
@@ -192,6 +201,7 @@ index 0000000000000000000000000000000000000000..d6a26fbc21df8b66e23047351b50d476
 +    } catch { return []; }
 +  }
 +  saveReferences(view: CodexView, paths: string[]): void {
++    if (view.voice && view.voice.phase !== "idle") return;
 +    view.references = [...new Set(paths)].slice(0, 20);
 +    this.write(`${view.key}:${view.threadId}:references`, JSON.stringify(view.references));
 +    this.changed(view);
@@ -256,7 +266,7 @@ index 0000000000000000000000000000000000000000..d6a26fbc21df8b66e23047351b50d476
 +    this.changed(view);
 +  }
 +  async addFiles(view: CodexView, selected: File[]): Promise<void> {
-+    if (this.disposed || view.sending) return;
++    if (this.disposed || view.sending || (view.voice && view.voice.phase !== "idle")) return;
 +    const files = view.context.files;
 +    if (files.capabilityVersion !== 1) throw new Error("File uploads require an updated workspace host.");
 +    if (view.attachments.length + selected.length > MAX_ATTACHMENTS) throw new Error(`Attach at most ${String(MAX_ATTACHMENTS)} files.`);
@@ -293,13 +303,35 @@ index 0000000000000000000000000000000000000000..d6a26fbc21df8b66e23047351b50d476
 +  }
 +  removeAttachment(view: CodexView, id: string): void {
 +    const attachment = view.attachments.find((entry) => entry.id === id);
-+    if (!attachment || view.sending) return;
++    if (!attachment || view.sending || (view.voice && view.voice.phase !== "idle")) return;
 +    this.uploads.get(attachment)?.();
 +    this.uploads.delete(attachment);
 +    if (attachment.preview.startsWith("blob:")) URL.revokeObjectURL(attachment.preview);
 +    this.saveAttachments(view, view.attachments.filter((entry) => entry !== attachment));
 +  }
++  cancelVoice(view: CodexView): void {
++    const voice = view.voice; view.voice = undefined; voice?.cancel(); this.changed(view);
++  }
++  startVoice(view: CodexView): void {
++    if (this.disposed || !view.voiceInputEnabled || view.voice || view.pending || view.sending || view.snapshot["busy"] === true || view.attachments.some((item) => item.status !== "ready")) return;
++    for (const other of this.views.values()) this.cancelVoice(other);
++    const generation = view.generation; const thread = view.threadId; const draft = view.draft;
++    view.error = "";
++    const controller = new VoiceController(view.context.peer, {
++      changed: () => { this.changed(view); },
++      error: (message) => { if (view.voice === controller) { view.voice = undefined; view.error = message; this.changed(view); } },
++      result: (transcript) => {
++        if (this.disposed || view.voice !== controller || view.generation !== generation || view.threadId !== thread) return;
++        view.voice = undefined;
++        if (view.snapshot["busy"] === true || view.sending) { view.error = "会话状态已改变，本次语音未写入草稿，请重新录音。"; this.changed(view); return; }
++        this.saveDraft(view, draft + (draft && !/\s$/u.test(draft) ? "\n" : "") + transcript);
++        this.changed(view);
++      },
++    });
++    view.voice = controller; this.changed(view); void controller.start(thread);
++  }
 +  async send(view: CodexView): Promise<void> {
++    if (view.voice && view.voice.phase !== "idle") return;
 +    if (view.sending) return;
 +    if (view.attachments.some((attachment) => attachment.status !== "ready")) throw new Error("Wait for file uploads or remove failed attachments before sending.");
 +    const attachments = [...view.attachments];
@@ -362,6 +394,7 @@ index 0000000000000000000000000000000000000000..d6a26fbc21df8b66e23047351b50d476
 +    finally { view.pending = false; this.changed(view); this.schedule(view, 0); this.connect(view); }
 +  }
 +  dispose(): void {
++    for (const view of this.views.values()) this.cancelVoice(view);
 +    this.disposed = true;
 +    for (const cancel of this.uploads.values()) cancel();
 +    this.uploads.clear();
@@ -392,6 +425,7 @@ index 0000000000000000000000000000000000000000..d6a26fbc21df8b66e23047351b50d476
 +      }
 +      if (snapshot["changed"] === true) {
 +        view.snapshot = snapshot;
++        if (snapshot["busy"] === true && view.voice) { this.cancelVoice(view); view.notice = "会话已开始执行，录音已取消。"; }
 +        if (!view.modeDirty && (snapshot["mode"] === "plan" || snapshot["mode"] === "default")) this.saveMode(view, snapshot["mode"], false);
 +        this.changed(view);
 +      }
@@ -479,13 +513,14 @@ index 0000000000000000000000000000000000000000..d6a26fbc21df8b66e23047351b50d476
 +}
 diff --git a/pi-web-plugins/codex/CodexPanel.test.ts b/pi-web-plugins/codex/CodexPanel.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..7cf5a7c30fd8dc12b2e18e57aa028051fd35997b
+index 0000000000000000000000000000000000000000..83cb9676d14ec0de921e4aa54acb0f2ab54a840e
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.test.ts
-@@ -0,0 +1,1823 @@
+@@ -0,0 +1,1855 @@
 +// @vitest-environment happy-dom
 +import { afterEach, describe, expect, it, vi } from "vitest";
 +import type { WorkspaceFileUploadOptions, WorkspaceFileUploadTask, PluginPeerChannelOptions, FileContentResponse, FileTreeResponse, JsonValue, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
++import { VoiceController } from "./voice/VoiceController.js";
 +import { CodexPanel } from "./CodexPanel.js";
 +import { CodexBrowserRuntime } from "./CodexBrowserRuntime.js";
 +import type { RecordValue } from "./server/protocol.js";
@@ -2300,18 +2335,49 @@ index 0000000000000000000000000000000000000000..7cf5a7c30fd8dc12b2e18e57aa028051
 +    expect(panel.shadowRoot?.querySelector(".voice-input")).toBeNull();
 +    request.mockImplementation(async (operation) => operation === "status" ? { voiceInputEnabled: true } : { changed: false });
 +    await runtime.initialize(view); panel.requestUpdate(); await panel.updateComplete;
-+    expect(required(panel.shadowRoot?.querySelector<HTMLButtonElement>(".voice-input")).disabled).toBe(true);
++    expect(required(panel.shadowRoot?.querySelector<HTMLButtonElement>(".voice-input")).disabled).toBe(false);
 +    request.mockResolvedValue({ changed: false });
 +    await runtime.initialize(view); panel.requestUpdate(); await panel.updateComplete;
 +    expect(panel.shadowRoot?.querySelector(".voice-input")).toBeNull();
 +  });
 +});
++
++
++describe("voice composer isolation", () => {
++  it("locks draft and references, cancels on thread selection, and restores controls", async () => {
++    const f = await fixture();
++    vi.spyOn(VoiceController.prototype, "start").mockResolvedValue(undefined);
++    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
++    f.view.voiceInputEnabled = true;
++    f.runtime.saveDraft(f.view, "original"); f.runtime.saveReferences(f.view, ["keep.ts"]);
++    f.runtime.startVoice(f.view); const voice = f.view.voice;
++    f.runtime.saveDraft(f.view, "must not replace"); f.runtime.saveReferences(f.view, []);
++    await f.panel.updateComplete;
++    expect(f.textarea.readOnly).toBe(true);
++    expect(f.view.draft).toBe("original"); expect(f.view.references).toEqual(["keep.ts"]);
++    expect(f.panel.shadowRoot?.querySelector('[aria-label="取消录音"]')).not.toBeNull();
++    expect(f.panel.shadowRoot?.querySelector('[aria-label="停止并转写"]')).not.toBeNull();
++    expect(f.panel.shadowRoot?.querySelector('[aria-label="转写后发送"]')).toBeNull();
++    f.runtime.select(f.view, "another"); await f.panel.updateComplete;
++    expect(voice?.phase).toBe("idle"); expect(f.view.voice).toBeUndefined(); expect(f.textarea.readOnly).toBe(false);
++  });
++  it("cancels when the panel unmounts", async () => {
++    const f = await fixture(); vi.spyOn(VoiceController.prototype, "start").mockResolvedValue(undefined);
++    f.view.voiceInputEnabled = true; f.runtime.startVoice(f.view); const voice = f.view.voice;
++    f.panel.remove(); expect(voice?.phase).toBe("idle"); expect(f.view.voice).toBeUndefined();
++  });
++  it("does not record while Codex is busy", async () => {
++    const f = await fixture(); const start = vi.spyOn(VoiceController.prototype, "start").mockResolvedValue(undefined);
++    f.view.voiceInputEnabled = true; f.view.snapshot = { busy: true }; f.runtime.startVoice(f.view);
++    expect(start).not.toHaveBeenCalled(); expect(f.view.voice).toBeUndefined();
++  });
++});
 diff --git a/pi-web-plugins/codex/CodexPanel.ts b/pi-web-plugins/codex/CodexPanel.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..4262ab7ae79ff2277e3965e2362dc84f99e9809f
+index 0000000000000000000000000000000000000000..0226116a620c7dcefb01a5d0b9f6f749df9d121b
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.ts
-@@ -0,0 +1,1045 @@
+@@ -0,0 +1,1095 @@
 +import { LitElement, css, html, svg, nothing } from "lit";
 +import { property } from "lit/decorators.js";
 +import { repeat } from "lit/directives/repeat.js";
@@ -2413,7 +2479,12 @@ index 0000000000000000000000000000000000000000..4262ab7ae79ff2277e3965e2362dc84f
 +    }
 +  };
 +  private readonly onMenuKeydown = (event: KeyboardEvent): void => {
-+    if (event.key === "Escape") { this.closeMenus(true); this.cancelArchive(); }
++    if (event.key === "Escape") { if (this.view?.voice) this.runtime?.cancelVoice(this.view); this.closeMenus(true); this.cancelArchive(); }
++  };
++  private voiceAnimation: number | undefined;
++  private readonly voiceLevels: number[] = Array.from({ length: 32 }, () => 0);
++  private readonly onVoiceVisibility = (): void => {
++    if (this.ownerDocument.hidden && this.view?.voice) { this.runtime?.cancelVoice(this.view); this.view.notice = "页面进入后台，录音已取消。"; this.requestUpdate(); }
 +  };
 +  override connectedCallback(): void {
 +    super.connectedCallback();
@@ -2422,9 +2493,13 @@ index 0000000000000000000000000000000000000000..4262ab7ae79ff2277e3965e2362dc84f
 +    this.ownerDocument.addEventListener("click", this.dismissMenus, true);
 +    this.ownerDocument.addEventListener("focusin", this.dismissMenus, true);
 +    this.ownerDocument.addEventListener("keydown", this.onMenuKeydown);
++    this.ownerDocument.addEventListener("visibilitychange", this.onVoiceVisibility);
 +    this.requestUpdate();
 +  }
 +  override disconnectedCallback(): void {
++    this.ownerDocument.removeEventListener("visibilitychange", this.onVoiceVisibility);
++    if (this.voiceAnimation !== undefined) cancelAnimationFrame(this.voiceAnimation);
++    this.voiceAnimation = undefined;
 +    this.reviewDrag = undefined;
 +    this.clearReviewFile();
 +    this.ownerDocument.removeEventListener("pointerdown", this.dismissMenus, true);
@@ -2456,6 +2531,7 @@ index 0000000000000000000000000000000000000000..4262ab7ae79ff2277e3965e2362dc84f
 +    this.unsubscribe = this.runtime.subscribe(view, () => { this.requestUpdate(); });
 +  }
 +  protected override updated(): void {
++    this.drawVoice();
 +    if (this.reviewScroll && this.reviewOpen && !this.reviewLoading) {
 +      this.reviewScroll = false;
 +      const source = this.renderRoot.querySelector<HTMLElement>(".file-source");
@@ -2529,7 +2605,42 @@ index 0000000000000000000000000000000000000000..4262ab7ae79ff2277e3965e2362dc84f
 +    // Keep the browser's native caret placement when a tap already focused the editor.
 +    if (editor && !editor.matches(":focus")) editor.focus({ preventScroll: true });
 +  }
++  private renderVoice(view: CodexView): ReturnType<typeof html> {
++    const voice = view.voice;
++    const recording = voice?.phase === "recording";
++    const status = voice?.phase === "preparing" ? "准备麦克风…" : recording ? `正在录音 ${String(Math.floor(voice.seconds))} 秒` : voice?.limitReached === true ? "已达录音时长上限，正在转写…" : "正在转写…";
++    return html`<div class="voice-controls" aria-label="语音录音">
++      <button aria-label="取消录音" title="取消录音 (Esc)" @click=${() => { this.runtime?.cancelVoice(view); }}>×</button>
++      <canvas class="voice-wave" aria-hidden="true"></canvas>
++      <button aria-label="停止并转写" title="停止并转写" ?disabled=${!recording} @click=${() => { void voice?.finish(); }}>■</button>
++    </div><div class="voice-status" role="status">${status}</div>${voice?.preview !== undefined && voice.preview !== "" ? html`<div class="voice-preview">${voice.preview}</div>` : nothing}`;
++  }
++  private drawVoice(): void {
++    if (this.voiceAnimation !== undefined || !this.view?.voice) return;
++    let last = 0;
++    const draw = (now: number): void => {
++      this.voiceAnimation = undefined;
++      const canvas = this.renderRoot.querySelector<HTMLCanvasElement>(".voice-wave");
++      const voice = this.view?.voice;
++      if (!canvas || !voice || !this.isConnected) return;
++      const ctx = canvas.getContext("2d");
++      if (!ctx) return;
++      if (now - last >= 50) {
++        last = now;
++        const width = Math.max(1, canvas.clientWidth); const scale = globalThis.devicePixelRatio || 1;
++        canvas.width = width * scale; canvas.height = 40 * scale; ctx.scale(scale, scale);
++        if (this.ownerDocument.defaultView?.matchMedia("(prefers-reduced-motion: reduce)").matches === true) this.voiceLevels.fill(voice.phase === "recording" ? voice.level : 0);
++        else { this.voiceLevels.shift(); this.voiceLevels.push(voice.phase === "recording" ? voice.level : 0); }
++        ctx.fillStyle = getComputedStyle(canvas).color;
++        const gap = width / this.voiceLevels.length;
++        this.voiceLevels.forEach((level, index) => { const height = Math.max(3, level * 34); ctx.beginPath(); ctx.roundRect(index * gap, (40 - height) / 2, 3, height, 1.5); ctx.fill(); });
++      }
++      this.voiceAnimation = requestAnimationFrame(draw);
++    };
++    this.voiceAnimation = requestAnimationFrame(draw);
++  }
 +  private composerKeydown(event: KeyboardEvent, view: CodexView): void {
++    if (view.voice) { event.preventDefault(); if (event.key === "Escape") this.runtime?.cancelVoice(view); return; }
 +    this.navigateInputHistory(event, view);
 +    if (event.key !== "Enter" || event.shiftKey || event.isComposing || this.composing) return;
 +    // Match the host composer's touch/narrow-screen default, independent of this panel's width.
@@ -2756,7 +2867,7 @@ index 0000000000000000000000000000000000000000..4262ab7ae79ff2277e3965e2362dc84f
 +    return html`<div class="settings-menu">${this.renderPermissionPicker(view)}${!this.isMobileComposer() ? this.renderPlanStatus(view) : nothing}</div>`;
 +  }
 +  private addFiles(view: CodexView, files: File[]): void {
-+    if (files.length === 0 || view.pending || view.sending) return;
++    if (files.length === 0 || view.pending || view.sending || view.voice !== undefined) return;
 +    view.error = "";
 +    void this.runtime?.addFiles(view, files).catch((error: unknown) => { view.error = errorText(error); this.requestUpdate(); });
 +  }
@@ -2779,7 +2890,7 @@ index 0000000000000000000000000000000000000000..4262ab7ae79ff2277e3965e2362dc84f
 +        <div><span class="attachment-name" title=${attachment.name}>${attachment.name}</span><small>${attachment.size < 1024 ? `${String(attachment.size)} B` : attachment.size < 1024 * 1024 ? `${(attachment.size / 1024).toFixed(1)} KiB` : `${(attachment.size / (1024 * 1024)).toFixed(1)} MiB`}</small>
 +          ${attachment.status === "uploading" ? html`<small role="status">Uploading ${attachment.progress}%</small>` : attachment.status === "error" ? html`<small class="error" role="alert">${attachment.error} · Remove and select again to retry.</small>` : nothing}
 +        </div>
-+        <button aria-label=${`Remove file ${attachment.name}`} ?disabled=${view.sending} @click=${() => { this.runtime?.removeAttachment(view, attachment.id); }}>×</button>
++        <button aria-label=${`Remove file ${attachment.name}`} ?disabled=${view.sending || view.voice !== undefined} @click=${() => { this.runtime?.removeAttachment(view, attachment.id); }}>×</button>
 +      </div>`)}
 +    </div>`;
 +  }
@@ -2984,21 +3095,21 @@ index 0000000000000000000000000000000000000000..4262ab7ae79ff2277e3965e2362dc84f
 +            <button class="remove-queued" aria-label="Remove queued message" title="Remove queued message" ?disabled=${view.pending || !view.connected} @click=${() => { this.action((runtime, state) => runtime.request(state, "removeQueued", { threadId: state.threadId, messageId: message["id"] ?? "" })); }}>×</button>
 +          </div></div>`)}
 +        </section>` : nothing}
-+        ${view.references.length > 0 ? html`<div class="context-tray" aria-label="Selected workspace context">${view.references.map((path) => html`<span title=${path}>${path}<button aria-label=${`Remove ${path}`} ?disabled=${view.pending} @click=${() => { this.runtime?.saveReferences(view, view.references.filter((entry) => entry !== path)); }}>×</button></span>`)}</div>` : nothing}
++        ${view.references.length > 0 ? html`<div class="context-tray" aria-label="Selected workspace context">${view.references.map((path) => html`<span title=${path}>${path}<button aria-label=${`Remove ${path}`} ?disabled=${view.pending || view.voice !== undefined} @click=${() => { this.runtime?.saveReferences(view, view.references.filter((entry) => entry !== path)); }}>×</button></span>`)}</div>` : nothing}
 +        <input class="file-input" type="file" multiple hidden aria-label="Upload files from this device" @change=${(event: Event) => { if (event.target instanceof HTMLInputElement) { const files = Array.from(event.target.files ?? []); event.target.value = ""; this.addFiles(view, files); } }}>
 +        ${this.renderAttachmentTray(view)}
-+        <textarea @paste=${(event: ClipboardEvent) => { this.pasteFiles(event, view); }} aria-label="Message Codex" enterkeyhint="enter" placeholder=${queueInput ? "Add to the queue, or use Steer after sending..." : view.mode === "plan" ? "Describe your task to generate a plan..." : home ? "Ask Codex to start a new conversation" : "Ask for follow-up changes"} .value=${view.draft}
++        <textarea ?readonly=${view.voice !== undefined} @paste=${(event: ClipboardEvent) => { this.pasteFiles(event, view); }} aria-label="Message Codex" enterkeyhint="enter" placeholder=${queueInput ? "Add to the queue, or use Steer after sending..." : view.mode === "plan" ? "Describe your task to generate a plan..." : home ? "Ask Codex to start a new conversation" : "Ask for follow-up changes"} .value=${view.draft}
 +          @input=${(event: Event) => { if (event.target instanceof HTMLTextAreaElement) { this.historyNavigation = undefined; this.runtime?.saveDraft(view, event.target.value); this.requestUpdate(); } }}
 +          @compositionstart=${() => { this.composing = true; }} @compositionend=${() => { this.composing = false; }}
 +          @keydown=${(event: KeyboardEvent) => { this.composerKeydown(event, view); }}></textarea>
-+        <div class="composer-controls">
++        ${view.voice ? this.renderVoice(view) : html`<div class="composer-controls">
 +          <div class="composer-leading">${this.renderContextPicker(view)}${this.isMobileComposer() ? this.renderPlanStatus(view) : this.renderComposerSettings(view)}</div>
 +          <div class="composer-trailing">${this.renderModelPicker(view)}
-+          ${view.voiceInputEnabled ? html`<button class="voice-input" aria-label="Voice input" title="Voice input is not implemented yet" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2" width="6" height="13" rx="3"></rect><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"></path></svg></button>` : nothing}
++          ${view.voiceInputEnabled ? html`<button class="voice-input" aria-label="Voice input" title="语音输入" ?disabled=${view.pending || view.sending || busy || attachmentsPending} @click=${() => { this.closeMenus(); this.runtime?.startVoice(view); }}><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2" width="6" height="13" rx="3"></rect><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"></path></svg></button>` : nothing}
 +          ${busy && hasInput ? html`<button class="stop-response" aria-label="Stop response" title="Stop response" ?disabled=${view.pending || view.sending || !view.connected} @click=${() => { this.action((runtime, state) => runtime.request(state, "stop", { threadId: state.threadId })); }}><span class="stop-icon" aria-hidden="true"></span></button>` : nothing}
 +          <button class="primary" aria-label=${view.sending ? "Sending message" : stopAction ? "Stop response" : queueInput ? "Queue message" : "Send message"} title=${view.sending ? "Sending message" : stopAction ? "Stop response" : queueInput ? "Queue message" : "Send message"} aria-busy=${view.sending} ?disabled=${view.pending || view.sending || !view.connected || (!stopAction && attachmentsPending) || (!busy && !hasInput)} @click=${() => { this.action((runtime, state) => stopAction ? runtime.request(state, "stop", { threadId: state.threadId }) : runtime.send(state)); }}>${view.sending ? html`<span class="send-spinner" aria-hidden="true"></span>` : stopAction ? html`<span class="stop-icon" aria-hidden="true"></span>` : html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20V4m-7 7 7-7 7 7"></path></svg>`}</button>
 +          </div>
-+        </div>
++        </div>`}
 +      </footer>
 +      <div class="connection-status" role="status">${view.pending ? "Working…" : text(snapshot["status"]) || (view.connected ? "Ready" : "Connecting…")}</div>
 +      </main>
@@ -3207,6 +3318,11 @@ index 0000000000000000000000000000000000000000..4262ab7ae79ff2277e3965e2362dc84f
 +    .queued-message { padding:6px 0; }
 +    .queued-message p { flex:1; min-width:0; margin:0; white-space:pre-wrap; overflow-wrap:anywhere; max-height:72px; overflow:auto; font-size:12px; }
 +    .queue-actions { flex:none; gap:4px; } .steer-queued,.resume-queue { font-size:12px; }
++    .voice-controls { display:flex; align-items:center; gap:8px; margin-top:8px; }
++    .voice-controls button { flex:none; width:44px; height:44px; border-radius:50%; background:var(--pi-surface-hover,#ededed); color:var(--pi-text,#171717); font-size:21px; }
++    .voice-wave { display:block; flex:1; min-width:0; width:80px; height:40px; color:var(--pi-muted,#888); }
++    .voice-status,.voice-preview { font-size:12px; color:var(--pi-muted,#888); margin-top:5px; overflow-wrap:anywhere; }
++    .voice-preview { max-height:4em; overflow:auto; }
 +    .voice-input { display:flex; align-items:center; justify-content:center; flex:none; width:32px; height:32px; color:var(--pi-muted,#707070); }
 +    .voice-input svg { width:20px; height:20px; fill:none; stroke:currentColor; stroke-width:1.7; stroke-linecap:round; stroke-linejoin:round; }
 +    .send-spinner { width:14px; height:14px; border:2px solid currentColor; border-right-color:transparent; border-radius:50%; animation:send-spin .7s linear infinite; } @keyframes send-spin { to { transform:rotate(360deg); } } @media(prefers-reduced-motion:reduce) { .send-spinner { animation:none; } }
@@ -3513,6 +3629,227 @@ index 0000000000000000000000000000000000000000..b46170701b2cd5074207c09ca25e8a45
 +  },
 +};
 +export default plugin;
+diff --git a/pi-web-plugins/codex/server/capsWriterService.test.ts b/pi-web-plugins/codex/server/capsWriterService.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..823348acd27900900c608ee1a9b3fb85f76c818f
+--- /dev/null
++++ b/pi-web-plugins/codex/server/capsWriterService.test.ts
+@@ -0,0 +1,74 @@
++import { afterEach, expect, it, vi } from "vitest";
++import { WebSocketServer, type WebSocket } from "ws";
++import type { JsonValue, ServerPluginPeerChannelOpenContext } from "@jmfederico/pi-web/server-plugin-api";
++import { CapsWriterService } from "./capsWriterService.js";
++import { object } from "./protocol.js";
++const cleanup: (() => Promise<void>)[] = [];
++afterEach(async () => { vi.useRealTimers(); for (const close of cleanup.splice(0)) await close(); });
++async function fixture() {
++  const upstream = new WebSocketServer({ host: "127.0.0.1", port: 0 });
++  await new Promise<void>((accept) => { upstream.once("listening", accept); });
++  const address = upstream.address(); if (typeof address === "string" || !address) throw new Error("Missing port");
++  const received: Record<string, JsonValue>[] = []; let socket: WebSocket | undefined;
++  upstream.on("connection", (connection) => { socket = connection; connection.on("message", (raw) => { received.push(object(JSON.parse(Buffer.isBuffer(raw) ? raw.toString() : Array.isArray(raw) ? Buffer.concat(raw).toString() : Buffer.from(raw).toString()))); }); });
++  const authority = vi.fn(() => Promise.resolve({ workspace: { path: "/repo" } }));
++  const settings = { enabled: true, url: `ws://127.0.0.1:${String(address.port)}/`, maxSeconds: 120, finalTimeoutMs: 1000 };
++  const service = new CapsWriterService(authority, () => settings);
++  cleanup.push(async () => { service.dispose(); for (const client of upstream.clients) client.terminate(); await new Promise<void>((accept) => { upstream.close(() => { accept(); }); }); });
++  const abort = new AbortController(); const frames: Record<string, JsonValue>[] = [];
++  const context: ServerPluginPeerChannelOpenContext = { project: { id: "p", name: "p", path: "/repo" }, workspace: { id: "w", projectId: "p", path: "/repo", label: "main", isMain: true }, operation: "voice", input: { version: 1, recordingId: "recording" }, signal: abort.signal, send: (frame) => { frames.push(object(frame)); } };
++  const audio = (seq = 1, pcmBase64 = Buffer.alloc(6400).toString("base64")): JsonValue => ({ type: "audio", recordingId: "recording", seq, samples: 1600, pcmBase64 });
++  return { service, authority, settings, context, frames, received, audio, abort, reply: (value: JsonValue) => { socket?.send(JSON.stringify(value)); } };
++}
++it("forwards PCM, emits ack, keeps cumulative partials and drains final before close", async () => {
++  const f = await fixture(); const channel = await f.service.openChannel(f.context);
++  expect(f.frames[0]).toMatchObject({ type: "ready", sampleRate: 16000 });
++  await channel.receive(f.audio(), f.abort.signal);
++  await vi.waitFor(() => { expect(f.received).toHaveLength(1); });
++  expect(f.received[0]).toMatchObject({ source: "mic", is_final: false, context: "", language: "auto", seg_duration: 15, seg_overlap: 2 });
++  expect(f.frames).toContainEqual({ type: "ack", recordingId: "recording", seq: 1 });
++  const task = f.received[0]?.["task_id"] ?? "";
++  f.reply({ task_id: task, text: "临时", is_final: false });
++  await channel.receive({ type: "finish", recordingId: "recording", seq: 1 }, f.abort.signal);
++  await vi.waitFor(() => { expect(f.received).toHaveLength(2); });
++  expect(f.received[1]).toMatchObject({ task_id: task, data: "", is_final: true, time_start: f.received[0]?.["time_start"] });
++  f.reply({ task_id: task, text: "最终文字", is_final: true });
++  await channel.closed;
++  expect(f.frames.slice(-2)).toMatchObject([{ type: "partial", text: "临时", version: 1 }, { type: "final", text: "最终文字", version: 2 }]);
++});
++it.each(["sequence", "base64", "nan", "recording", "duration"])("rejects invalid %s without forwarding it", async (kind) => {
++  const f = await fixture(); if (kind === "duration") f.settings.maxSeconds = .01;
++  const channel = await f.service.openChannel(f.context);
++  const frame = object(f.audio());
++  if (kind === "sequence") frame["seq"] = 2;
++  if (kind === "base64") frame["pcmBase64"] = "!";
++  if (kind === "nan") { const bytes = Buffer.alloc(6400); bytes.writeFloatLE(NaN); frame["pcmBase64"] = bytes.toString("base64"); }
++  if (kind === "recording") frame["recordingId"] = "wrong";
++  await channel.receive(frame, f.abort.signal); await channel.closed;
++  expect(f.frames.at(-1)).toMatchObject({ type: "error", code: kind === "duration" ? "AUDIO_TOO_LONG" : "AUDIO_INVALID" }); expect(f.received).toHaveLength(0);
++});
++it("rechecks workspace authority before connecting and supports disabled deployment", async () => {
++  const f = await fixture(); f.authority.mockResolvedValue({ workspace: { path: "/other" } });
++  await expect(f.service.openChannel(f.context)).rejects.toThrow("workspace");
++  f.authority.mockResolvedValue({ workspace: { path: "/repo" } }); f.settings.enabled = false;
++  await expect(f.service.openChannel(f.context)).rejects.toThrow("未启用");
++  expect(await f.service.status(f.context)).toMatchObject({ enabled: false, ready: false });
++});
++it("propagates upstream busy errors and ignores late results after cancellation", async () => {
++  const f = await fixture(); const channel = await f.service.openChannel(f.context);
++  f.reply({ error: "ASR_BUSY" }); await channel.closed;
++  expect(f.frames.at(-1)).toMatchObject({ type: "error", code: "ASR_BUSY" });
++  const g = await fixture(); const other = await g.service.openChannel(g.context); g.abort.abort(); await other.closed;
++  expect(g.frames).toHaveLength(1);
++});
++it("times out finalization and no-audio connections", async () => {
++  const f = await fixture(); const channel = await f.service.openChannel(f.context);
++  await channel.receive(f.audio(), f.abort.signal);
++  await channel.receive({ type: "finish", recordingId: "recording", seq: 1 }, f.abort.signal);
++  await channel.closed; expect(f.frames.at(-1)).toMatchObject({ code: "ASR_TIMEOUT" });
++});
++it("rejects empty recordings", async () => {
++  const f = await fixture(); const channel = await f.service.openChannel(f.context);
++  await channel.receive({ type: "finish", recordingId: "recording", seq: 0 }, f.abort.signal);
++  await channel.closed; expect(f.frames.at(-1)).toMatchObject({ code: "NO_SPEECH" });
++});
+diff --git a/pi-web-plugins/codex/server/capsWriterService.ts b/pi-web-plugins/codex/server/capsWriterService.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..c72bff01d871511e51fa580ba289b7c2219dce11
+--- /dev/null
++++ b/pi-web-plugins/codex/server/capsWriterService.ts
+@@ -0,0 +1,135 @@
++import { randomUUID } from "node:crypto";
++import { request as httpRequest } from "node:http";
++import { request as httpsRequest } from "node:https";
++import { resolve } from "node:path";
++import WebSocket from "ws";
++import type { JsonValue, ServerPluginPeerRequestContext, ServerPluginPeerChannelOpenContext, ServerPluginPeerChannel } from "@jmfederico/pi-web/server-plugin-api";
++import { object, text } from "./protocol.js";
++import { VOICE_RATE, VOICE_FRAME_SAMPLES, VOICE_QUEUE_FRAMES, voiceMessage, VOICE_ERRORS } from "./voiceProtocol.js";
++
++type Authority = (selection: { projectId: string; workspaceId: string }) => Promise<{ workspace: { path: string } }>;
++export interface VoiceSettings { enabled: boolean; url: string; maxSeconds: number; finalTimeoutMs: number }
++export function voiceSettings(): VoiceSettings {
++  const url = new URL(process.env["PI_WEB_CAPSWRITER_URL"] ?? "ws://127.0.0.1:6016/");
++  if (!["ws:", "wss:"].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error("Invalid CapsWriter URL");
++  const maxSeconds = Number(process.env["PI_WEB_VOICE_MAX_SECONDS"] ?? 120);
++  const finalTimeoutMs = Number(process.env["PI_WEB_VOICE_FINAL_TIMEOUT_MS"] ?? 30000);
++  if (!Number.isInteger(maxSeconds) || maxSeconds < 1 || maxSeconds > 120 || !Number.isInteger(finalTimeoutMs) || finalTimeoutMs < 1000 || finalTimeoutMs > 120000) throw new Error("Invalid voice limits");
++  return { enabled: process.env["PI_WEB_VOICE_INPUT_ENABLED"] === "true", url: url.href, maxSeconds, finalTimeoutMs };
++}
++
++/** One upstream connection per recording; the model service owns global admission. */
++export class CapsWriterService {
++  private readonly closers = new Set<() => void>();
++  private disposed = false;
++  constructor(private readonly authority: Authority, private readonly settings: () => VoiceSettings = voiceSettings) {}
++  private async authorize(context: ServerPluginPeerRequestContext): Promise<void> {
++    context.signal.throwIfAborted();
++    const current = await this.authority({ projectId: context.project.id, workspaceId: context.workspace.id });
++    if (resolve(current.workspace.path) !== resolve(context.workspace.path) || this.disposed) throw new Error("Voice workspace unavailable");
++    context.signal.throwIfAborted();
++  }
++  async status(context: ServerPluginPeerRequestContext): Promise<JsonValue> {
++    await this.authorize(context);
++    const settings = this.settings();
++    const limits = { maxSeconds: settings.maxSeconds, finalTimeoutMs: settings.finalTimeoutMs };
++    if (!settings.enabled) return { enabled: false, ready: false, ...limits };
++    try {
++      const url = new URL(settings.url); url.protocol = url.protocol === "wss:" ? "https:" : "http:"; url.pathname = "/healthz";
++      const health = await new Promise<Record<string, unknown>>((accept, reject) => {
++        const request = (url.protocol === "https:" ? httpsRequest : httpRequest)(url, {
++          signal: AbortSignal.any([context.signal, AbortSignal.timeout(1500)]),
++        }, (response) => {
++          let data = "";
++          response.on("data", (chunk: Buffer) => { data += chunk.toString(); if (Buffer.byteLength(data) > 16384) request.destroy(new Error("Invalid health response")); });
++          response.on("error", reject);
++          response.on("end", () => { try { if (response.statusCode !== 200) throw new Error("Unavailable"); accept(object(JSON.parse(data))); } catch { reject(new Error("Invalid health response")); } });
++        });
++        request.on("error", reject); request.end();
++      });
++      return { enabled: true, ready: health["ready"] === true, busy: health["busy"] === true, tested: health["last_success"] != null, ...limits };
++    } catch { return { enabled: true, ready: false, ...limits }; }
++  }
++  async openChannel(context: ServerPluginPeerChannelOpenContext): Promise<ServerPluginPeerChannel> {
++    await this.authorize(context);
++    const settings = this.settings();
++    if (!settings.enabled) throw new Error(voiceMessage("ASR_DISABLED"));
++    const input = object(context.input);
++    const recordingId = text(input["recordingId"]);
++    if (input["version"] !== 1 || !/^[\w-]{1,80}$/u.test(recordingId)) throw new Error(voiceMessage("AUDIO_INVALID"));
++    if (this.closers.size >= 8) throw new Error(voiceMessage("ASR_BUSY"));
++    const socket = new WebSocket(settings.url, "binary", { maxPayload: 65536, handshakeTimeout: 5000, perMessageDeflate: false });
++    const taskId = randomUUID(); const timeStart = Date.now() / 1000;
++    let ended = false; const isClosed = (): boolean => ended || this.disposed; let finishing = false; let sequence = 0; let samples = 0; let version = 0;
++    let pending = 0; let lastFrame = Date.now(); let finalAt = 0;
++    let complete = (): void => undefined;
++    const closed = new Promise<void>((accept) => { complete = accept; });
++    const emit = (data: Record<string, JsonValue>): void => { if (!ended) context.send({ ...data, recordingId }); };
++    const close = (): void => {
++      if (ended) return;
++      ended = true; clearInterval(timer); context.signal.removeEventListener("abort", close);
++      this.closers.delete(close); socket.terminate(); complete();
++    };
++    const fail = (code: string): void => { if (ended) return; try { emit({ type: "error", code, message: voiceMessage(code) }); } catch { /* Host channel already closed. */ } finally { close(); } };
++    const timer = setInterval(() => {
++      if (finishing ? Date.now() - finalAt > settings.finalTimeoutMs : Date.now() - lastFrame > 5000 || Date.now() / 1000 - timeStart > settings.maxSeconds + 5) fail("ASR_TIMEOUT");
++    }, 250);
++    this.closers.add(close); context.signal.addEventListener("abort", close, { once: true });
++    socket.on("error", () => { fail("ASR_UNAVAILABLE"); });
++    socket.on("close", () => { if (!ended) fail("ASR_UNAVAILABLE"); });
++    socket.on("message", (raw) => {
++      if (ended) return;
++      try {
++        const result = object(JSON.parse(Buffer.isBuffer(raw) ? raw.toString() : Array.isArray(raw) ? Buffer.concat(raw).toString() : Buffer.from(raw).toString()));
++        if (typeof result["error"] === "string") { fail(Object.hasOwn(VOICE_ERRORS, result["error"]) ? result["error"] : "ASR_FAILED"); return; }
++        if (result["task_id"] !== taskId || typeof result["text"] !== "string" || Buffer.byteLength(result["text"]) > 32768 || typeof result["is_final"] !== "boolean") { fail("ASR_FAILED"); return; }
++        if (result["is_final"]) {
++          if (!finishing) { fail("ASR_FAILED"); return; }
++          if (!result["text"].trim()) { fail("NO_SPEECH"); return; }
++          emit({ type: "final", text: result["text"], version: ++version }); close();
++        } else emit({ type: "partial", text: result["text"], version: ++version });
++      } catch { fail("ASR_FAILED"); }
++    });
++    try {
++      await new Promise<void>((accept, reject) => {
++        socket.once("open", accept); socket.once("error", reject);
++        void closed.then(() => { reject(new Error(voiceMessage("ASR_UNAVAILABLE"))); });
++      });
++      context.signal.throwIfAborted();
++      if (isClosed()) throw new Error(voiceMessage("ASR_UNAVAILABLE"));
++      emit({ type: "ready", version: 1, sampleRate: VOICE_RATE, maxFrameSamples: VOICE_FRAME_SAMPLES, maxSeconds: settings.maxSeconds, finalTimeoutMs: settings.finalTimeoutMs });
++    } catch (error) { close(); throw error; }
++    const send = (data: string, final: boolean, seq: number): void => {
++      if (++pending > VOICE_QUEUE_FRAMES || socket.bufferedAmount > 200000) { fail("QUEUE_OVERFLOW"); return; }
++      socket.send(JSON.stringify({ task_id: taskId, source: "mic", data, is_final: final, time_start: timeStart, seg_duration: 15, seg_overlap: 2, context: "", language: "auto" }), (error) => {
++        pending--; if (ended) return;
++        if (error) { fail("ASR_UNAVAILABLE"); return; }
++        if (!final) { try { emit({ type: "ack", seq }); } catch { close(); } }
++      });
++    };
++    return { closed, close, receive: (raw, signal) => {
++      if (ended) return;
++      if (signal.aborted || context.signal.aborted) { close(); return; }
++      try {
++        if (Buffer.byteLength(JSON.stringify(raw)) > 16384) { fail("AUDIO_INVALID"); return; }
++        const frame = object(raw);
++        if (frame["recordingId"] !== recordingId) { fail("AUDIO_INVALID"); return; }
++        if (frame["type"] === "cancel") { close(); return; }
++        if (finishing) { fail("AUDIO_INVALID"); return; }
++        if (frame["type"] === "finish") {
++          if (frame["seq"] !== sequence) { fail("AUDIO_INVALID"); return; }
++          if (samples === 0) { fail("NO_SPEECH"); return; }
++          finishing = true; finalAt = Date.now(); send("", true, sequence); return;
++        }
++        if (frame["type"] !== "audio" || frame["seq"] !== sequence + 1 || typeof frame["pcmBase64"] !== "string") { fail("AUDIO_INVALID"); return; }
++        const data = Buffer.from(frame["pcmBase64"], "base64");
++        if (data.length < 4 || data.length > VOICE_FRAME_SAMPLES * 4 || data.length % 4 || data.length / 4 !== frame["samples"] || data.toString("base64") !== frame["pcmBase64"]) { fail("AUDIO_INVALID"); return; }
++        for (let offset = 0; offset < data.length; offset += 4) { const value = data.readFloatLE(offset); if (!Number.isFinite(value) || Math.abs(value) > 1) { fail("AUDIO_INVALID"); return; } }
++        samples += data.length / 4;
++        if (samples > settings.maxSeconds * VOICE_RATE) { fail("AUDIO_TOO_LONG"); return; }
++        lastFrame = Date.now(); sequence++; send(frame["pcmBase64"], false, sequence);
++      } catch { fail("AUDIO_INVALID"); }
++    } };
++  }
++  dispose(): void { this.disposed = true; for (const close of this.closers) close(); }
++}
 diff --git a/pi-web-plugins/codex/server/codexProtocol.test.ts b/pi-web-plugins/codex/server/codexProtocol.test.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..03af5471f7b60d68897d499640bd994e41b11a28
@@ -5601,11 +5938,12 @@ index 0000000000000000000000000000000000000000..6d559bb4b33c44a5ccce590038f2bee0
 +export const IMAGE_MIME_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
 diff --git a/pi-web-plugins/codex/server/server-plugin.ts b/pi-web-plugins/codex/server/server-plugin.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..eba8e32d3745d2f14afbd86fb26bd2493ab8f1f4
+index 0000000000000000000000000000000000000000..fa4ded7046ada4be5cdbd36c479a81543fdb3e5e
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/server-plugin.ts
-@@ -0,0 +1,36 @@
+@@ -0,0 +1,41 @@
 +import type { PluginCapability, PiWebHostWorkspacesV1, PiWebServerPlugin } from "@jmfederico/pi-web/server-plugin-api";
++import { CapsWriterService } from "./capsWriterService.js";
 +import { CodexService } from "./codexService.js";
 +
 +// Portable capability descriptor: bundled plugin package scopes cannot resolve
@@ -5631,16 +5969,564 @@ index 0000000000000000000000000000000000000000..eba8e32d3745d2f14afbd86fb26bd249
 +      if (workspaces === undefined) throw new Error("Codex workspace authority unavailable");
 +      return workspaces.resolve(selection);
 +    });
-+    const dispose = (): void => { service.dispose(); };
++    const voice = new CapsWriterService(async (selection) => {
++      if (workspaces === undefined) throw new Error("Voice workspace authority unavailable");
++      return workspaces.resolve(selection);
++    });
++    const dispose = (): void => { voice.dispose(); service.dispose(); };
 +    context.lifetimeSignal.addEventListener("abort", dispose, { once: true });
 +    return {
 +      start: ({ capabilities }) => { workspaces = capabilities.resolve(workspacesCapability); },
-+      peer: { request: (request) => service.request(request), openChannel: (request) => service.openChannel(request) },
++      peer: { request: (request) => request.operation === "voice.status" ? voice.status(request) : service.request(request), openChannel: (request) => request.operation === "voice" ? voice.openChannel(request) : service.openChannel(request) },
 +      dispose: () => { context.lifetimeSignal.removeEventListener("abort", dispose); dispose(); },
 +    };
 +  },
 +};
 +export default plugin;
+diff --git a/pi-web-plugins/codex/server/voiceProtocol.ts b/pi-web-plugins/codex/server/voiceProtocol.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..c9f0ece36e0ed722dec35315c01498947d57ef43
+--- /dev/null
++++ b/pi-web-plugins/codex/server/voiceProtocol.ts
+@@ -0,0 +1,30 @@
++export const VOICE_RATE = 16000;
++export const VOICE_FRAME_SAMPLES = 1600;
++export const VOICE_QUEUE_FRAMES = 20;
++export const VOICE_ERRORS: Readonly<Record<string, string>> = {
++  ASR_DISABLED: "语音输入未启用，请先安装并验收语音服务。",
++  ASR_UNAVAILABLE: "无法连接语音服务，请检查工作区机器上的语音服务。",
++  ASR_BUSY: "语音服务正在处理其他录音，请稍后重试。",
++  ASR_TIMEOUT: "语音处理超时，请重新录音。",
++  AUDIO_INVALID: "录音数据异常，请重新录音。",
++  AUDIO_TOO_LONG: "录音超出时长限制。",
++  QUEUE_OVERFLOW: "音频传输拥塞，本次录音已取消。",
++  NO_SPEECH: "没有识别到有效语音，请重新录音。",
++  ASR_FAILED: "语音识别失败，请重新录音。",
++  MIC_PERMISSION_DENIED: "未获得麦克风权限，请允许此网站使用麦克风。",
++  MIC_UNAVAILABLE: "无法启动麦克风，可能被通话或其他应用占用；请关闭占用麦克风的应用，并检查系统麦克风权限。",
++  MIC_START_ABORTED: "浏览器中止了麦克风启动，请保持页面在前台并重试。",
++  MIC_SECURITY_BLOCKED: "浏览器安全策略禁止录音，请使用系统浏览器打开，并检查 HTTPS 证书信任和麦克风权限。",
++  MIC_CONSTRAINTS_FAILED: "当前麦克风不支持所需录音设置，请更换输入设备后重试。",
++  MIC_START_FAILED: "麦克风启动失败，请检查系统和网站的麦克风权限，并尝试用系统浏览器打开。",
++  MIC_DISCONNECTED: "麦克风连接已断开，请检查耳机或输入设备后重试。",
++  AUDIO_INIT_FAILED: "浏览器音频启动失败，请保持页面在前台，再次点击语音按钮。",
++  AUDIO_WORKLET_LOAD_FAILED: "录音组件加载失败，请检查网络和 HTTPS 证书信任，刷新页面后重试。",
++  AUDIO_PROCESSOR_FAILED: "浏览器音频处理器运行失败，请刷新页面或更换浏览器后重试。",
++  AUDIO_RATE_UNSUPPORTED: "当前麦克风采样率不受支持，请断开蓝牙通话耳机后使用手机麦克风重试。",
++  MIC_NOT_FOUND: "未找到可用的麦克风。",
++  INSECURE_CONTEXT: "录音需要 HTTPS 或 localhost，请通过安全地址打开页面。",
++  CAPTURE_UNSUPPORTED: "当前浏览器不支持录音，请使用支持 AudioWorklet 的浏览器。",
++  CAPTURE_FAILED: "麦克风录音中断，请检查设备后重试。",
++};
++export function voiceMessage(code: string): string { return VOICE_ERRORS[code] ?? VOICE_ERRORS["ASR_FAILED"] ?? "语音识别失败"; }
+diff --git a/pi-web-plugins/codex/voice/AudioCapture.test.ts b/pi-web-plugins/codex/voice/AudioCapture.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..a98f9b538d9d17f716c93720bd977729bbb18262
+--- /dev/null
++++ b/pi-web-plugins/codex/voice/AudioCapture.test.ts
+@@ -0,0 +1,58 @@
++// @vitest-environment happy-dom
++import { afterEach, expect, it, vi } from "vitest";
++import { AudioCapture } from "./AudioCapture.js";
++afterEach(() => { vi.unstubAllGlobals(); });
++it("stops media granted after cancellation without creating a worklet", async () => {
++  const stop = vi.fn(); const addModule = vi.fn(); const close = vi.fn(() => Promise.resolve());
++  let granted: (value: unknown) => void = () => undefined;
++  vi.stubGlobal("isSecureContext", true);
++  vi.stubGlobal("AudioContext", class { resume = () => Promise.resolve(); close = close; state = "running"; audioWorklet = { addModule }; });
++  const worklet = vi.fn(); vi.stubGlobal("AudioWorkletNode", worklet);
++  vi.stubGlobal("navigator", { mediaDevices: { getUserMedia: () => new Promise((resolve) => { granted = resolve; }) } });
++  const capture = new AudioCapture(vi.fn(), vi.fn()); const prepared = capture.prepare(); capture.close();
++  granted({ getTracks: () => [{ stop }] }); await prepared;
++  expect(stop).toHaveBeenCalledOnce(); expect(close).toHaveBeenCalledOnce(); expect(addModule).not.toHaveBeenCalled(); expect(worklet).not.toHaveBeenCalled();
++});
++it("rejects insecure pages before asking for permission", async () => {
++  vi.stubGlobal("isSecureContext", false);
++  const permission = vi.fn(); vi.stubGlobal("navigator", { mediaDevices: { getUserMedia: permission } });
++  const capture = new AudioCapture(vi.fn(), vi.fn()); await expect(capture.prepare()).rejects.toThrow("INSECURE_CONTEXT");
++  expect(permission).not.toHaveBeenCalled();
++});
++it.each([
++  ["NotAllowedError", "MIC_PERMISSION_DENIED"],
++  ["NotReadableError", "MIC_UNAVAILABLE"],
++  ["NotFoundError", "MIC_NOT_FOUND"],
++  ["AbortError", "MIC_START_ABORTED"],
++  ["SecurityError", "MIC_SECURITY_BLOCKED"],
++  ["OverconstrainedError", "MIC_CONSTRAINTS_FAILED"],
++  ["UnknownError", "MIC_START_FAILED"],
++])("reports %s as a microphone startup failure, including non-DOMException errors", async (name, code) => {
++  vi.stubGlobal("isSecureContext", true);
++  const close = vi.fn(() => Promise.resolve());
++  vi.stubGlobal("AudioContext", class { resume = () => Promise.resolve(); close = close; state = "running"; });
++  vi.stubGlobal("AudioWorkletNode", vi.fn());
++  vi.stubGlobal("navigator", { mediaDevices: { getUserMedia: () => Promise.reject(Object.assign(new Error("Microphone startup failed"), { name })) } });
++  const capture = new AudioCapture(vi.fn(), vi.fn());
++  await expect(capture.prepare()).rejects.toThrow(code);
++  capture.close();
++  expect(close).toHaveBeenCalledOnce();
++});
++
++it.each(["resume", "module", "rate"])("identifies %s failure and releases the microphone on cleanup", async (stage) => {
++  const stop = vi.fn();
++  vi.stubGlobal("isSecureContext", true);
++  vi.stubGlobal("AudioContext", class {
++    state = "running";
++    sampleRate = stage === "rate" ? 8000 : 48000;
++    resume = () => stage === "resume" ? Promise.reject(new Error("blocked")) : Promise.resolve();
++    close = () => Promise.resolve();
++    audioWorklet = { addModule: () => stage === "module" ? Promise.reject(new Error("network")) : Promise.resolve() };
++  });
++  vi.stubGlobal("AudioWorkletNode", vi.fn());
++  vi.stubGlobal("navigator", { mediaDevices: { getUserMedia: () => Promise.resolve({ getTracks: () => [{ stop, addEventListener: vi.fn() }] }) } });
++  const capture = new AudioCapture(vi.fn(), vi.fn());
++  await expect(capture.prepare()).rejects.toThrow(stage === "resume" ? "AUDIO_INIT_FAILED" : stage === "module" ? "AUDIO_WORKLET_LOAD_FAILED" : "AUDIO_RATE_UNSUPPORTED");
++  capture.close();
++  expect(stop).toHaveBeenCalledOnce();
++});
+diff --git a/pi-web-plugins/codex/voice/AudioCapture.ts b/pi-web-plugins/codex/voice/AudioCapture.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..253f7117940a6b411f6e1dfc3cbb2336ff853b46
+--- /dev/null
++++ b/pi-web-plugins/codex/voice/AudioCapture.ts
+@@ -0,0 +1,87 @@
++import workletUrl from "./audio-worklet.ts?worker&url";
++export interface Capture {
++  prepare(): Promise<void>;
++  start(): void;
++  finish(): Promise<void>;
++  close(): void;
++}
++export class AudioCapture implements Capture {
++  private context: AudioContext | undefined;
++  private stream: MediaStream | undefined;
++  private source: MediaStreamAudioSourceNode | undefined;
++  private node: AudioWorkletNode | undefined;
++  private stopped = false;
++  private isStopped(): boolean { return this.stopped; }
++  private flushed: (() => void) | undefined;
++  constructor(private readonly audio: (samples: Float32Array) => void, private readonly failed: (code: string) => void) {}
++  async prepare(): Promise<void> {
++    if (!globalThis.isSecureContext) throw new Error("INSECURE_CONTEXT");
++    if (typeof AudioContext === "undefined" || typeof AudioWorkletNode === "undefined" || (typeof navigator.mediaDevices === "undefined" || typeof navigator.mediaDevices.getUserMedia !== "function")) throw new Error("CAPTURE_UNSUPPORTED");
++    let context: AudioContext;
++    try { context = new AudioContext(); }
++    catch (error) { throw new Error("AUDIO_INIT_FAILED", { cause: error }); }
++    this.context = context;
++    // Resume in the original click task, before permission/transport awaits.
++    const resumed = context.resume().catch((error: unknown) => { throw new Error("AUDIO_INIT_FAILED", { cause: error }); }); void resumed.catch(() => undefined);
++    let stream: MediaStream;
++    try { stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } }); }
++    catch (error) { throw new Error(microphoneErrorCode(error), { cause: error }); }
++    if (this.isStopped()) { for (const track of stream.getTracks()) track.stop(); return; }
++    this.stream = stream;
++    for (const track of stream.getTracks()) track.addEventListener("ended", () => { if (!this.isStopped()) this.failed("MIC_DISCONNECTED"); });
++    await resumed;
++    if (typeof context.audioWorklet === "undefined") throw new Error("CAPTURE_UNSUPPORTED");
++    try { await context.audioWorklet.addModule(workletUrl); }
++    catch (error) { throw new Error("AUDIO_WORKLET_LOAD_FAILED", { cause: error }); }
++    if (this.isStopped()) return;
++    if (context.sampleRate < 16000 || context.sampleRate > 192000) throw new Error("AUDIO_RATE_UNSUPPORTED");
++    try { this.node = new AudioWorkletNode(context, "codex-voice"); }
++    catch (error) { throw new Error("AUDIO_PROCESSOR_FAILED", { cause: error }); }
++    this.node.onprocessorerror = () => { if (!this.isStopped()) this.failed("AUDIO_PROCESSOR_FAILED"); };
++    this.node.port.onmessage = (event: MessageEvent<unknown>) => {
++      if (this.isStopped() || typeof event.data !== "object" || event.data === null) return;
++      const type: unknown = Reflect.get(event.data, "type");
++      const samples: unknown = Reflect.get(event.data, "samples");
++      if (type === "flushed") this.flushed?.();
++      else if (type === "audio" && samples instanceof Float32Array) this.audio(samples);
++    };
++    this.source = context.createMediaStreamSource(stream);
++  }
++  start(): void {
++    if (this.isStopped() || !this.context || !this.node || !this.source) throw new Error("CAPTURE_FAILED");
++    this.source.connect(this.node); this.node.connect(this.context.destination);
++    // The processor leaves its output silent: input is never played locally.
++  }
++  async finish(): Promise<void> {
++    if (!this.node || this.isStopped()) return;
++    await new Promise<void>((accept, reject) => {
++      const timeout = setTimeout(() => { reject(new Error("CAPTURE_FAILED")); }, 2000);
++      this.flushed = () => { clearTimeout(timeout); accept(); };
++      this.node?.port.postMessage("finish");
++    });
++    this.close();
++  }
++  close(): void {
++    this.stopped = true; this.flushed?.(); this.flushed = undefined;
++    this.source?.disconnect(); this.node?.disconnect(); this.node?.port.close();
++    for (const track of this.stream?.getTracks() ?? []) track.stop();
++    if (this.context && this.context.state !== "closed") void this.context.close().catch(() => undefined);
++  }
++}
++
++// Some mobile browsers reject with Error-like objects rather than DOMException.
++function microphoneErrorCode(error: unknown): string {
++  const name = typeof error === "object" && error !== null && "name" in error ? error.name : undefined;
++  switch (name) {
++    case "NotAllowedError":
++    case "PermissionDeniedError": return "MIC_PERMISSION_DENIED";
++    case "NotFoundError":
++    case "DevicesNotFoundError": return "MIC_NOT_FOUND";
++    case "NotReadableError":
++    case "TrackStartError": return "MIC_UNAVAILABLE";
++    case "AbortError": return "MIC_START_ABORTED";
++    case "SecurityError": return "MIC_SECURITY_BLOCKED";
++    case "OverconstrainedError": return "MIC_CONSTRAINTS_FAILED";
++    default: return "MIC_START_FAILED";
++  }
++}
+diff --git a/pi-web-plugins/codex/voice/VoiceController.test.ts b/pi-web-plugins/codex/voice/VoiceController.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..d20f7d6a294fd810e04799b8472dd92d093bb820
+--- /dev/null
++++ b/pi-web-plugins/codex/voice/VoiceController.test.ts
+@@ -0,0 +1,85 @@
++// @vitest-environment happy-dom
++import { afterEach, expect, it, vi } from "vitest";
++import type { JsonValue, PluginPeerChannelOptions, PluginPeerChannelClose } from "@jmfederico/pi-web/plugin-api";
++import { object, text } from "../server/protocol.js";
++import { VoiceController } from "./VoiceController.js";
++import type { Capture } from "./AudioCapture.js";
++const controllers: VoiceController[] = [];
++afterEach(() => { for (const controller of controllers) controller.cancel(); controllers.length = 0; vi.useRealTimers(); vi.unstubAllGlobals(); });
++function fixture(prepare: () => Promise<void> = () => Promise.resolve()) {
++  let emitAudio: (samples: Float32Array) => void = () => undefined;
++  let onData: (data: JsonValue) => void = () => undefined;
++  let disconnected: (value: PluginPeerChannelClose) => void = () => undefined;
++  const result = vi.fn(); const error = vi.fn(); const frames: JsonValue[] = [];
++  const capture = { prepare: vi.fn(prepare), start: vi.fn(), finish: vi.fn(() => { emitAudio(new Float32Array(80).fill(.1)); return Promise.resolve(); }), close: vi.fn() } satisfies Capture;
++  const channel = { send: (frame: JsonValue) => { frames.push(frame); }, close: vi.fn(), closed: new Promise<PluginPeerChannelClose>((resolve) => { disconnected = resolve; }) };
++  const peer = {
++    request: vi.fn().mockResolvedValue({ enabled: true, ready: true, busy: false }),
++    openChannel: vi.fn((_op: string, input: JsonValue, options: PluginPeerChannelOptions) => {
++      onData = options.onData;
++      const id = text(object(input)["recordingId"]);
++      onData({ type: "ready", recordingId: id, version: 1, sampleRate: 16000, maxSeconds: 120, finalTimeoutMs: 30000 });
++      return Promise.resolve(channel);
++    }),
++  };
++  const controller = new VoiceController(peer, { result, error, changed: vi.fn() }, (audio) => { emitAudio = audio; return capture; });
++  controllers.push(controller);
++  const emit = (frame: Record<string, JsonValue>): void => { onData({ recordingId: controller.recordingId, ...frame }); };
++  return { controller, result, error, frames, capture, peer, emit, audio: (data = new Float32Array(1600).fill(.25)) => { emitAudio(data); }, disconnect: () => { disconnected({ code: 1000, reason: "", wasClean: true }); } };
++}
++it("flushes tail before finish and returns the transcript once for editing", async () => {
++  const f = fixture(); await f.controller.start(""); f.audio();
++  f.emit({ type: "partial", version: 1, text: "临时" }); expect(f.result).not.toHaveBeenCalled();
++  await f.controller.finish(); await f.controller.finish();
++  expect(f.frames).toMatchObject([{ type: "audio", seq: 1, samples: 1600 }, { type: "audio", seq: 2, samples: 80 }, { type: "finish", seq: 2 }]);
++  f.emit({ type: "final", version: 2, text: "完整文字" }); f.emit({ type: "final", version: 2, text: "完整文字" });
++  f.disconnect(); await Promise.resolve();
++  expect(f.result).toHaveBeenCalledExactlyOnceWith("完整文字"); expect(f.error).not.toHaveBeenCalled(); expect(f.capture.close).toHaveBeenCalled();
++});
++it("cancels pending permission and ignores late completion", async () => {
++  let ready = (): void => undefined; const f = fixture(() => new Promise<void>((resolve) => { ready = resolve; }));
++  const started = f.controller.start(""); f.controller.cancel(); ready(); await started;
++  expect(f.capture.close).toHaveBeenCalled(); expect(f.peer.openChannel).not.toHaveBeenCalled(); expect(f.result).not.toHaveBeenCalled();
++});
++it("cancels finalization and ignores late final", async () => {
++  const f = fixture(); await f.controller.start("thread"); f.audio(); await f.controller.finish(); f.controller.cancel();
++  f.emit({ type: "final", version: 1, text: "迟到" }); expect(f.result).not.toHaveBeenCalled();
++});
++it("fails on congestion instead of dropping frames", async () => {
++  const f = fixture(); await f.controller.start(""); for (let i = 0; i < 21; i++) f.audio();
++  expect(f.error).toHaveBeenCalledWith(expect.stringContaining("拥塞")); expect(f.result).not.toHaveBeenCalled();
++});
++it("uses acknowledgements to release bounded frame capacity", async () => {
++  const f = fixture(); await f.controller.start(""); for (let i = 1; i <= 35; i++) { f.audio(); f.emit({ type: "ack", seq: i }); }
++  expect(f.error).not.toHaveBeenCalled(); expect(f.frames).toHaveLength(35);
++});
++it("cancels on disconnect and backend errors", async () => {
++  const f = fixture(); await f.controller.start(""); f.disconnect(); await Promise.resolve();
++  expect(f.error).toHaveBeenCalled(); expect(f.capture.close).toHaveBeenCalled();
++  const g = fixture(); await g.controller.start(""); g.emit({ type: "error", code: "NO_SPEECH" });
++  expect(g.error).toHaveBeenCalledWith(expect.stringContaining("有效语音"));
++});
++it("times out finalization without sending", async () => {
++  vi.useFakeTimers(); const f = fixture(); await f.controller.start(""); f.audio(); await f.controller.finish();
++  await vi.advanceTimersByTimeAsync(33000); expect(f.error).toHaveBeenCalled(); expect(f.result).not.toHaveBeenCalled();
++});
++it("automatic limit finishes without an automatic send", async () => {
++  vi.useFakeTimers(); const f = fixture(); await f.controller.start(""); f.audio();
++  await vi.advanceTimersByTimeAsync(120000); f.emit({ type: "final", version: 1, text: "完成" });
++  expect(f.result).toHaveBeenCalledExactlyOnceWith("完成");
++});
++
++it("reports insecure HTTP without randomUUID instead of throwing during construction", async () => {
++  vi.stubGlobal("isSecureContext", false);
++  vi.stubGlobal("crypto", {});
++  const error = vi.fn(); const result = vi.fn();
++  const peer = { request: vi.fn(), openChannel: vi.fn() };
++  const controller = new VoiceController(peer, { error, result, changed: vi.fn() });
++  controllers.push(controller);
++  await controller.start("");
++  expect(error).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("HTTPS 或 localhost"));
++  expect(controller.phase).toBe("idle");
++  expect(peer.request).not.toHaveBeenCalled();
++  expect(peer.openChannel).not.toHaveBeenCalled();
++  expect(result).not.toHaveBeenCalled();
++});
+diff --git a/pi-web-plugins/codex/voice/VoiceController.ts b/pi-web-plugins/codex/voice/VoiceController.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..9d1c00433090b93de2b3186509f20975066226fa
+--- /dev/null
++++ b/pi-web-plugins/codex/voice/VoiceController.ts
+@@ -0,0 +1,122 @@
++import type { PluginPeerChannel, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
++import { object, text } from "../server/protocol.js";
++import { VOICE_RATE, VOICE_QUEUE_FRAMES, voiceMessage } from "../server/voiceProtocol.js";
++import { AudioCapture, type Capture } from "./AudioCapture.js";
++export type VoicePhase = "preparing" | "recording" | "finalizing" | "idle";
++interface Callbacks {
++  changed(): void;
++  result(text: string): void;
++  error(message: string): void;
++}
++export class VoiceController {
++  phase: VoicePhase = "preparing";
++  seconds = 0;
++  limitReached = false;
++  level = 0;
++  preview = "";
++  private id = "";
++  get recordingId(): string { return this.id; }
++  private readonly abort = new AbortController();
++  private channel: PluginPeerChannel | undefined;
++  private capture: Capture;
++  private ended = false;
++  private isEnded(): boolean { return this.ended; }
++  private sequence = 0;
++  private ack = 0;
++  private samples = 0;
++  private maxSeconds = 120;
++  private finalTimeout = 30000;
++  private version = 0;
++  private finalSent = false;
++  private timer: ReturnType<typeof setTimeout> | undefined;
++  private ticker: ReturnType<typeof setInterval> | undefined;
++  constructor(private readonly peer: WorkspacePanelContext["peer"], private readonly callbacks: Callbacks,
++    factory: (audio: (data: Float32Array) => void, failed: (code: string) => void) => Capture = (audio, failed) => new AudioCapture(audio, failed)) {
++    this.capture = factory((data) => { this.audio(data); }, (code) => { this.fail(code); });
++  }
++  async start(threadId: string): Promise<void> {
++    this.callbacks.changed();
++    try {
++      if (!this.peer?.openChannel || !this.peer.request) throw new Error("ASR_UNAVAILABLE");
++      await this.capture.prepare();
++      if (this.isEnded()) return;
++      this.id = crypto.randomUUID();
++      const status = object(await this.peer.request("voice.status", {}, { signal: this.abort.signal }));
++      if (this.isEnded()) return;
++      if (status["enabled"] !== true) throw new Error("ASR_DISABLED");
++      if (status["ready"] !== true) throw new Error("ASR_UNAVAILABLE");
++      if (status["busy"] === true) throw new Error("ASR_BUSY");
++      let ready = (): void => undefined;
++      const readyPromise = new Promise<void>((accept) => { ready = accept; });
++      this.timer = setTimeout(() => { ready(); this.fail("ASR_TIMEOUT"); }, 7000);
++      const channel = await this.peer.openChannel("voice", { version: 1, recordingId: this.recordingId, threadId }, {
++        signal: this.abort.signal, onData: (raw) => {
++          if (this.isEnded()) return;
++          const frame = object(raw);
++          if (frame["recordingId"] !== this.recordingId) { this.fail("AUDIO_INVALID"); return; }
++          if (frame["type"] === "ready") {
++            if (frame["version"] !== 1 || frame["sampleRate"] !== VOICE_RATE || typeof frame["maxSeconds"] !== "number" || frame["maxSeconds"] < 1 || frame["maxSeconds"] > 120 || typeof frame["finalTimeoutMs"] !== "number" || frame["finalTimeoutMs"] < 1000 || frame["finalTimeoutMs"] > 120000) { this.fail("AUDIO_INVALID"); ready(); return; }
++            this.maxSeconds = frame["maxSeconds"]; this.finalTimeout = frame["finalTimeoutMs"]; ready();
++          } else if (frame["type"] === "ack") {
++            const seq = frame["seq"];
++            if (typeof seq !== "number" || seq !== this.ack + 1 || seq > this.sequence) { this.fail("AUDIO_INVALID"); return; }
++            this.ack = seq;
++          } else if (frame["type"] === "error") this.fail(text(frame["code"]));
++          else if (frame["type"] === "partial" || frame["type"] === "final") {
++            if (typeof frame["version"] !== "number" || frame["version"] <= this.version || typeof frame["text"] !== "string" || frame["text"].length > 32768) { this.fail("AUDIO_INVALID"); return; }
++            this.version = frame["version"];
++            if (frame["type"] === "partial") { this.preview = frame["text"]; this.callbacks.changed(); }
++            else {
++              if (!this.finalSent || !frame["text"].trim()) { this.fail("NO_SPEECH"); return; }
++              this.cleanup(); this.callbacks.result(frame["text"].trim());
++            }
++          }
++        },
++      });
++      if (this.isEnded()) { channel.close(); return; }
++      this.channel = channel;
++      void channel.closed.then(() => { ready(); if (!this.isEnded()) { this.fail("ASR_UNAVAILABLE"); } }, () => { ready(); this.fail("ASR_UNAVAILABLE"); });
++      await readyPromise;
++      if (this.isEnded()) return;
++      clearTimeout(this.timer);
++      this.phase = "recording"; this.capture.start(); this.callbacks.changed();
++      this.timer = setTimeout(() => { this.limitReached = true; void this.finish(); }, this.maxSeconds * 1000);
++      this.ticker = setInterval(() => { if (this.phase === "recording") this.callbacks.changed(); }, 1000);
++    } catch (error) { this.fail(error instanceof Error ? error.message : "CAPTURE_FAILED"); }
++  }
++  private audio(input: Float32Array): void {
++    if (this.isEnded() || this.finalSent || !this.channel || this.phase === "preparing") return;
++    const available = this.maxSeconds * VOICE_RATE - this.samples;
++    const samples = input.subarray(0, Math.max(0, available));
++    if (!samples.length) return;
++    if (samples.length > 1600 || this.sequence - this.ack >= VOICE_QUEUE_FRAMES) { this.fail("QUEUE_OVERFLOW"); return; }
++    const data = new Uint8Array(samples.length * 4); const view = new DataView(data.buffer);
++    let power = 0;
++    for (let i = 0; i < samples.length; i++) { const sample = samples[i] ?? 0; view.setFloat32(i * 4, sample, true); power += sample * sample; }
++    this.level = Math.min(1, Math.sqrt(power / samples.length) * 4);
++    this.samples += samples.length; this.seconds = this.samples / VOICE_RATE;
++    try { this.channel.send({ type: "audio", recordingId: this.recordingId, seq: ++this.sequence, samples: samples.length, pcmBase64: btoa(String.fromCharCode(...data)) }); }
++    catch { this.fail("QUEUE_OVERFLOW"); return; }
++    if (this.samples >= this.maxSeconds * VOICE_RATE) { this.limitReached = true; if (this.phase === "recording") void this.finish(); }
++  }
++  async finish(): Promise<void> {
++    if (this.isEnded() || this.phase !== "recording") return;
++    this.phase = "finalizing"; this.callbacks.changed();
++    clearTimeout(this.timer);
++    this.timer = setTimeout(() => { this.fail("ASR_TIMEOUT"); }, this.finalTimeout + 2500);
++    try {
++      await this.capture.finish();
++      if (this.isEnded()) return;
++      if (!this.samples) { this.fail("NO_SPEECH"); return; }
++      this.finalSent = true;
++      this.channel?.send({ type: "finish", recordingId: this.recordingId, seq: this.sequence });
++    } catch (error) { this.fail(error instanceof Error ? error.message : "CAPTURE_FAILED"); }
++  }
++  cancel(): void { if (!this.isEnded()) { this.cleanup(); this.callbacks.changed(); } }
++  private fail(code: string): void { if (!this.isEnded()) { this.cleanup(); this.callbacks.error(voiceMessage(code)); } }
++  private cleanup(): void {
++    this.ended = true; this.phase = "idle";
++    clearTimeout(this.timer); clearInterval(this.ticker); this.capture.close();
++    this.abort.abort(); this.channel?.close(); this.level = 0;
++  }
++}
+diff --git a/pi-web-plugins/codex/voice/assets.d.ts b/pi-web-plugins/codex/voice/assets.d.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..ad20e43b50f347072a77e24e16387e66b5499489
+--- /dev/null
++++ b/pi-web-plugins/codex/voice/assets.d.ts
+@@ -0,0 +1 @@
++declare module "*?worker&url" { const url: string; export default url; }
+diff --git a/pi-web-plugins/codex/voice/audio-worklet.ts b/pi-web-plugins/codex/voice/audio-worklet.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..7abf1a07fcb60fda9069e16f850fc4c83ce1fc57
+--- /dev/null
++++ b/pi-web-plugins/codex/voice/audio-worklet.ts
+@@ -0,0 +1,37 @@
++import { Resampler } from "./resampler.js";
++declare const sampleRate: number;
++declare class AudioWorkletProcessor { readonly port: MessagePort; }
++declare function registerProcessor(name: string, processor: typeof AudioWorkletProcessor): void;
++
++class VoiceProcessor extends AudioWorkletProcessor {
++  private buffer = new Float32Array(1600);
++  private used = 0;
++  private ended = false;
++  private readonly resampler = new Resampler(sampleRate, (value) => {
++    this.buffer[this.used++] = value;
++    if (this.used === this.buffer.length) this.send();
++  });
++  constructor() {
++    super();
++    this.port.onmessage = (event: MessageEvent<unknown>) => {
++      if (event.data === "finish" && !this.ended) {
++        this.ended = true; this.resampler.flush(); this.send(); this.port.postMessage({ type: "flushed" });
++      }
++    };
++  }
++  private send(): void {
++    if (!this.used) return;
++    const samples = this.buffer.slice(0, this.used);
++    this.port.postMessage({ type: "audio", samples }, [samples.buffer]); this.used = 0;
++  }
++  process(inputs: Float32Array[][]): boolean {
++    if (this.ended) return false;
++    const channels = inputs[0];
++    const count = channels?.[0]?.length ?? 128;
++    const mono = new Float32Array(count);
++    if (channels !== undefined && channels.length > 0) for (const channel of channels) for (let i = 0; i < count; i++) mono[i] = (mono[i] ?? 0) + (channel[i] ?? 0) / channels.length;
++    this.resampler.push(mono);
++    return true;
++  }
++}
++registerProcessor("codex-voice", VoiceProcessor);
+diff --git a/pi-web-plugins/codex/voice/resampler.test.ts b/pi-web-plugins/codex/voice/resampler.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..5488b23cee1eeeaf20dc97b1f5bf87ad2895b2b7
+--- /dev/null
++++ b/pi-web-plugins/codex/voice/resampler.test.ts
+@@ -0,0 +1,25 @@
++import { describe, expect, it } from "vitest";
++import { Resampler } from "./resampler.js";
++function convert(rate: number, frequency: number, block = 128): number[] {
++  const output: number[] = []; const resampler = new Resampler(rate, (value) => { output.push(value); });
++  const input = Float32Array.from({ length: rate }, (_, i) => Math.sin(2 * Math.PI * frequency * i / rate));
++  for (let i = 0; i < input.length; i += block) resampler.push(input.subarray(i, i + block));
++  resampler.flush(); return output;
++}
++const rms = (values: number[]): number => Math.sqrt(values.reduce((sum, value) => sum + value * value, 0) / values.length);
++describe("voice resampling", () => {
++  it.each([16000, 44100, 48000, 96000])("preserves duration and voice band at %i Hz", (rate) => {
++    const audio = convert(rate, 1000);
++    expect(audio.length).toBe(16000); expect(rms(audio.slice(100, -100))).toBeGreaterThan(.68);
++    expect(audio.every((value) => Number.isFinite(value) && Math.abs(value) <= 1)).toBe(true);
++  });
++  it.each([44100, 48000])("rejects frequencies above Nyquist at %i Hz", (rate) => {
++    expect(rms(convert(rate, 12000).slice(100, -100))).toBeLessThan(.01);
++  });
++  it("preserves phase across variable blocks and flushes the tail", () => {
++    expect(convert(44100, 997, 1)).toEqual(convert(44100, 997, 137));
++    const result: number[] = []; const resampler = new Resampler(48000, (sample) => { result.push(sample); });
++    resampler.push(new Float32Array(480).fill(.5)); resampler.flush();
++    expect(result.length).toBe(160); expect(result.at(-10)).toBeGreaterThan(.45);
++  });
++});
+diff --git a/pi-web-plugins/codex/voice/resampler.ts b/pi-web-plugins/codex/voice/resampler.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..5bf83b97bdb5bbe95b5f6946189c7503b8f32a46
+--- /dev/null
++++ b/pi-web-plugins/codex/voice/resampler.ts
+@@ -0,0 +1,45 @@
++/** Streaming 63-tap low-pass FIR followed by fractional-rate interpolation.
++ * History and phase are retained across worklet blocks. flush() drains the
++ * filter delay without extending the original recording's duration. */
++export class Resampler {
++  private readonly coefficients: number[];
++  private readonly history = new Float64Array(63);
++  private cursor = 0;
++  private count = 0;
++  private original = 0;
++  private produced = 0;
++  private previous = 0;
++  private next: number;
++  private readonly ratio: number;
++  constructor(rate: number, private readonly emit: (sample: number) => void) {
++    if (!Number.isFinite(rate) || rate < 16000 || rate > 192000) throw new Error("Unsupported sample rate");
++    this.ratio = rate / 16000;
++    this.next = 31 + this.ratio - 1;
++    const cutoff = 7000 / rate;
++    const taps = Array.from({ length: 63 }, (_, index) => {
++      const x = index - 31;
++      const sinc = x === 0 ? 2 * cutoff : Math.sin(2 * Math.PI * cutoff * x) / (Math.PI * x);
++      return sinc * (0.54 - 0.46 * Math.cos(2 * Math.PI * index / 62));
++    });
++    const sum = taps.reduce((a, b) => a + b, 0);
++    this.coefficients = taps.map((tap) => tap / sum);
++  }
++  push(input: Float32Array): void { for (const value of input) { this.original++; this.sample(value, Infinity); } }
++  flush(): void {
++    const target = Math.floor(this.original / this.ratio);
++    while (this.produced < target) this.sample(0, target);
++  }
++  private sample(value: number, target: number): void {
++    this.history[this.cursor] = Number.isFinite(value) ? Math.max(-1, Math.min(1, value)) : 0;
++    let filtered = 0;
++    for (let index = 0; index < 63; index++) filtered += (this.coefficients[index] ?? 0) * (this.history[(this.cursor - index + 63) % 63] ?? 0);
++    this.cursor = (this.cursor + 1) % 63;
++    const time = this.count++;
++    if (time >= this.next && this.produced < target) {
++      const fraction = this.next - (time - 1);
++      this.emit(Math.max(-1, Math.min(1, this.previous + fraction * (filtered - this.previous))));
++      this.produced++; this.next += this.ratio;
++    }
++    this.previous = filtered;
++  }
++}
 diff --git a/pi-web-plugins/files/workspaceMarkdown.ts b/pi-web-plugins/files/workspaceMarkdown.ts
 index 42e25cf03fb70e5a5384908b3d5e4d83251cb132..c22d6e4c089031aabd9d195a071bdf1e1e2dd9de 100644
 --- a/pi-web-plugins/files/workspaceMarkdown.ts
@@ -5786,11 +6672,12 @@ index 84c5e06a280a16955a9fe76fe4448be4a1553ecd..71df44c9cda0c9a474dc30ba9e710424
    const readyPath = join(tempDir, "dist/.plugins-ready");
 diff --git a/scripts/codex-plugin.artifact.mjs b/scripts/codex-plugin.artifact.mjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..4b12dec425526f6d8acd01da9425d5b61bb0b9cb
+index 0000000000000000000000000000000000000000..e34fa52fb352a340cd985271889a5e6370eb16c8
 --- /dev/null
 +++ b/scripts/codex-plugin.artifact.mjs
-@@ -0,0 +1,34 @@
-+import { readFile } from "node:fs/promises";
+@@ -0,0 +1,54 @@
++import { runInNewContext } from "node:vm";
++import { readFile, readdir } from "node:fs/promises";
 +import { resolve } from "node:path";
 +import { pathToFileURL } from "node:url";
 +import { Window } from "happy-dom";
@@ -5823,6 +6710,25 @@ index 0000000000000000000000000000000000000000..4b12dec425526f6d8acd01da9425d5b6
 +    browser.happyDOM.abort();
 +    for (const name of names) { const descriptor = original.get(name); if (descriptor === undefined) delete globalThis[name]; else Object.defineProperty(globalThis, name, descriptor); }
 +  }
++});
++
++
++it("ships a standalone audio worklet with resampling and tail flush", async () => {
++  const directory = resolve("dist/pi-web-plugins/codex/browser/assets");
++  const asset = (await readdir(directory)).find((name) => /^audio-worklet-.*\.js$/u.test(name));
++  expect(asset).toBeDefined();
++  const messages = [];
++  let Processor;
++  class Base { port = { postMessage: (message) => messages.push(message), onmessage: undefined }; }
++  runInNewContext(await readFile(resolve(directory, asset), "utf8"), {
++    AudioWorkletProcessor: Base, sampleRate: 48000,
++    registerProcessor: (name, processor) => { expect(name).toBe("codex-voice"); Processor = processor; },
++  });
++  const processor = new Processor();
++  for (let i = 0; i < 40; i++) processor.process([[new Float32Array(128).fill(.1)]]);
++  processor.port.onmessage({ data: "finish" });
++  expect(messages.at(-1)).toEqual({ type: "flushed" });
++  expect(messages.filter((message) => message.type === "audio").reduce((sum, message) => sum + message.samples.length, 0)).toBe(Math.floor(5120 / 3));
 +});
 diff --git a/src/client/src/appShell/appShellController.ts b/src/client/src/appShell/appShellController.ts
 index 6923753fbf186cdf62d20c2e01c386a3efacd971..959fb4616375250e94d43dbdb7b6271f7bd7a4cd 100644

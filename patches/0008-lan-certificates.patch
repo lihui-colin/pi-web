@@ -1,0 +1,550 @@
+diff --git a/src/client/src/api/certificates.ts b/src/client/src/api/certificates.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..aed0e31d65715e72ca2c2b6d9d0db378b7a2643f
+--- /dev/null
++++ b/src/client/src/api/certificates.ts
+@@ -0,0 +1,9 @@
++import { parseCertificateStatus } from "../../../shared/certificates";
++import { request } from "./http";
++
++export const certificatesApi = {
++  status: () => request("api/certificates", parseCertificateStatus),
++  generate: (ip: string) => request("api/certificates", parseCertificateStatus, {
++    method: "POST", headers: { "X-PI-Web-Certificate": "1" }, body: JSON.stringify({ ip }),
++  }),
++};
+diff --git a/src/client/src/components/PiWebApp.theme.test.ts b/src/client/src/components/PiWebApp.theme.test.ts
+index 76ac97d614aaafc9bfa2df60379b71772d9fc22e..daa5e7454132bda14f70e9e3e55eb4d6aeaa1ce2 100644
+--- a/src/client/src/components/PiWebApp.theme.test.ts
++++ b/src/client/src/components/PiWebApp.theme.test.ts
+@@ -3,6 +3,7 @@
+ import { LitElement } from "lit";
+ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+ import { api, configApi, piPackagesApi, pluginsApi, type PiWebConfigValues } from "../api";
++import { certificatesApi } from "../api/certificates";
+ import { THEME_STORAGE_KEY } from "../theme";
+ import { PiWebApp } from "./PiWebApp";
+ import { SettingsDialog } from "./SettingsDialog";
+@@ -23,6 +24,7 @@ const unexpectedRequest = vi.fn(() => Promise.reject(new Error("Theme tests must
+ 
+ beforeEach(() => {
+   unexpectedRequest.mockClear();
++  vi.spyOn(certificatesApi, "status").mockResolvedValue(null);
+   vi.stubGlobal("fetch", unexpectedRequest);
+   vi.spyOn(window, "fetch").mockImplementation(unexpectedRequest);
+   config = { defaultTheme: { themeId: "themes:pi-web-light", auto: false } };
+diff --git a/src/client/src/components/settings/SettingsCertificatesPanel.test.ts b/src/client/src/components/settings/SettingsCertificatesPanel.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..ab9e3df75ae40c9512697d105312a4354a434b6c
+--- /dev/null
++++ b/src/client/src/components/settings/SettingsCertificatesPanel.test.ts
+@@ -0,0 +1,56 @@
++// @vitest-environment happy-dom
++import { afterEach, expect, it, vi } from "vitest";
++import { SettingsCertificatesPanel } from "./SettingsCertificatesPanel";
++
++const certificate = { ip: "192.168.1.42", expiresAt: "2027-10-19T00:00:00Z", caFingerprint: "AA:BB", certificatePath: "/state/certificates/server-1/server.crt", privateKeyPath: "/state/certificates/server-1/server.key" };
++afterEach(() => { document.body.replaceChildren(); vi.unstubAllGlobals(); });
++
++it("loads existing certificates and generates through the form with download links", async () => {
++  const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(new Response("null")).mockResolvedValueOnce(new Response(JSON.stringify(certificate)));
++  vi.stubGlobal("fetch", fetchMock);
++  const panel = new SettingsCertificatesPanel();
++  document.body.append(panel);
++  await vi.waitFor(() => { expect(panel.shadowRoot?.textContent).toContain("尚未生成证书。"); });
++  const input = required(required(panel.shadowRoot).querySelector("input"));
++  input.value = "192.168.1.42";
++  input.dispatchEvent(new Event("input"));
++  required(required(panel.shadowRoot).querySelector("form")).dispatchEvent(new Event("submit", { cancelable: true }));
++  await vi.waitFor(() => { expect(panel.shadowRoot?.querySelectorAll("a").length).toBe(2); });
++  const init = required(fetchMock.mock.calls[1]?.[1]);
++  expect(init.body).toBe(JSON.stringify({ ip: "192.168.1.42" }));
++  expect(new Headers(init.headers).get("X-PI-Web-Certificate")).toBe("1");
++  const links = [...required(panel.shadowRoot).querySelectorAll("a")];
++  expect(links[0]?.href).toContain("/api/certificates/ca.crt");
++  expect(links[1]?.href).toContain("/api/certificates/server.crt");
++  expect(required(panel.shadowRoot).textContent).toContain("生成不会自动启用 HTTPS");
++});
++
++it("shows a failed generation and retains the previous downloadable certificate", async () => {
++  vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValueOnce(new Response(JSON.stringify(certificate)))
++    .mockResolvedValueOnce(new Response(JSON.stringify({ error: "OpenSSL 不可用" }), { status: 500 })));
++  const panel = new SettingsCertificatesPanel();
++  document.body.append(panel);
++  await vi.waitFor(() => { expect(panel.shadowRoot?.querySelectorAll("a").length).toBe(2); });
++  required(required(panel.shadowRoot).querySelector("form")).dispatchEvent(new Event("submit", { cancelable: true }));
++  await vi.waitFor(() => { expect(panel.shadowRoot?.querySelector('[role="alert"]')?.textContent).toContain("OpenSSL 不可用"); });
++  expect(required(panel.shadowRoot).querySelectorAll("a")).toHaveLength(2);
++});
++
++function required<T>(value: T | null | undefined): T {
++  if (value === null || value === undefined) throw new Error("Expected rendered control or request");
++  return value;
++}
++
++it("does not repeat a failed initial request when the settings panel reconnects", async () => {
++  const fetchMock = vi.fn<typeof fetch>().mockRejectedValue(new Error("offline"));
++  vi.stubGlobal("fetch", fetchMock);
++  const panel = new SettingsCertificatesPanel();
++  document.body.append(panel);
++  await vi.waitFor(() => { expect(panel.shadowRoot?.querySelector('[role="alert"]')?.textContent).toContain("offline"); });
++  panel.remove();
++  document.body.append(panel);
++  await panel.updateComplete;
++  expect(fetchMock).toHaveBeenCalledTimes(1);
++  required(panel.shadowRoot?.querySelector<HTMLButtonElement>('button[type="button"]')).click();
++  await vi.waitFor(() => { expect(fetchMock).toHaveBeenCalledTimes(2); });
++});
+diff --git a/src/client/src/components/settings/SettingsCertificatesPanel.ts b/src/client/src/components/settings/SettingsCertificatesPanel.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..819ba4d614a9adb77569b6ab569a0d347647c5e9
+--- /dev/null
++++ b/src/client/src/components/settings/SettingsCertificatesPanel.ts
+@@ -0,0 +1,121 @@
++import { css, html, LitElement, type TemplateResult } from "lit";
++import { customElement, state } from "lit/decorators.js";
++import type { CertificateStatus } from "../../../../shared/certificates";
++import { certificatesApi } from "../../api/certificates";
++import { resolveAppUrl } from "../../appUrl";
++import { uiButtonStyles } from "../ui/controlStyles";
++import { uiFormStyles } from "../ui/formStyles";
++import { uiSettingsStyles } from "../ui/settingsStyles";
++
++@customElement("settings-certificates-panel")
++export class SettingsCertificatesPanel extends LitElement {
++  @state() private ip = window.location.hostname.replace(/^\[|\]$/g, "");
++  @state() private certificate: CertificateStatus | null = null;
++  @state() private busy = false;
++  @state() private error = "";
++  @state() private loaded = false;
++
++  private initialLoadStarted = false;
++
++  override connectedCallback(): void {
++    super.connectedCallback();
++    // Settings can detach and reattach panels while changing themes or tabs.
++    // Explicit refresh owns subsequent reads, including retries after failures.
++    if (!this.initialLoadStarted) {
++      this.initialLoadStarted = true;
++      void this.load();
++    }
++  }
++
++  private async load(): Promise<void> {
++    if (this.busy) return;
++    this.busy = true;
++    this.error = "";
++    try {
++      this.certificate = await certificatesApi.status();
++      this.loaded = true;
++    } catch (error) {
++      this.error = error instanceof Error ? error.message : String(error);
++    } finally { this.busy = false; }
++  }
++
++  private async generate(event: Event): Promise<void> {
++    event.preventDefault();
++    if (this.busy) return;
++    this.busy = true;
++    this.error = "";
++    try {
++      this.certificate = await certificatesApi.generate(this.ip.trim());
++      this.loaded = true;
++    } catch (error) {
++      this.error = error instanceof Error ? error.message : String(error);
++    } finally { this.busy = false; }
++  }
++
++  override render(): TemplateResult {
++    const certificate = this.certificate;
++    return html`
++      <section class="ui-settings-section" aria-label="内网 HTTPS 证书" aria-busy=${this.busy}>
++        <div class="ui-settings-heading">
++          <h3>内网 HTTPS 证书</h3>
++          <p>为当前网关生成内网 IP 证书。下载 CA 后，需要在每台访问设备上手动安装并信任。</p>
++        </div>
++        <form class="ui-settings-fields" @submit=${(event: Event) => { void this.generate(event); }}>
++          <label class="ui-form-field">
++            <span>访问站点的内网 IP</span>
++            <input class="ui-input" required maxlength="45" .value=${this.ip} ?disabled=${this.busy}
++              placeholder="192.168.1.10" autocomplete="off" spellcheck="false"
++              @input=${(event: Event) => { if (event.target instanceof HTMLInputElement) this.ip = event.target.value; }}>
++            <small>支持 IPv4 / IPv6，不填写 http://、https:// 或端口。建议固定 IP。</small>
++          </label>
++          <div class="ui-settings-actions">
++            <button type="button" class="ui-button" ?disabled=${this.busy} @click=${() => { void this.load(); }}>刷新状态</button>
++            <button class="ui-button ui-button--primary" ?disabled=${this.busy || !this.loaded}>${this.busy ? "处理中…" : certificate === null ? "生成证书" : "重新签发服务器证书"}</button>
++          </div>
++        </form>
++        ${this.error ? html`<p role="alert" class="error">${this.error}</p>` : null}
++        <div role="status">
++          ${!this.loaded ? "正在读取证书状态；读取失败时请刷新重试。" : certificate === null ? "尚未生成证书。" : html`
++            <div class="ui-settings-summary">
++              <strong>已生成（未检测 HTTPS 部署状态）</strong>
++              <span>证书 IP：${certificate.ip}</span>
++              <span>到期时间：${new Date(certificate.expiresAt).toLocaleString()}</span>
++              <span>CA 指纹（SHA-256）：<code>${certificate.caFingerprint}</code></span>
++              <div class="downloads">
++                <a class="ui-button" href=${resolveAppUrl("api/certificates/ca.crt")} download="pi-web-ca.crt">下载 CA 证书（设备安装）</a>
++                <a class="ui-button" href=${resolveAppUrl("api/certificates/server.crt")} download="pi-web-server.crt">下载服务器证书</a>
++              </div>
++              <p>生成不会自动启用 HTTPS。请管理员将以下文件配置到 Nginx，检查配置后重新加载 Nginx。私钥只保存在服务器，不提供下载。</p>
++              <code>ssl_certificate "${certificate.certificatePath}";<br>ssl_certificate_key "${certificate.privateKeyPath}";</code>
++              <small>重新签发保留同一个 CA；已信任该 CA 的设备无需重复安装。旧文件保留，以免影响正在运行的 HTTPS 服务。</small>
++            </div>
++          `}
++        </div>
++        <details>
++          <summary>如何安装和信任 CA 证书</summary>
++          <p>安装前请与管理员核对上方指纹。只能信任自己管理的 CA。</p>
++          <ul>
++            <li>Windows：导入“受信任的根证书颁发机构”。</li>
++            <li>macOS：导入“钥匙串访问”，在证书的信任设置中选择“始终信任”。</li>
++            <li>iPhone / iPad：安装下载的描述文件后，在“设置 → 通用 → 关于本机 → 证书信任设置”中启用完全信任。</li>
++            <li>Android：在系统安全设置中安装“CA 证书”；具体入口和浏览器支持取决于设备。</li>
++          </ul>
++          <p>服务器启用对应证书后，用证书中的 IP 通过 HTTPS 访问。网页无法替你自动安装或设置信任。</p>
++        </details>
++      </section>
++    `;
++  }
++
++  static override styles = [uiButtonStyles, uiFormStyles, uiSettingsStyles, css`
++    :host { display: block; min-width: 0; }
++    p { margin: 0; line-height: 1.5; }
++    code, span { overflow-wrap: anywhere; }
++    code { white-space: pre-wrap; }
++    small, details { color: var(--pi-muted); line-height: 1.5; }
++    details p, details ul { margin-top: 10px; }
++    summary { cursor: pointer; }
++    .downloads { display: flex; flex-wrap: wrap; gap: 8px; }
++    a { color: var(--pi-text); text-decoration: none; }
++    .error { color: var(--pi-danger); }
++  `];
++}
+diff --git a/src/client/src/components/settings/SettingsGeneralPanel.test.ts b/src/client/src/components/settings/SettingsGeneralPanel.test.ts
+index 84132fd645bfe630c3dfe6bd07a1341a7f9eb897..bc7b85a6691bed1e8a90d9d8154172326c3672c3 100644
+--- a/src/client/src/components/settings/SettingsGeneralPanel.test.ts
++++ b/src/client/src/components/settings/SettingsGeneralPanel.test.ts
+@@ -1,10 +1,13 @@
+ // @vitest-environment happy-dom
+ 
+-import { afterEach, describe, expect, it, vi } from "vitest";
++import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
+ import type { PiWebConfigResponse, PiWebConfigValues } from "../../api";
+ import { SettingsGeneralPanel } from "./SettingsGeneralPanel";
+ 
++beforeEach(() => { vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("null"))); });
++
+ afterEach(() => {
++  vi.unstubAllGlobals();
+   document.body.replaceChildren();
+   localStorage.clear();
+ });
+diff --git a/src/client/src/components/settings/SettingsGeneralPanel.ts b/src/client/src/components/settings/SettingsGeneralPanel.ts
+index f006602f2536c2cebc1df7760b4d0e679edf216c..c64f06384e05764dc43c9cac7f8b1c745531ee27 100644
+--- a/src/client/src/components/settings/SettingsGeneralPanel.ts
++++ b/src/client/src/components/settings/SettingsGeneralPanel.ts
+@@ -5,6 +5,7 @@ import { uiButtonStyles } from "../ui/controlStyles";
+ import { uiFormStyles } from "../ui/formStyles";
+ import { uiSettingsStyles } from "../ui/settingsStyles";
+ import "./SettingsPanelFrame";
++import "./SettingsCertificatesPanel";
+ import type { SettingsNotice } from "./SettingsPanelFrame";
+ import {
+   emptyGatewayServerConfigDraft,
+@@ -97,6 +98,7 @@ export class SettingsGeneralPanel extends LitElement {
+         <div class="settings-sections ui-settings-list">
+           <slot name="appearance"></slot>
+           ${this.renderGatewayServerSettings()}
++          <settings-certificates-panel></settings-certificates-panel>
+           ${this.renderSelectedMachineAccessSettings()}
+         </div>
+       </settings-panel-frame>
+diff --git a/src/server/app.ts b/src/server/app.ts
+index 5de65dce2950614de94f8b9941e022d064bf4dd5..102d69136c248a8047b931dd64a3b80258c3420f 100644
+--- a/src/server/app.ts
++++ b/src/server/app.ts
+@@ -1,3 +1,4 @@
++import { registerCertificateRoutes } from "./certificateRoutes.js";
+ import { existsSync } from "node:fs";
+ import { dirname, join, sep } from "node:path";
+ import { fileURLToPath } from "node:url";
+@@ -229,6 +230,7 @@ export async function buildApp(deps: AppDependencies = {}): Promise<FastifyInsta
+   registerPiPackageRoutes(app, piPackages, "/api/machines/local");
+   const invalidatingConfigService = invalidatePiWebStatusOnWrite(configService, piWebStatusCache);
+   registerConfigRoutes(app, invalidatingConfigService);
++  registerCertificateRoutes(app);
+   registerLocalMachineConfigRoutes(app, invalidatingConfigService);
+ 
+   const navigationPreferences = deps.navigationPreferences ?? new NavigationPreferenceStore();
+diff --git a/src/server/certificateRoutes.test.ts b/src/server/certificateRoutes.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..e3b467b12f70bfefd8744e629d96d1f3e51be1fd
+--- /dev/null
++++ b/src/server/certificateRoutes.test.ts
+@@ -0,0 +1,83 @@
++import { execFile } from "node:child_process";
++import { X509Certificate } from "node:crypto";
++import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { promisify } from "node:util";
++import Fastify, { type FastifyInstance } from "fastify";
++import { afterEach, beforeEach, describe, expect, it } from "vitest";
++import { CertificateStore } from "./certificates.js";
++import { registerCertificateRoutes } from "./certificateRoutes.js";
++import type { CertificateStatus } from "../shared/certificates.js";
++
++const execute = promisify(execFile);
++let root: string;
++let app: FastifyInstance;
++beforeEach(async () => {
++  root = await mkdtemp(join(tmpdir(), "pi-web-certificates-"));
++  app = Fastify();
++  registerCertificateRoutes(app, new CertificateStore(root));
++});
++afterEach(async () => { await app.close(); await rm(root, { recursive: true, force: true }); });
++const headers = { "x-pi-web-certificate": "1", origin: "https://localhost:80" };
++const generate = (ip: string) => app.inject({ method: "POST", url: "/api/certificates", headers, payload: { ip } });
++
++describe("gateway certificates", () => {
++  it("creates a trusted server certificate, exposes only certificates, and preserves the CA across IP changes", async () => {
++    expect((await app.inject("/api/certificates")).json()).toBeNull();
++    expect((await app.inject("/api/certificates/ca.crt")).statusCode).toBe(404);
++    const first = await generate("192.168.1.42");
++    expect(first.statusCode, first.body).toBe(200);
++    const status = first.json<CertificateStatus>();
++    const caDownload = await app.inject("/api/certificates/ca.crt");
++    expect(caDownload.headers["content-disposition"]).toContain("pi-web-ca.crt");
++    expect(caDownload.headers["cache-control"]).toBe("no-store");
++    expect(caDownload.body).not.toContain("PRIVATE KEY");
++    const ca = new X509Certificate(caDownload.body);
++    expect(ca.ca).toBe(true);
++    expect(ca.fingerprint256).toBe(status.caFingerprint);
++    const serverDownload = await app.inject("/api/certificates/server.crt");
++    const cert = new X509Certificate(serverDownload.body);
++    expect(cert.ca).toBe(false);
++    expect(cert.checkIP("192.168.1.42")).toBeDefined();
++    expect(cert.checkIP("192.168.1.43")).toBeUndefined();
++    expect(cert.verify(ca.publicKey)).toBe(true);
++    await execute("openssl", ["verify", "-CAfile", join(root, "ca/ca.crt"), "-purpose", "sslserver", "-verify_ip", "192.168.1.42", status.certificatePath]);
++    expect((await stat(status.privateKeyPath)).mode & 0o777).toBe(0o600);
++    expect((await stat(join(root, "ca/ca.key"))).mode & 0o777).toBe(0o600);
++    expect((await stat(root)).mode & 0o777).toBe(0o700);
++    for (const path of ["ca.key", "server.key", "../ca/ca.key"]) {
++      expect((await app.inject(`/api/certificates/${path}`)).statusCode).toBe(404);
++    }
++    const next = await generate("fd00::42");
++    expect(next.statusCode, next.body).toBe(200);
++    expect(next.json<CertificateStatus>().caFingerprint).toBe(status.caFingerprint);
++    expect((await app.inject("/api/certificates/ca.crt")).body).toBe(caDownload.body);
++    const renewed = new X509Certificate((await app.inject("/api/certificates/server.crt")).body);
++    expect(renewed.checkIP("fd00::42")).toBeDefined();
++    expect(await readFile(status.certificatePath, "utf8")).toBe(serverDownload.body);
++    expect(await new CertificateStore(root).status()).toEqual(next.json());
++  });
++
++  it("rejects invalid IPs and cross-origin or simple browser requests without creating a CA", async () => {
++    for (const ip of ["example.com", "192.168.1.1:443", "127.0.0.1\nDNS:evil.test", "$(touch /tmp/oops)", "fe80::1%eth0"]) {
++      expect((await generate(ip)).statusCode).toBe(400);
++    }
++    for (const requestHeaders of [{}, { ...headers, origin: "https://evil.test" }, { ...headers, origin: "null" }]) {
++      expect((await app.inject({ method: "POST", url: "/api/certificates", headers: requestHeaders, payload: { ip: "192.168.1.42" } })).statusCode).toBe(403);
++    }
++    expect((await app.inject("/api/certificates")).json()).toBeNull();
++    await expect(stat(join(root, "ca"))).rejects.toMatchObject({ code: "ENOENT" });
++  });
++
++  it("serializes competing generation and refuses to replace an incomplete CA", async () => {
++    const results = await Promise.all([generate("192.168.1.1"), generate("192.168.1.2")]);
++    expect(results.map((r) => r.statusCode).sort()).toEqual([200, 409]);
++    const before = (await app.inject("/api/certificates")).body;
++    const ca = (await app.inject("/api/certificates/ca.crt")).body;
++    await rm(join(root, "ca/ca.key"));
++    expect((await generate("192.168.1.3")).statusCode).toBe(409);
++    expect((await app.inject("/api/certificates")).body).toBe(before);
++    expect((await app.inject("/api/certificates/ca.crt")).body).toBe(ca);
++  });
++});
+diff --git a/src/server/certificateRoutes.ts b/src/server/certificateRoutes.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..b306e658b66a67c5c1c20a1cb0d47ff5f1fe87d6
+--- /dev/null
++++ b/src/server/certificateRoutes.ts
+@@ -0,0 +1,34 @@
++import type { FastifyInstance } from "fastify";
++import { CertificateError, CertificateStore } from "./certificates.js";
++
++export function registerCertificateRoutes(app: FastifyInstance, store = new CertificateStore()): void {
++  app.register((routes, _options, done) => {
++    routes.addHook("onRequest", async (_request, reply) => {
++      reply.header("Cache-Control", "no-store").header("X-Content-Type-Options", "nosniff");
++    });
++    routes.setErrorHandler((error, _request, reply) => {
++      const status = error instanceof CertificateError ? error.statusCode : 500;
++      return reply.code(status).send({ error: error instanceof CertificateError ? error.message : "无法读取或保存证书，请检查服务器证书目录。" });
++    });
++    routes.get("/api/certificates", () => store.status());
++    routes.post<{ Body: { ip?: unknown } | undefined }>("/api/certificates", { bodyLimit: 1024 }, async (request, reply) => {
++      // The custom header forces a preflight for cross-origin browser requests.
++      // No CORS permission is granted. Host comparison also supports TLS proxies.
++      const origin = request.headers.origin;
++      let sameHost = origin === undefined;
++      try { if (origin !== undefined) sameHost = new URL(origin).host === request.headers.host; } catch { sameHost = false; }
++      if (request.headers["x-pi-web-certificate"] !== "1" || !sameHost) {
++        return reply.code(403).send({ error: "请从本站设置面板生成证书。" });
++      }
++      return store.generate(request.body?.ip);
++    });
++    for (const kind of ["ca", "server"] as const) {
++      routes.get(`/api/certificates/${kind}.crt`, async (_request, reply) => {
++        return reply.type("application/x-x509-ca-cert")
++          .header("Content-Disposition", `attachment; filename="pi-web-${kind}.crt"`)
++          .send(await store.download(kind));
++      });
++    }
++    done();
++  });
++}
+diff --git a/src/server/certificates.ts b/src/server/certificates.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..2375bb67cec52488d7b5006ea178ce92355cf888
+--- /dev/null
++++ b/src/server/certificates.ts
+@@ -0,0 +1,114 @@
++import { execFile } from "node:child_process";
++import { randomBytes, X509Certificate } from "node:crypto";
++import { chmod, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
++import { isIP } from "node:net";
++import { join } from "node:path";
++import { promisify } from "node:util";
++import { piWebDataDir } from "../config.js";
++import { parseCertificateStatus, type CertificateStatus } from "../shared/certificates.js";
++
++const execute = promisify(execFile);
++
++export class CertificateError extends Error {
++  constructor(message: string, readonly statusCode: number) { super(message); }
++}
++
++export class CertificateStore {
++  constructor(private readonly root = join(piWebDataDir(), "certificates")) {}
++
++  async status(): Promise<CertificateStatus | null> {
++    try {
++      return parseCertificateStatus(JSON.parse(await readFile(join(this.root, "current.json"), "utf8")));
++    } catch (error) {
++      if (hasCode(error, "ENOENT")) return null;
++      throw error;
++    }
++  }
++
++  async download(kind: "ca" | "server"): Promise<string> {
++    const status = await this.status();
++    if (status === null) throw new CertificateError("尚未生成证书。", 404);
++    return readFile(kind === "ca" ? join(this.root, "ca", "ca.crt") : status.certificatePath, "utf8");
++  }
++
++  async generate(value: unknown): Promise<CertificateStatus> {
++    if (typeof value !== "string" || isIP(value.trim()) === 0 || value.includes("%")) {
++      throw new CertificateError("请输入有效的 IPv4 或 IPv6 地址，不含协议、端口或网卡标识。", 400);
++    }
++    const ip = value.trim();
++    await mkdir(this.root, { recursive: true, mode: 0o700 });
++    await chmod(this.root, 0o700);
++    const lock = join(this.root, ".generate-lock");
++    try { await mkdir(lock, { mode: 0o700 }); } catch (error) {
++      if (hasCode(error, "EEXIST")) throw new CertificateError("证书生成正在进行。若服务曾异常退出，请管理员确认无生成任务后移除 certificates/.generate-lock。", 409);
++      throw error;
++    }
++    let pending: string | undefined;
++    try {
++      await this.ensureCA();
++      pending = await mkdtemp(join(this.root, "server-"));
++      const key = join(pending, "server.key");
++      const cert = join(pending, "server.crt");
++      const csr = join(pending, "server.csr");
++      const extensions = join(pending, "extensions.cnf");
++      await writeFile(extensions, `basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=IP:${ip}\n`, { mode: 0o600 });
++      await openssl(["req", "-new", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", csr, "-subj", "/CN=PI WEB LAN"]);
++      await chmod(key, 0o600);
++      await openssl(["x509", "-req", "-in", csr, "-CA", join(this.root, "ca", "ca.crt"), "-CAkey", join(this.root, "ca", "ca.key"), "-set_serial", `0x${randomBytes(16).toString("hex")}`, "-out", cert, "-days", "397", "-sha256", "-extfile", extensions]);
++      const certificate = new X509Certificate(await readFile(cert));
++      const ca = new X509Certificate(await readFile(join(this.root, "ca", "ca.crt")));
++      if (certificate.checkIP(ip) === undefined || !certificate.verify(ca.publicKey)) throw new Error("Certificate verification failed");
++      const status: CertificateStatus = { ip, expiresAt: new Date(certificate.validTo).toISOString(), caFingerprint: ca.fingerprint256, certificatePath: cert, privateKeyPath: key };
++      await writeFile(join(pending, "current.json"), JSON.stringify(status), { mode: 0o600 });
++      await rename(join(pending, "current.json"), join(this.root, "current.json"));
++      // Older generations may still be referenced by a running reverse proxy.
++      pending = undefined;
++      return status;
++    } finally {
++      if (pending !== undefined) await rm(pending, { recursive: true, force: true });
++      await rm(lock, { recursive: true, force: true });
++    }
++  }
++
++  private async ensureCA(): Promise<void> {
++    const caDir = join(this.root, "ca");
++    try {
++      const ca = new X509Certificate(await readFile(join(caDir, "ca.crt")));
++      await readFile(join(caDir, "ca.key"));
++      if (!ca.ca || Date.parse(ca.validTo) < Date.now() + 397 * 86400000) {
++        throw new CertificateError("内部 CA 已过期或剩余有效期不足，请管理员处理 CA 更新和设备重新信任。", 409);
++      }
++      return;
++    } catch (error) {
++      if (!hasCode(error, "ENOENT")) throw error;
++      // An existing but incomplete CA must never be silently replaced.
++      try { await mkdir(caDir, { mode: 0o700 }); } catch {
++        throw new CertificateError("内部 CA 文件不完整，请管理员恢复证书及私钥。", 409);
++      }
++    }
++    const temp = await mkdtemp(join(this.root, "ca-pending-"));
++    try {
++      // Use an explicit config: system defaults can duplicate CA extensions.
++      const config = join(temp, "openssl.cnf");
++      await writeFile(config, "[req]\ndistinguished_name=dn\n[dn]\n[ca]\nbasicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid:always\n", { mode: 0o600 });
++      await openssl(["req", "-config", config, "-extensions", "ca", "-x509", "-newkey", "rsa:2048", "-nodes", "-sha256", "-days", "3650", "-keyout", join(temp, "ca.key"), "-out", join(temp, "ca.crt"), "-subj", "/CN=PI WEB Local CA"]);
++      await chmod(join(temp, "ca.key"), 0o600);
++      await rename(temp, caDir);
++    } catch (error) {
++      await rm(caDir, { recursive: true, force: true });
++      throw error;
++    } finally {
++      await rm(temp, { recursive: true, force: true });
++    }
++  }
++}
++
++async function openssl(args: string[]): Promise<void> {
++  try { await execute("openssl", args, { timeout: 30_000, maxBuffer: 64 * 1024 }); } catch {
++    throw new CertificateError("证书生成失败，请检查服务器已安装 OpenSSL（1.1.1 或更新版本）且证书目录可写。", 500);
++  }
++}
++
++function hasCode(error: unknown, code: string): boolean {
++  return typeof error === "object" && error !== null && "code" in error && error.code === code;
++}
+diff --git a/src/shared/certificates.ts b/src/shared/certificates.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..490b03491d056d9619e765804beae4cfc2a702d8
+--- /dev/null
++++ b/src/shared/certificates.ts
+@@ -0,0 +1,15 @@
++export interface CertificateStatus {
++  ip: string;
++  expiresAt: string;
++  caFingerprint: string;
++  certificatePath: string;
++  privateKeyPath: string;
++}
++
++export function parseCertificateStatus(value: unknown): CertificateStatus | null {
++  if (value === null) return null;
++  if (typeof value !== "object" || !("ip" in value) || !("expiresAt" in value) || !("caFingerprint" in value) || !("certificatePath" in value) || !("privateKeyPath" in value)) throw new Error("Invalid certificate response");
++  const { ip, expiresAt, caFingerprint, certificatePath, privateKeyPath } = value;
++  if (typeof ip !== "string" || typeof expiresAt !== "string" || typeof caFingerprint !== "string" || typeof certificatePath !== "string" || typeof privateKeyPath !== "string") throw new Error("Invalid certificate response");
++  return { ip, expiresAt, caFingerprint, certificatePath, privateKeyPath };
++}

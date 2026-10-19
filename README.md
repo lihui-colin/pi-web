@@ -5,7 +5,7 @@
 - [`main`](https://github.com/lihui-colin/pi-web/tree/main)：完整的官方上游代码与历史，可独立维护；安装不依赖该分支的位置。
 - `terminal-patch`：只有定制补丁、安装脚本、文档和测试，不继承上游历史。保留官方 Chat 与 Workspace Panel 布局，提供终端修复和 Codex 插件等扩展。
 
-需要 Git、Node.js ≥22.19 和 npm。补丁与 `patches/base-commit` 中的完整上游 commit ID 绑定，获取源码不需要 origin 的推送权限。
+需要 Git、Node.js ≥22.19 和 npm。首次安装会自动检查并补齐 Nginx、OpenSSL、curl 和系统 CA 证书（自动安装支持 Debian/Ubuntu，缺少组件时需要 root/sudo）。补丁与 `patches/base-commit` 中的完整上游 commit ID 绑定，获取源码不需要 origin 的推送权限。
 
 ```bash
 git clone --branch terminal-patch git@github.com:lihui-colin/pi-web.git pi-web-opt
@@ -13,11 +13,11 @@ cd pi-web-opt
 sh scripts/install.sh
 ```
 
-安装脚本先执行 `sync.sh`，优先复用 `data/pi-web-upstream.git` 中的缓存，仅在缺少 `patches/base-commit` 指定提交时下载，再在 `data/pi-web-releases/release.*` 独立目录应用补丁、安装依赖并测试构建，成功后将全局 `pi-web`、`pi-web-server` 和 `pi-web-sessiond` 命令链接到新版本，最后打印安装目录。若 PATH 中没有 `pi` 命令，会自动全局安装 Pi Agent（默认 `latest`，可用 `PI_VERSION` 指定）；已有 Agent 保留当前版本。它不注册或启动后台服务。已运行的服务需要手动先停止再启动才能使用新版本。不再提供 Swap Chat / Workspace Panel 命令，旧的浏览器布局交换偏好不再生效。
+安装脚本先执行 `sync.sh`，优先复用 `data/pi-web-upstream.git` 中的缓存，仅在缺少 `patches/base-commit` 指定提交时下载，再在 `data/pi-web-releases/release.*` 独立目录应用补丁、安装依赖并测试构建，成功后将全局 `pi-web`、`pi-web-server` 和 `pi-web-sessiond` 命令链接到新版本，最后打印安装目录。若 PATH 中没有 `pi` 命令，会自动全局安装 Pi Agent（默认 `latest`，可用 `PI_VERSION` 指定）；已有 Agent 保留当前版本。安装期间禁止系统包自动启停服务，保留已有代理配置和证书；它不启动后台服务。已运行的服务需要手动先停止再启动才能使用新版本。不再提供 Swap Chat / Workspace Panel 命令，旧的浏览器布局交换偏好不再生效。
 
 `data/` 已被 Git 忽略。可单独运行 `sh scripts/sync.sh` 同步并准备源码；`--local` 仅使用 `data/pi-web-upstream.git` 缓存。`PI_WEB_INSTALL_ROOT` 可覆盖构建安装目录，Git 下载缓存仍保存在 `data/`。运行中的版本依赖对应 release 目录，请勿删除。
 
-当前补丁按功能整理为 7 个：终端修复与增强为 `0001`–`0005`，完整 Codex 插件及其界面调整为 `0006`，添加项目弹窗的长路径显示修复为 `0007`。详细的同步、冲突处理和补丁维护方法见 [使用文档](docs/usage.md)。
+当前补丁按功能整理为 8 个：终端修复与增强为 `0001`–`0005`，完整 Codex 插件及其界面调整为 `0006`，添加项目弹窗的长路径显示修复为 `0007`，内网证书面板为 `0008`。详细的同步、冲突处理和补丁维护方法见 [使用文档](docs/usage.md)。
 
 终端补丁还会在裁剪回放缓存时保留鼠标跟踪、备用屏幕及粘贴等模式，修复 Codex CLI 长时间运行后刷新页面无法滚动历史的问题。更新后需要重启 `pi-web-sessiond`，再新建终端并用 `codex resume` 恢复会话；旧守护进程已经丢弃的状态无法补回。
 
@@ -58,8 +58,14 @@ PI_WEB_PORT=25224
 | 配置 | 说明 |
 | --- | --- |
 | `PI_WEB_HOST` | 绑定地址，默认 `0.0.0.0`；仅供本机访问可设为 `127.0.0.1` |
-| `PI_WEB_PORT` | 监听端口，默认 `8024` |
-| `PI_WEB_VOICE_INPUT_ENABLED` | 语音输入入口开关，`true` / `false`，默认 `false`（隐藏）；当前开启后仅显示禁用的麦克风按钮 |
+| `PI_WEB_PORT` | 后端监听端口，默认 `8024` |
+| `PI_WEB_NGINX_ENABLED` | 是否统一启停专用于 pi-web 的系统 Nginx，默认 `false`；当前部署已开启 |
+| `PI_WEB_NGINX_PORT` | 反向代理 HTTPS 端口，默认 `25224`；用 `nginx-config` 生成 Nginx 配置 |
+| `PI_WEB_NGINX_PROBE_URL` | 可选代理健康地址，默认随 `PI_WEB_NGINX_PORT` 自动生成 |
+| `PI_WEB_VOICE_INPUT_ENABLED` | 语音输入入口开关，`true` / `false`，默认 `false`（隐藏）；后端验收通过后开启，支持录音、转写回填和转写后发送 |
+| `PI_WEB_CAPSWRITER_URL` | 工作区机器访问的语音服务地址，默认 `ws://127.0.0.1:6016/` |
+| `PI_WEB_VOICE_MAX_SECONDS` | 单次录音上限，1–120 秒，默认 120 |
+| `PI_WEB_VOICE_FINAL_TIMEOUT_MS` | 停止后的转写等待上限，1000–120000 毫秒，默认 30000 |
 | `PI_WEB_DATA_DIR` | 状态目录，默认仓库 `data/pi-web/<port>/state` |
 | `PI_WEB_RUN_DIR` | 日志和 PID 目录，默认仓库 `data/pi-web/<port>` |
 | `PI_WEB_SESSIOND_SOCKET` | 默认 `<状态目录>/sessiond.sock` |
@@ -71,7 +77,11 @@ PI_WEB_PORT=25224
 
 默认按端口隔离实例，状态、socket、日志和 PID 文件保存在仓库 `data/pi-web/<port>/` 下。`start`、`stop`、`restart`、`status`、`logs` 和 `update` 均使用当前配置，`stop` 不再自动选择其他端口的实例。
 
-`restart` 先执行停止，成功后再启动；停止失败时不会启动新进程。服务未运行时也可以执行 `restart` 启动。 启动成功要求两个服务均为本实例的存活进程，且 HTTP 探测就绪；探测使用配置的监听地址（通配监听使用对应的回环地址），绕过代理并设置超时。
+`restart` 先执行停止，成功后再启动；停止失败时不会启动新进程。服务未运行时也可以执行 `restart` 启动。 启用 Nginx 管理后，`start` 先检查 Nginx 配置，后端就绪后启动 Nginx 并检查代理健康；`stop` 先停止 Nginx，再停止语音和 pi-web 服务。非 root 用户先运行 `sudo -v`，脚本通过 `sudo -n` 管理系统 Nginx。详见 [反向代理安装与统一启停](docs/usage.md#反向代理安装与统一启停)。
+
+启动成功要求两个后端服务均为本实例的存活进程，且 HTTP 探测就绪；探测使用配置的监听地址（通配监听使用对应的回环地址），绕过代理并设置超时。
+
+`stop` 也会先停止本仓库 `data/voice/` 下有 PID 记录的语音服务（即使 pi-web 未运行）；语音服务停止失败仍会尝试停止 pi-web，并返回失败。未安装或无 PID 记录时跳过语音管理。此语音服务由同仓库各端口共享；自定义 `--root` 的外部实例需单独停止。`restart` 同样停止语音服务，但不会自动重启它，可随后执行 `bash scripts/install-voice.sh` 启动并验收。
 
 `stop` 会等待进程退出，必要时强制结束，确认退出后才删除 PID 文件；停止失败会保留 PID 文件并报错。Linux 下即使 PID 文件丢失或过期，也会按服务命令及 `PI_WEB_RUN_DIR` 找回本实例的遗留进程。`start` 会先检查端口，端口被占用时不会启动新的 sessiond。
 
@@ -89,4 +99,4 @@ bash scripts/pi-web-run-jmfederico.sh update --pi-only    # 只更新 Pi Agent
 
 新增独立 **Codex** 插件，可在 Terminal 后打开 Codex 对话、恢复历史并处理审批。安装前置条件和使用限制见 [Codex 插件说明](docs/codex-usage.md)。
 
-语音识别目前仅保留 [实施计划](docs/语音识别.md) 和 [服务设计存档](docs/voice-service.md)，相关实现已移除。可通过 `data/pi-web.conf` 中的 `PI_WEB_VOICE_INPUT_ENABLED=true` 显示麦克风按钮，默认隐藏；按钮暂不可用。修改后需在允许中断会话时重新启动服务并刷新页面。
+已实现独立的离线 [语音识别服务](docs/voice-service.md)，使用独立脚本 `bash scripts/install-voice.sh` 安装、启动并执行真实转写测试；只有测试通过才提示开启语音入口开关；Codex 输入框已接通 AudioWorklet 录音、工作区语音通道与本地模型，使用方式见 [语音输入](docs/codex-usage.md#语音输入)。可通过 `data/pi-web.conf` 中的 `PI_WEB_VOICE_INPUT_ENABLED=true` 显示麦克风按钮，默认隐藏；使用时需 HTTPS 或 localhost。修改后需在允许中断会话时重新启动服务并刷新页面。
