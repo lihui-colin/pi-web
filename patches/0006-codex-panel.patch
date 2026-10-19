@@ -2295,15 +2295,15 @@ index 0000000000000000000000000000000000000000..7cf5a7c30fd8dc12b2e18e57aa028051
 +});
 +
 +describe("voice input configuration", () => {
-+  it("hides the entry by default and follows server configuration on reconnect", async () => {
++  it("keeps the entry visible and disabled and follows server configuration on reconnect", async () => {
 +    const { request, runtime, view, panel } = await fixture();
-+    expect(panel.shadowRoot?.querySelector(".voice-input")).toBeNull();
++    expect(required(panel.shadowRoot?.querySelector<HTMLButtonElement>(".voice-input"))).toMatchObject({ disabled: true, title: "Voice input is disabled" });
 +    request.mockImplementation(async (operation) => operation === "status" ? { voiceInputEnabled: true } : { changed: false });
 +    await runtime.initialize(view); panel.requestUpdate(); await panel.updateComplete;
-+    expect(required(panel.shadowRoot?.querySelector<HTMLButtonElement>(".voice-input")).disabled).toBe(true);
++    expect(required(panel.shadowRoot?.querySelector<HTMLButtonElement>(".voice-input"))).toMatchObject({ disabled: true, title: "Voice input is not implemented yet" });
 +    request.mockResolvedValue({ changed: false });
 +    await runtime.initialize(view); panel.requestUpdate(); await panel.updateComplete;
-+    expect(panel.shadowRoot?.querySelector(".voice-input")).toBeNull();
++    expect(required(panel.shadowRoot?.querySelector<HTMLButtonElement>(".voice-input"))).toMatchObject({ disabled: true, title: "Voice input is disabled" });
 +  });
 +});
 diff --git a/pi-web-plugins/codex/CodexPanel.ts b/pi-web-plugins/codex/CodexPanel.ts
@@ -2994,7 +2994,7 @@ index 0000000000000000000000000000000000000000..4262ab7ae79ff2277e3965e2362dc84f
 +        <div class="composer-controls">
 +          <div class="composer-leading">${this.renderContextPicker(view)}${this.isMobileComposer() ? this.renderPlanStatus(view) : this.renderComposerSettings(view)}</div>
 +          <div class="composer-trailing">${this.renderModelPicker(view)}
-+          ${view.voiceInputEnabled ? html`<button class="voice-input" aria-label="Voice input" title="Voice input is not implemented yet" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2" width="6" height="13" rx="3"></rect><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"></path></svg></button>` : nothing}
++          <button class="voice-input" aria-label="Voice input" title=${view.voiceInputEnabled ? "Voice input is not implemented yet" : "Voice input is disabled"} disabled><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2" width="6" height="13" rx="3"></rect><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"></path></svg></button>
 +          ${busy && hasInput ? html`<button class="stop-response" aria-label="Stop response" title="Stop response" ?disabled=${view.pending || view.sending || !view.connected} @click=${() => { this.action((runtime, state) => runtime.request(state, "stop", { threadId: state.threadId })); }}><span class="stop-icon" aria-hidden="true"></span></button>` : nothing}
 +          <button class="primary" aria-label=${view.sending ? "Sending message" : stopAction ? "Stop response" : queueInput ? "Queue message" : "Send message"} title=${view.sending ? "Sending message" : stopAction ? "Stop response" : queueInput ? "Queue message" : "Send message"} aria-busy=${view.sending} ?disabled=${view.pending || view.sending || !view.connected || (!stopAction && attachmentsPending) || (!busy && !hasInput)} @click=${() => { this.action((runtime, state) => stopAction ? runtime.request(state, "stop", { threadId: state.threadId }) : runtime.send(state)); }}>${view.sending ? html`<span class="send-spinner" aria-hidden="true"></span>` : stopAction ? html`<span class="stop-icon" aria-hidden="true"></span>` : html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20V4m-7 7 7-7 7 7"></path></svg>`}</button>
 +          </div>
