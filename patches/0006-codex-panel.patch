@@ -477,10 +477,10 @@ index 0000000000000000000000000000000000000000..8bd9195edb6a01496b44f641a384bc48
 +}
 diff --git a/pi-web-plugins/codex/CodexPanel.test.ts b/pi-web-plugins/codex/CodexPanel.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..76e924443d65d474d2f5d4b891f16501496d0434
+index 0000000000000000000000000000000000000000..5a58c3e2f36a7d43e731a713d8ca40c423e734a1
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.test.ts
-@@ -0,0 +1,1767 @@
+@@ -0,0 +1,1810 @@
 +// @vitest-environment happy-dom
 +import { afterEach, describe, expect, it, vi } from "vitest";
 +import type { WorkspaceFileUploadOptions, WorkspaceFileUploadTask, PluginPeerChannelOptions, FileContentResponse, FileTreeResponse, JsonValue, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
@@ -2248,12 +2248,55 @@ index 0000000000000000000000000000000000000000..76e924443d65d474d2f5d4b891f16501
 +  expect(view.error).toBe("");
 +  expect(panel.shadowRoot?.textContent).toContain("Branch created, but its name could not be saved");
 +});
++
++
++describe("Review resizing", () => {
++  async function reviewFixture() {
++    const f = await fixture();
++    vi.spyOn(f.panel, "getBoundingClientRect").mockReturnValue({ width: 1200 } as DOMRect);
++    required(f.panel.shadowRoot?.querySelector<HTMLButtonElement>('[aria-label="Toggle review panel"]')).click();
++    await f.panel.updateComplete;
++    const handle = required(f.panel.shadowRoot?.querySelector<HTMLElement>('[aria-label="Resize review panel"]'));
++    const aside = required(f.panel.shadowRoot?.querySelector('aside'));
++    vi.spyOn(aside, "getBoundingClientRect").mockReturnValue({ width: 300 } as DOMRect);
++    handle.setPointerCapture = vi.fn(); handle.hasPointerCapture = vi.fn().mockReturnValue(true); handle.releasePointerCapture = vi.fn();
++    const width = () => required(f.panel.shadowRoot?.querySelector<HTMLElement>('.layout')).style.getPropertyValue('--review-width');
++    const pointer = (type: string, x: number, pointerId = 1) => handle.dispatchEvent(new PointerEvent(type, { pointerId, clientX: x, button: 0, bubbles: true }));
++    return { ...f, handle, width, pointer };
++  }
++  it("drags left to expand, clamps the chat space, and stops after cancellation", async () => {
++    const f = await reviewFixture();
++    f.textarea.value = "keep draft"; f.textarea.dispatchEvent(new Event("input"));
++    f.pointer("pointerdown", 900); f.pointer("pointermove", 700, 2);
++    await f.panel.updateComplete; expect(f.width()).toBe("");
++    f.pointer("pointermove", 700); await f.panel.updateComplete; expect(f.width()).toBe("500px");
++    f.pointer("pointermove", -500); await f.panel.updateComplete; expect(f.width()).toBe("880px");
++    f.pointer("pointercancel", -500); f.pointer("pointermove", 1100);
++    await f.panel.updateComplete; expect(f.width()).toBe("880px");
++    expect(f.textarea.value).toBe("keep draft");
++    expect(f.handle.releasePointerCapture).toHaveBeenCalledWith(1);
++  });
++  it("supports keyboard limits, retains width on reopen, and resets on double click", async () => {
++    const f = await reviewFixture();
++    f.handle.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft" }));
++    await f.panel.updateComplete; expect(f.width()).toBe("324px");
++    f.handle.dispatchEvent(new KeyboardEvent("keydown", { key: "Home" }));
++    await f.panel.updateComplete; expect(f.width()).toBe("240px");
++    f.handle.dispatchEvent(new KeyboardEvent("keydown", { key: "End" }));
++    await f.panel.updateComplete; expect(f.width()).toBe("880px");
++    const toggle = required(f.panel.shadowRoot?.querySelector<HTMLButtonElement>('[aria-label="Toggle review panel"]'));
++    toggle.click(); await f.panel.updateComplete; toggle.click(); await f.panel.updateComplete;
++    expect(f.width()).toBe("880px");
++    required(f.panel.shadowRoot?.querySelector('[aria-label="Resize review panel"]')).dispatchEvent(new MouseEvent("dblclick"));
++    await f.panel.updateComplete; expect(f.width()).toBe("");
++  });
++});
 diff --git a/pi-web-plugins/codex/CodexPanel.ts b/pi-web-plugins/codex/CodexPanel.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..6d6728cf3b30839518024136b8d3ebbf93578db9
+index 0000000000000000000000000000000000000000..3c862d018542b3ed3d17a487003a925c82e3d974
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.ts
-@@ -0,0 +1,997 @@
+@@ -0,0 +1,1045 @@
 +import { LitElement, css, html, svg, nothing } from "lit";
 +import { property } from "lit/decorators.js";
 +import { repeat } from "lit/directives/repeat.js";
@@ -2283,6 +2326,45 @@ index 0000000000000000000000000000000000000000..6d6728cf3b30839518024136b8d3ebbf
 +  private browseRequest = 0;
 +  private browseFilter = "";
 +  private reviewOpen = false;
++  private reviewWidth: number | undefined;
++  private reviewDrag: { pointerId: number; x: number; width: number } | undefined;
++  private reviewMaxWidth(): number {
++    const width = this.getBoundingClientRect().width;
++    return Math.max(240, width > 850 ? width - 320 : width * 0.9);
++  }
++  private setReviewWidth(width: number): void {
++    this.reviewWidth = Math.round(Math.max(240, Math.min(this.reviewMaxWidth(), width)));
++    this.requestUpdate();
++  }
++  private startReviewResize(event: PointerEvent): void {
++    if (event.button !== 0 || this.reviewDrag) return;
++    const handle = event.currentTarget as HTMLElement;
++    const width = this.renderRoot.querySelector("aside")?.getBoundingClientRect().width;
++    if (!width) return;
++    event.preventDefault();
++    handle.setPointerCapture(event.pointerId);
++    this.reviewDrag = { pointerId: event.pointerId, x: event.clientX, width };
++  }
++  private moveReviewResize(event: PointerEvent): void {
++    const drag = this.reviewDrag;
++    if (!drag || drag.pointerId !== event.pointerId) return;
++    event.preventDefault();
++    this.setReviewWidth(drag.width + drag.x - event.clientX);
++  }
++  private endReviewResize(event: PointerEvent): void {
++    if (this.reviewDrag?.pointerId !== event.pointerId) return;
++    this.reviewDrag = undefined;
++    const handle = event.currentTarget as HTMLElement;
++    if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
++  }
++  private keyReviewResize(event: KeyboardEvent): void {
++    const width = this.renderRoot.querySelector("aside")?.getBoundingClientRect().width ?? 300;
++    const step = event.shiftKey ? 72 : 24;
++    const next = event.key === "ArrowLeft" ? width + step : event.key === "ArrowRight" ? width - step : event.key === "Home" ? 240 : event.key === "End" ? this.reviewMaxWidth() : undefined;
++    if (next === undefined) return;
++    event.preventDefault();
++    this.setReviewWidth(next);
++  }
 +  private reviewFile: WorkspaceFileLink | undefined;
 +  private reviewContent: FileContentResponse | undefined;
 +  private reviewError = "";
@@ -2328,6 +2410,7 @@ index 0000000000000000000000000000000000000000..6d6728cf3b30839518024136b8d3ebbf
 +    this.requestUpdate();
 +  }
 +  override disconnectedCallback(): void {
++    this.reviewDrag = undefined;
 +    this.clearReviewFile();
 +    this.ownerDocument.removeEventListener("pointerdown", this.dismissMenus, true);
 +    this.ownerDocument.removeEventListener("click", this.dismissMenus, true);
@@ -2861,7 +2944,7 @@ index 0000000000000000000000000000000000000000..6d6728cf3b30839518024136b8d3ebbf
 +    const headerActions = html`<button class="review-toggle" ?disabled=${home} aria-label="Toggle review panel" aria-expanded=${reviewOpen} @click=${() => { this.closeMenus(true); this.reviewOpen = !reviewOpen; if (!this.reviewOpen) this.clearReviewFile(); this.requestUpdate(); }}>Review${changes.length > 0 ? html` <span class="count">${changes.length}</span>` : nothing}</button>
 +        <button class="reconnect" aria-label="Reconnect" title="Reconnect" ?disabled=${view.pending} @click=${() => { this.closeMenus(true); this.action((runtime, state) => runtime.initialize(state)); }}>${this.isMobileComposer() ? "Reconnect" : html`<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 7a8 8 0 1 0 0 10M20 3v5h-5"></path></svg>`}</button>`;
 +    return html`
-+      <div class="layout" ?data-review-open=${reviewOpen}>
++      <div class="layout" style=${this.reviewWidth === undefined ? "" : `--review-width:${this.reviewWidth}px`} ?data-review-open=${reviewOpen}>
 +      <header><div class="header-heading">${home ? html`<strong>Codex</strong>` : html`<button class="back-button new-conversation" aria-label="Back to conversations" title="Back to conversations" ?disabled=${view.pending || !view.connected} @click=${() => { this.openConversation(view, ""); }}>←</button><span class="task-title" title=${text(currentThread?.["preview"])}>${text(currentThread?.["preview"]) || "New conversation"}</span>`}</div>
 +        <span class="scope" title=${view.context.workspace.path}><span class="scope-measure" aria-hidden="true">${view.context.workspace.path}</span><span class="scope-label">${this.compactScope ? view.context.workspace.path.split(/[\\/]/).filter(Boolean).at(-1) ?? view.context.workspace.path : view.context.workspace.path}</span></span>
 +        ${this.isMobileComposer() ? html`<details class="header-actions"><summary aria-label="More actions" title="More actions">···</summary><div class="header-actions-menu">${headerActions}</div></details>` : headerActions}
@@ -2904,7 +2987,12 @@ index 0000000000000000000000000000000000000000..6d6728cf3b30839518024136b8d3ebbf
 +      </footer>
 +      <div class="connection-status" role="status">${view.pending ? "Working…" : text(snapshot["status"]) || (view.connected ? "Ready" : "Connecting…")}</div>
 +      </main>
-+      ${reviewOpen ? html`<aside aria-label="Review changes">
++      ${reviewOpen ? html`<aside id="review-panel" aria-label="Review changes">
++        <div class="review-resize" role="separator" tabindex="0" aria-label="Resize review panel" aria-controls="review-panel" aria-orientation="vertical"
++          aria-valuemin="240" aria-valuemax=${Math.round(this.reviewMaxWidth())} aria-valuenow=${Math.min(this.reviewMaxWidth(), this.reviewWidth ?? (this.getBoundingClientRect().width > 850 ? 300 : 340))}
++          title="Drag to resize Review. Double-click to reset."
++          @pointerdown=${this.startReviewResize} @pointermove=${this.moveReviewResize} @pointerup=${this.endReviewResize} @pointercancel=${this.endReviewResize} @lostpointercapture=${this.endReviewResize}
++          @keydown=${this.keyReviewResize} @dblclick=${() => { this.reviewWidth = undefined; this.requestUpdate(); }}></div>
 +        <div class="review-header"><span>Review <span class="count">${changes.length}</span></span><button aria-label="Close review panel" @click=${() => { this.reviewOpen = false; this.clearReviewFile(); this.requestUpdate(); }}>×</button></div>
 +        <div class="review-content">${this.reviewFile !== undefined ? this.renderReviewFile(this.reviewFile) : changes.length === 0 ? html`<p class="empty">File changes will appear here.</p>` : changes.map((item) => html`
 +          <details class="change" open><summary>${text(item["kind"]) === "diff" ? "Turn diff" : "File changes"} <span>${text(item["status"])}</span></summary>
@@ -3033,7 +3121,7 @@ index 0000000000000000000000000000000000000000..6d6728cf3b30839518024136b8d3ebbf
 +    :host { display:block; height:100%; min-height:0; min-width:0; container-type:inline-size; color-scheme:inherit; color:var(--pi-text,#171717); background:var(--pi-bg,#fff); font:13px/1.5 system-ui,sans-serif; }
 +    * { box-sizing:border-box; }
 +    .layout { position:relative; display:grid; grid-template-columns:minmax(0,1fr); grid-template-rows:46px minmax(0,1fr); height:100%; overflow:hidden; }
-+    .layout[data-review-open] { grid-template-columns:minmax(0,1fr) 300px; }
++    .layout[data-review-open] { grid-template-columns:minmax(320px,1fr) clamp(240px,var(--review-width,300px),calc(100% - 320px)); }
 +    header { grid-column:1 / -1; display:flex; align-items:center; gap:12px; padding:0 14px; border-bottom:1px solid var(--pi-border-muted,#ececec); min-width:0; }
 +    .header-heading { display:flex; align-items:center; gap:8px; min-width:0; max-width:45%; } header strong { font-size:14px; } .back-button { flex:none; display:grid; place-items:center; width:28px; height:28px; padding:0; font-size:18px; } .task-title { font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 +    .header-actions { position:relative; flex:none; }
@@ -3202,12 +3290,14 @@ index 0000000000000000000000000000000000000000..6d6728cf3b30839518024136b8d3ebbf
 +    .latest { align-self:center; font-size:11px; border-color:var(--pi-border-muted,#eee); } section { flex-shrink:0; max-height:35%; overflow:auto; }
 +    .approval { margin:8px 16px; padding:12px; border:1px solid var(--pi-accent,#8ab4ff); border-radius:10px; } .approval strong,small { overflow-wrap:anywhere; } small { display:block; font-size:11px; color:var(--pi-muted,#777); } .approval pre { margin:8px 0; } label { display:block; } label input,label select { display:block; width:100%; border-color:var(--pi-border,#ddd); }
 +    .error { color:var(--pi-danger,#c33); overflow-wrap:anywhere; max-height:120px; overflow:auto; } main>p { margin:8px 16px; } .empty { color:var(--pi-muted,#888); margin:12px 0; }
-+    aside { min-width:0; min-height:0; border-left:1px solid var(--pi-border-muted,#ececec); display:flex; flex-direction:column; background:var(--pi-bg,#fff); }
++    .review-resize { position:absolute; top:0; bottom:0; left:-5px; width:10px; cursor:col-resize; touch-action:none; user-select:none; z-index:3; }
++    .review-resize:hover,.review-resize:focus-visible { background:linear-gradient(var(--pi-accent,#4569ae),var(--pi-accent,#4569ae)) center/2px 100% no-repeat; outline:none; }
++    aside { position:relative; min-width:0; min-height:0; border-left:1px solid var(--pi-border-muted,#ececec); display:flex; flex-direction:column; background:var(--pi-bg,#fff); }
 +    .review-file { max-height:none; overflow:visible; } .review-file .file-heading { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:8px; } .review-file .file-heading strong { overflow-wrap:anywhere; font-size:12px; } .review-file .file-heading>span { color:var(--pi-muted,#666); font-size:11px; }
 +    .file-source { white-space:pre; overflow:auto; max-height:65vh; font:12px/1.6 ui-monospace,monospace; margin:0; padding:6px 0; } .file-source>span { display:block; min-width:max-content; padding-right:8px; } .file-source>span::before { content:attr(data-line); display:inline-block; width:6ch; padding-right:1ch; text-align:right; color:var(--pi-muted,#777); user-select:none; } .file-source .selected-line { background:var(--pi-warning-surface,#fff0bd); box-shadow:inset 3px 0 var(--pi-accent,#4569ae); }
 +    .review-header { display:flex; align-items:center; justify-content:space-between; padding:8px 12px; border-bottom:1px solid var(--pi-border-muted,#ececec); color:var(--pi-muted,#666); } .count { display:inline-block; padding:0 5px; background:var(--pi-surface,#f3f3f3); border-radius:4px; font-size:11px; }
 +    .review-content { overflow:auto; padding:8px; flex:1; } .review-content .empty { padding:8px; font-size:12px; } .change { border-bottom:1px solid var(--pi-border-muted,#ececec); margin-bottom:10px; } .change summary { font-size:12px; } .change summary span { color:var(--pi-muted,#888); font-size:10px; } .diff { overflow:auto; padding:4px 0 10px; font-size:11px; } .diff span { display:block; padding:0 8px; white-space:pre-wrap; } .addition { background:var(--pi-success-surface,#e3f1e8); } .deletion { background:var(--pi-danger-surface,#fae8e8); } .hunk { background:var(--pi-surface,#f0f0f0); color:var(--pi-muted,#777); }
-+    @container (max-width:850px) { .layout[data-review-open] { grid-template-columns:minmax(0,1fr); } aside { position:absolute; z-index:2; top:46px; bottom:0; right:0; width:min(340px,90%); box-shadow:-8px 0 24px #0001; } .transcript { padding:24px 20px; } }
++    @container (max-width:850px) { .layout[data-review-open] { grid-template-columns:minmax(0,1fr); } aside { position:absolute; z-index:2; top:46px; bottom:0; right:0; width:min(var(--review-width,340px),90%); box-shadow:-8px 0 24px #0001; } .transcript { padding:24px 20px; } }
 +    @container (max-width:520px) {
 +      .layout { grid-template-rows:52px minmax(0,1fr); }
 +      header { display:flex; flex-wrap:nowrap; gap:4px; padding:0 8px; }
@@ -3247,6 +3337,7 @@ index 0000000000000000000000000000000000000000..6d6728cf3b30839518024136b8d3ebbf
 +      .approval { margin:6px 8px; padding:10px; }
 +      .approval button { min-height:44px; }
 +      aside { top:52px; width:100%; }
++      .review-resize { display:none; }
 +      .review-header button { min-height:44px; }
 +    }
 +  `;
