@@ -49,10 +49,17 @@ install_local() (
     # Bound resource contention when the host exposes many CPUs. Package-build
     # tests spawn compilers and can exceed Vitest's default five-second timeout.
     test_args=(-- "--maxWorkers=${PI_WEB_TEST_MAX_WORKERS:-4}" "--testTimeout=${PI_WEB_TEST_TIMEOUT_MS:-30000}")
+    # Tests start local HTTP servers. Keep them off environment proxies while
+    # preserving both existing exception lists; leave install/build env intact.
+    test_no_proxy="${no_proxy:-}"
+    if [[ -n "${NO_PROXY:-}" ]]; then
+      test_no_proxy="${test_no_proxy:+$test_no_proxy,}$NO_PROXY"
+    fi
+    test_no_proxy="${test_no_proxy:+$test_no_proxy,}localhost,127.0.0.1,::1"
     if node --no-experimental-webstorage -e '' >/dev/null 2>&1; then
-      NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--no-experimental-webstorage" npm test "${test_args[@]}"
+      NO_PROXY="$test_no_proxy" no_proxy="$test_no_proxy" NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--no-experimental-webstorage" npm test "${test_args[@]}"
     else
-      npm test "${test_args[@]}"
+      NO_PROXY="$test_no_proxy" no_proxy="$test_no_proxy" npm test "${test_args[@]}"
     fi
     npm run build
 

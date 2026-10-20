@@ -17,11 +17,11 @@ sh scripts/install.sh
 
 `data/` 已被 Git 忽略。可单独运行 `sh scripts/sync.sh` 同步并准备源码；`--local` 仅使用 `data/pi-web-upstream.git` 缓存。`PI_WEB_INSTALL_ROOT` 可覆盖构建安装目录，Git 下载缓存仍保存在 `data/`。运行中的版本依赖对应 release 目录，请勿删除。
 
-当前补丁按功能整理为 7 个：终端修复与增强为 `0001`–`0005`，完整 Codex 插件及其界面调整为 `0006`，添加项目弹窗的长路径显示修复为 `0007`。详细的同步、冲突处理和补丁维护方法见 [使用文档](docs/usage.md)。
+当前补丁按功能整理为 8 个：终端修复与增强为 `0001`–`0005`，完整 Codex 插件及其界面调整为 `0006`，添加项目弹窗的长路径显示修复为 `0007`，iOS 终端输入事件兼容修复为 `0008`。详细的同步、冲突处理和补丁维护方法见 [使用文档](docs/usage.md)。
 
 终端补丁还会在裁剪回放缓存时保留鼠标跟踪、备用屏幕及粘贴等模式，修复 Codex CLI 长时间运行后刷新页面无法滚动历史的问题。更新后需要重启 `pi-web-sessiond`，再新建终端并用 `codex resume` 恢复会话；旧守护进程已经丢弃的状态无法补回。
 
-安装时默认最多并行运行 4 个测试工作进程，单个测试时限为 30 秒，避免大量并发构建引发超时。可用 `PI_WEB_TEST_MAX_WORKERS` 和 `PI_WEB_TEST_TIMEOUT_MS` 覆盖，例如 `PI_WEB_TEST_MAX_WORKERS=2 PI_WEB_TEST_TIMEOUT_MS=60000 bash scripts/install.sh`。测试失败仍会中止安装，保留原有全局版本。
+安装时默认最多并行运行 4 个测试工作进程，单个测试时限为 30 秒，避免大量并发构建引发超时。可用 `PI_WEB_TEST_MAX_WORKERS` 和 `PI_WEB_TEST_TIMEOUT_MS` 覆盖，例如 `PI_WEB_TEST_MAX_WORKERS=2 PI_WEB_TEST_TIMEOUT_MS=60000 bash scripts/install.sh`。测试失败仍会中止安装，保留原有全局版本。安装测试会自动将 `localhost`、`127.0.0.1` 和 `::1` 加入大小写两种 `NO_PROXY` 环境变量，并保留已有例外；该调整仅作用于测试进程。
 
 运行脚本支持 `bash scripts/pi-web-run-jmfederico.sh update`：更新 Pi Agent 到 latest、将官方 main 最新提交写入 patches/base-commit、应用补丁并测试构建安装，不启停服务。只更新 Agent 可加 `--pi-only`，只更新补丁版 pi-web 可加 `--web-only`，预览可加 `--dry-run`。
 

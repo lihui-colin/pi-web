@@ -1,0 +1,275 @@
+diff --git a/pi-web-plugins/terminal/TerminalPanel.ts b/pi-web-plugins/terminal/TerminalPanel.ts
+index df5afb41..75bfacd1 100644
+--- a/pi-web-plugins/terminal/TerminalPanel.ts
++++ b/pi-web-plugins/terminal/TerminalPanel.ts
+@@ -7,6 +7,7 @@ import { FitAddon, type ITerminalDimensions } from "@xterm/addon-fit";
+ import xtermStyles from "@xterm/xterm/css/xterm.css?inline";
+ import type { PluginPeerChannel, PluginPeerChannelClose, TerminalCommandRun, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
+ import { writeClipboardText } from "./clipboard";
++import { attachTerminalIosInput } from "./terminalIosInput";
+ import { attachTerminalTouchScroll } from "./terminalTouchScroll";
+ import { TerminalClipboardRequests } from "./terminalClipboard";
+ import { selectFallbackTerminal, selectPreferredTerminal } from "./terminalSelection";
+@@ -70,6 +71,7 @@ export class TerminalPanel extends LitElement {
+   private clipboardNoticeTimer: ReturnType<typeof setTimeout> | undefined;
+   private terminalClipboard: TerminalClipboardRequests | undefined;
+   private terminal: Terminal | undefined;
++  private disposeIosInput: (() => void) | undefined;
+   private disposeTouchScroll: (() => void) | undefined;
+   private fitAddon: FitAddon | undefined;
+   private channel: PluginPeerChannel | undefined;
+@@ -598,6 +600,7 @@ export class TerminalPanel extends LitElement {
+     terminal.loadAddon(fitAddon);
+     terminal.open(terminalHost);
+     this.terminal = terminal;
++    this.disposeIosInput = attachTerminalIosInput(terminal, navigator);
+     this.disposeTouchScroll = attachTerminalTouchScroll(terminalHost, () => terminal.modes.mouseTrackingMode !== "none");
+     this.terminalClipboard = new TerminalClipboardRequests(terminal.parser);
+     this.fitAddon = fitAddon;
+@@ -914,6 +917,8 @@ export class TerminalPanel extends LitElement {
+     this.terminalClipboard?.dispose();
+     this.terminalClipboard = undefined;
+     this.dismissClipboardNotice();
++    this.disposeIosInput?.();
++    this.disposeIosInput = undefined;
+     this.disposeTouchScroll?.();
+     this.disposeTouchScroll = undefined;
+     this.terminal?.dispose();
+diff --git a/pi-web-plugins/terminal/terminalIosInput.test.ts b/pi-web-plugins/terminal/terminalIosInput.test.ts
+new file mode 100644
+index 00000000..ddbf8809
+--- /dev/null
++++ b/pi-web-plugins/terminal/terminalIosInput.test.ts
+@@ -0,0 +1,140 @@
++// @vitest-environment happy-dom
++import { Terminal } from "@xterm/xterm";
++import { afterEach, describe, expect, it } from "vitest";
++import { attachTerminalIosInput } from "./terminalIosInput";
++
++const cleanups: (() => void)[] = [];
++afterEach(() => {
++  for (const cleanup of cleanups.splice(0)) cleanup();
++  document.body.replaceChildren();
++});
++
++function setup(platform = { userAgent: "iPhone", platform: "iPhone", maxTouchPoints: 5 }, patched = true) {
++  const host = document.createElement("div");
++  document.body.append(host);
++  const terminal = new Terminal();
++  terminal.open(host);
++  const textarea = terminal.textarea;
++  if (!textarea) throw new Error("Missing xterm textarea");
++  const dispose = patched ? attachTerminalIosInput(terminal, platform) : () => undefined;
++  cleanups.push(() => { dispose(); terminal.dispose(); });
++  const data: string[] = [];
++  terminal.onData((value) => { data.push(value); });
++  const key = (type: string, keyCode: number, value = "Unidentified") => {
++    textarea.dispatchEvent(new KeyboardEvent(type, { key: value, keyCode, bubbles: true, cancelable: true, composed: true }));
++  };
++  const edit = (inputType: string, value: string | null, cancelable = true) => {
++    const event = new InputEvent("beforeinput", { inputType, data: value, bubbles: true, composed: true, cancelable });
++    textarea.dispatchEvent(event);
++    if (!event.defaultPrevented) {
++      textarea.value += value ?? "";
++      textarea.dispatchEvent(new InputEvent("input", { inputType, data: value, bubbles: true, composed: true }));
++    }
++  };
++  return { terminal, textarea, data, key, edit, dispose };
++}
++
++const tick = () => new Promise<void>((resolve) => { setTimeout(resolve, 10); });
++
++describe("iOS terminal native input", () => {
++  it("reproduces the xterm 6 delayed native edit loss", async () => {
++    const { data, key, edit } = setup(undefined, false);
++    key("keydown", 229);
++    await tick();
++    edit("insertText", "a");
++    key("keyup", 0);
++    await tick();
++    expect(data).toEqual([]);
++  });
++
++  it.each([true, false])("sends delayed native edits once (cancelable=%s)", async (cancelable) => {
++    const { data, key, edit } = setup();
++    for (const text of ["a", " ", "，", "🙂"]) {
++      key("keydown", 229);
++      await tick();
++      edit("insertText", text, cancelable);
++      key("keyup", 0);
++    }
++    await tick();
++    expect(data).toEqual(["a", " ", "，", "🙂"]);
++  });
++
++  it("sends fast consecutive edits once and respects disabled input", async () => {
++    const { terminal, data, key, edit } = setup();
++    key("keydown", 229);
++    edit("insertText", "a");
++    key("keyup", 0);
++    key("keydown", 229);
++    edit("insertText", "b");
++    key("keyup", 0);
++    await tick();
++    expect(data).toEqual(["a", "b"]);
++    terminal.options.disableStdin = true;
++    edit("insertText", "blocked");
++    expect(data).toEqual(["a", "b"]);
++  });
++
++  it("handles keyCode zero and input-only return and delete", () => {
++    const { data, key, edit } = setup();
++    key("keydown", 0);
++    edit("insertText", "x");
++    key("keyup", 0);
++    edit("deleteContentBackward", null);
++    edit("insertLineBreak", null);
++    expect(data).toEqual(["x", "\x7f", "\r"]);
++  });
++
++  it("does not duplicate hardware enter or keypress text", () => {
++    const { data, key, edit } = setup();
++    key("keydown", 13, "Enter");
++    edit("insertLineBreak", null);
++    key("keyup", 13, "Enter");
++    key("keydown", 65, "A");
++    key("keypress", 65, "A");
++    edit("insertText", "A");
++    key("keyup", 65, "A");
++    expect(data).toEqual(["\r", "A"]);
++  });
++
++  it("leaves Chinese composition to xterm and sends its commit once", async () => {
++    const { textarea, data, edit, key } = setup();
++    textarea.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
++    key("keydown", 229);
++    textarea.value = "你";
++    textarea.dispatchEvent(new CompositionEvent("compositionupdate", { data: "你", bubbles: true }));
++    textarea.dispatchEvent(new InputEvent("input", { inputType: "insertCompositionText", data: "你", isComposing: true, bubbles: true }));
++    expect(data).toEqual([]);
++    await tick();
++    textarea.dispatchEvent(new CompositionEvent("compositionend", { data: "你", bubbles: true }));
++    textarea.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "你", bubbles: true, composed: true }));
++    key("keyup", 229);
++    await tick();
++    edit("insertText", "。");
++    expect(data).toEqual(["你", "。"]);
++  });
++
++  it("does not attach on Android, desktop, or after disposal", async () => {
++    for (const platform of [
++      { userAgent: "Android", platform: "Linux", maxTouchPoints: 5 },
++      { userAgent: "Macintosh", platform: "MacIntel", maxTouchPoints: 0 },
++    ]) {
++      const { data, key, edit } = setup(platform);
++      key("keydown", 229);
++      await tick();
++      edit("insertText", "x");
++      expect(data).toEqual([]);
++    }
++    const { data, key, edit, dispose } = setup();
++    dispose();
++    key("keydown", 229);
++    await tick();
++    edit("insertText", "x");
++    expect(data).toEqual([]);
++  });
++
++  it("supports iPad desktop user agents", () => {
++    const { data, edit } = setup({ userAgent: "Macintosh", platform: "MacIntel", maxTouchPoints: 5 });
++    edit("deleteContentBackward", null);
++    expect(data).toEqual(["\x7f"]);
++  });
++});
+diff --git a/pi-web-plugins/terminal/terminalIosInput.ts b/pi-web-plugins/terminal/terminalIosInput.ts
+new file mode 100644
+index 00000000..596464ca
+--- /dev/null
++++ b/pi-web-plugins/terminal/terminalIosInput.ts
+@@ -0,0 +1,86 @@
++import type { Terminal } from "@xterm/xterm";
++
++/** xterm 6 relies on keypress and a keydown-229 timer for text. iOS can
++ * deliver the textarea edit after that timer has run. Use native editing
++ * events for non-composition input; keep xterm's IME and hardware-key handling.
++ */
++export function attachTerminalIosInput(terminal: Terminal, navigator: Pick<Navigator, "userAgent" | "platform" | "maxTouchPoints">): () => void {
++  const ios = /iPad|iPhone|iPod/u.test(navigator.userAgent)
++    || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
++  const textarea = terminal.textarea;
++  const host = textarea?.parentElement;
++  if (!ios || !textarea || !host || terminal.options.screenReaderMode === true) return () => undefined;
++
++  let composing = false;
++  let finishing = false;
++  let keyboardHandled = false;
++  let finishTimer: ReturnType<typeof setTimeout> | undefined;
++  const keySubscription = terminal.onKey(() => { keyboardHandled = true; });
++  const keydown = (event: KeyboardEvent): void => {
++    if (event.target !== textarea) return;
++    keyboardHandled = false;
++    // Do not schedule xterm's textarea-diff timer: it races the native edit
++    // and would duplicate input handled below. Composition still belongs to xterm.
++    // eslint-disable-next-line @typescript-eslint/no-deprecated -- Match xterm 6's legacy IME dispatch boundary.
++    if (!composing && !finishing && event.keyCode === 229) event.stopPropagation();
++  };
++  const keyup = (): void => { keyboardHandled = false; };
++  const compositionStart = (): void => {
++    composing = true;
++    finishing = false;
++    keyboardHandled = false;
++    clearTimeout(finishTimer);
++  };
++  const compositionEnd = (): void => {
++    composing = false;
++    finishing = true;
++    // xterm reads the committed textarea in a timer. Leave the trailing input
++    // event and textarea intact until its composition handler has finished.
++    clearTimeout(finishTimer);
++    finishTimer = setTimeout(() => { finishing = false; }, 0);
++  };
++  const dataFor = (event: InputEvent): string | undefined => {
++    if (event.target !== textarea || composing || finishing || event.isComposing) return undefined;
++    switch (event.inputType) {
++      case "insertText": return event.data ?? undefined;
++      case "insertLineBreak":
++      case "insertParagraph": return "\r";
++      case "deleteContentBackward": return "\x7f";
++      default: return undefined;
++    }
++  };
++  const beforeInput = (event: InputEvent): void => {
++    const data = dataFor(event);
++    if (data === undefined || !event.cancelable) return;
++    // Keeping the helper unchanged also prevents stale text being resent.
++    event.preventDefault();
++    event.stopPropagation();
++    if (!keyboardHandled) terminal.input(data, true);
++    keyboardHandled = false;
++  };
++  const input = (event: InputEvent): void => {
++    const data = dataFor(event);
++    if (data === undefined) return;
++    // Non-cancelable beforeinput (or no beforeinput) still needs a fallback.
++    event.stopPropagation();
++    if (!keyboardHandled) terminal.input(data, true);
++    keyboardHandled = false;
++    textarea.value = "";
++  };
++  host.addEventListener("keydown", keydown, true);
++  host.addEventListener("keyup", keyup, true);
++  host.addEventListener("compositionstart", compositionStart, true);
++  host.addEventListener("compositionend", compositionEnd, true);
++  host.addEventListener("beforeinput", beforeInput, true);
++  host.addEventListener("input", input, true);
++  return () => {
++    clearTimeout(finishTimer);
++    keySubscription.dispose();
++    host.removeEventListener("keydown", keydown, true);
++    host.removeEventListener("keyup", keyup, true);
++    host.removeEventListener("compositionstart", compositionStart, true);
++    host.removeEventListener("compositionend", compositionEnd, true);
++    host.removeEventListener("beforeinput", beforeInput, true);
++    host.removeEventListener("input", input, true);
++  };
++}

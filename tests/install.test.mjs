@@ -15,7 +15,7 @@ afterEach(() => {
 function git(cwd, ...args) {
   return execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', ...args], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 }
-function fixture({ conflict = false, failure = '', agent = true, agentVersion = 'latest', maxWorkers = '4', testTimeout = '30000' } = {}) {
+function fixture({ conflict = false, failure = '', agent = true, agentVersion = 'latest', maxWorkers = '4', testTimeout = '30000', proxyEnv = {} } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'pi-web patch test '));
   roots.push(root);
   const upstream = join(root, 'upstream');
@@ -25,6 +25,7 @@ function fixture({ conflict = false, failure = '', agent = true, agentVersion = 
   const releases = join(source, 'data/pi-web-releases');
   const log = join(root, 'calls.log');
   const prefix = join(root, 'global');
+  const proxyLog = join(root, 'proxy-env.log');
   for (const dir of [upstream, source, bin]) mkdirSync(dir);
   writeFileSync(log, '');
   git(upstream, 'init', '-b', 'main');
@@ -57,6 +58,7 @@ function fixture({ conflict = false, failure = '', agent = true, agentVersion = 
   git(source, 'remote', 'add', 'origin', origin);
   writeFileSync(join(bin, 'npm'), `#!/bin/sh
 printf 'npm %s\n' "$*" >> "$TEST_LOG"
+printf '%s\t%s\t%s\n' "$1" "$NO_PROXY" "$no_proxy" >> "$TEST_PROXY_LOG"
 if [ "$TEST_FAILURE" = "$*" ]; then exit 7; fi
 if [ "$1" = ls ]; then exit 1; fi
 case "$*" in
@@ -88,9 +90,9 @@ printf 'installed %s\n' "$PWD" >> "$TEST_LOG"
   if (agent) writeFileSync(join(bin, 'pi'), '#!/bin/sh\necho 0.85.1\n');
   for (const file of ['node', 'npm', ...(agent ? ['pi'] : [])]) chmodSync(join(bin, file), 0o755);
   const run = (script = 'install.sh', args = [], runFailure = failure) => spawnSync('sh', [join(source, 'scripts', script), ...args], {
-    cwd: root, encoding: 'utf8', env: { ...process.env, PATH: `${bin}:/usr/bin:/bin`, TEST_BIN: bin, PI_VERSION: agentVersion, PI_WEB_UPSTREAM_URL: upstream, PI_WEB_INSTALL_ROOT: '', PI_WEB_TEST_MAX_WORKERS: maxWorkers, PI_WEB_TEST_TIMEOUT_MS: testTimeout, TEST_LOG: log, TEST_FAILURE: runFailure, TEST_PREFIX: prefix, REAL_NODE: process.execPath, REAL_NPM: realpathSync(npm) },
+    cwd: root, encoding: 'utf8', env: { ...process.env, PATH: `${bin}:/usr/bin:/bin`, TEST_BIN: bin, PI_VERSION: agentVersion, PI_WEB_UPSTREAM_URL: upstream, PI_WEB_INSTALL_ROOT: '', PI_WEB_TEST_MAX_WORKERS: maxWorkers, PI_WEB_TEST_TIMEOUT_MS: testTimeout, TEST_LOG: log, TEST_FAILURE: runFailure, TEST_PREFIX: prefix, REAL_NODE: process.execPath, REAL_NPM: realpathSync(npm), TEST_PROXY_LOG: proxyLog, ...proxyEnv },
   });
-  return { source, upstream, origin, log, releases, prefix, run, baseCommit };
+  return { source, upstream, origin, log, releases, prefix, run, baseCommit, proxyLog };
 }
 
 function prepareLocalMain(f) {
@@ -541,3 +543,18 @@ test('install stops before syncing if config and template are missing', () => {
   assert.equal(existsSync(join(f.source, 'data/pi-web-upstream.git')), false);
   assert.equal(readFileSync(f.log, 'utf8'), '');
 });
+
+for (const [upper, lower] of [[undefined, undefined], ['upper.internal', undefined], [undefined, 'lower.internal'], ['upper.internal', 'lower.internal']]) {
+  test(`installation bypasses loopback proxies only during tests: ${upper}/${lower}`, () => {
+    const f = fixture({ proxyEnv: { NO_PROXY: upper, no_proxy: lower } });
+    const result = f.run();
+    assert.equal(result.status, 0, result.stderr);
+    const rows = readFileSync(f.proxyLog, 'utf8').trimEnd().split('\n').map(line => line.split('\t'));
+    const testRow = rows.find(row => row[0] === 'test');
+    const expected = [lower, upper, 'localhost', '127.0.0.1', '::1'].filter(Boolean).join(',');
+    assert.deepEqual(testRow, ['test', expected, expected]);
+    for (const command of ['ci', 'run', 'install']) {
+      assert.deepEqual(rows.find(row => row[0] === command), [command, upper ?? '', lower ?? '']);
+    }
+  });
+}
