@@ -2308,10 +2308,10 @@ index 0000000000000000000000000000000000000000..7cf5a7c30fd8dc12b2e18e57aa028051
 +});
 diff --git a/pi-web-plugins/codex/CodexPanel.ts b/pi-web-plugins/codex/CodexPanel.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..4262ab7ae79ff2277e3965e2362dc84f99e9809f
+index 0000000000000000000000000000000000000000..bc3e2b1a8ff6adefb7ea740b8217a5c1fa488264
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.ts
-@@ -0,0 +1,1045 @@
+@@ -0,0 +1,1059 @@
 +import { LitElement, css, html, svg, nothing } from "lit";
 +import { property } from "lit/decorators.js";
 +import { repeat } from "lit/directives/repeat.js";
@@ -2455,7 +2455,21 @@ index 0000000000000000000000000000000000000000..4262ab7ae79ff2277e3965e2362dc84f
 +    this.follow = true;
 +    this.unsubscribe = this.runtime.subscribe(view, () => { this.requestUpdate(); });
 +  }
++  private composerSize?: { editor: HTMLTextAreaElement; value: string; width: number };
++  private resizeComposer(): void {
++    const editor = this.renderRoot.querySelector<HTMLTextAreaElement>("textarea");
++    if (!editor || editor.clientWidth === 0) return;
++    const previous = this.composerSize;
++    const width = editor.clientWidth;
++    if (previous?.editor === editor && previous.value === editor.value && previous.width === width) return;
++    this.composerSize = { editor, value: editor.value, width };
++    // Reset before measuring so deleting text also shrinks the editor.
++    // CSS min/max heights bound the result on desktop and mobile.
++    editor.style.height = "auto";
++    editor.style.height = `${String(editor.scrollHeight)}px`;
++  }
 +  protected override updated(): void {
++    this.resizeComposer();
 +    if (this.reviewScroll && this.reviewOpen && !this.reviewLoading) {
 +      this.reviewScroll = false;
 +      const source = this.renderRoot.querySelector<HTMLElement>(".file-source");
@@ -2987,7 +3001,7 @@ index 0000000000000000000000000000000000000000..4262ab7ae79ff2277e3965e2362dc84f
 +        ${view.references.length > 0 ? html`<div class="context-tray" aria-label="Selected workspace context">${view.references.map((path) => html`<span title=${path}>${path}<button aria-label=${`Remove ${path}`} ?disabled=${view.pending} @click=${() => { this.runtime?.saveReferences(view, view.references.filter((entry) => entry !== path)); }}>×</button></span>`)}</div>` : nothing}
 +        <input class="file-input" type="file" multiple hidden aria-label="Upload files from this device" @change=${(event: Event) => { if (event.target instanceof HTMLInputElement) { const files = Array.from(event.target.files ?? []); event.target.value = ""; this.addFiles(view, files); } }}>
 +        ${this.renderAttachmentTray(view)}
-+        <textarea @paste=${(event: ClipboardEvent) => { this.pasteFiles(event, view); }} aria-label="Message Codex" enterkeyhint="enter" placeholder=${queueInput ? "Add to the queue, or use Steer after sending..." : view.mode === "plan" ? "Describe your task to generate a plan..." : home ? "Ask Codex to start a new conversation" : "Ask for follow-up changes"} .value=${view.draft}
++        <textarea rows="2" @paste=${(event: ClipboardEvent) => { this.pasteFiles(event, view); }} aria-label="Message Codex" enterkeyhint="enter" placeholder=${queueInput ? "Add to the queue, or use Steer after sending..." : view.mode === "plan" ? "Describe your task to generate a plan..." : home ? "Ask Codex to start a new conversation" : "Ask for follow-up changes"} .value=${view.draft}
 +          @input=${(event: Event) => { if (event.target instanceof HTMLTextAreaElement) { this.historyNavigation = undefined; this.runtime?.saveDraft(view, event.target.value); this.requestUpdate(); } }}
 +          @compositionstart=${() => { this.composing = true; }} @compositionend=${() => { this.composing = false; }}
 +          @keydown=${(event: KeyboardEvent) => { this.composerKeydown(event, view); }}></textarea>
@@ -3196,7 +3210,7 @@ index 0000000000000000000000000000000000000000..4262ab7ae79ff2277e3965e2362dc84f
 +    .attachment small { display:block; font-size:11px; overflow-wrap:anywhere; }
 +    .message-images { display:flex; flex-wrap:wrap; gap:8px; } .message-image { display:block; max-width:100%; width:180px; max-height:200px; object-fit:contain; border-radius:8px; margin-bottom:6px; }
 +    .message-image-label { font-size:12px; } .file-input[hidden] { display:none; }
-+    textarea { display:block; width:100%; resize:vertical; min-height:70px; max-height:180px; padding:3px 7px 12px; border:0; background:transparent; caret-color:var(--pi-accent,#559ff6); }
++    textarea { display:block; width:100%; resize:none; overflow-y:auto; line-height:1.5; min-height:calc(3em + 6px); max-height:180px; padding:3px 7px; border:0; background:transparent; caret-color:var(--pi-accent,#559ff6); }
 +    textarea::placeholder { color:var(--pi-muted,#858585); } .composer-controls { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:8px; } .composer-controls select { font-size:12px; max-width:180px; min-width:0; padding:4px; color:var(--pi-muted,#707070); }
 +    .composer-leading,.composer-trailing { display:flex; align-items:center; gap:2px; }
 +    .composer-leading { flex:none; } .composer-trailing { min-width:0; margin-left:auto; }
@@ -3327,7 +3341,7 @@ index 0000000000000000000000000000000000000000..4262ab7ae79ff2277e3965e2362dc84f
 +      .markdown img { max-width:100%; height:auto; }
 +      .command-line code { min-width:0; }
 +      footer { position:relative; margin:6px 8px 0; padding:10px 8px 4px; border-radius:16px; }
-+      textarea { min-height:56px; max-height:min(120px,24dvh); font-size:16px; resize:none; }
++      textarea { max-height:min(120px,24dvh); font-size:16px; resize:none; }
 +      input,select,.composer-controls select { font-size:16px; min-height:44px; }
 +      .add-menu .settings-menu { display:flex; flex-direction:column; gap:8px; border-top:1px solid var(--pi-border-muted,#ddd); margin-top:8px; padding-top:8px; }
 +      .add-menu .settings-menu .permission-picker { position:static; width:100%; max-width:100%; }
