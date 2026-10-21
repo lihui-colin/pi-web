@@ -70,6 +70,39 @@ test('two ports have independent state, socket and processes; stopping one prese
   } finally { f.cleanup(); }
 });
 
+for (const source of ['environment', 'config']) {
+  test(`proxy variables from ${source} reach sessiond and its child process`, () => {
+    const f = fixture();
+    try {
+      const proxy = {
+        HTTP_PROXY: 'http://10.30.0.16:7890',
+        HTTPS_PROXY: 'http://10.30.0.16:7890',
+        NO_PROXY: 'localhost,127.0.0.1,::1,internal.example',
+      };
+      // Mirror the Codex transport's spawn without an explicit env override.
+      writeFileSync(join(f.root, 'bin/pi-web-sessiond'), `#!${process.execPath}
+const { spawnSync } = require('node:child_process');
+const keys = ${JSON.stringify(Object.keys(proxy))};
+const child = spawnSync(process.execPath, ['-e', 'console.log(JSON.stringify(Object.fromEntries(' + JSON.stringify(keys) + '.map(key => [key, process.env[key]]))))'], { encoding: 'utf8' });
+if (child.status !== 0) process.exit(1);
+console.log(child.stdout.trim());
+setInterval(() => {}, 1000);
+`, { mode: 0o755 });
+      writeFileSync(join(f.root, 'data/pi-web.conf'), 'PI_WEB_PORT=8425\n' +
+        (source === 'config' ? Object.entries(proxy).map(([key, value]) => `${key}='${value}'`).join('\n') + '\n' : ''));
+      const inherited = source === 'environment' ? proxy : Object.fromEntries(Object.keys(proxy).map(key => [key, 'inherited-value']));
+      const result = f.run('start', undefined, inherited);
+      const dir = join(f.root, 'data/pi-web/8425');
+      for (const service of ['server', 'sessiond']) {
+        const pidfile = join(dir, `${service}.pid`);
+        if (existsSync(pidfile)) f.pids.push(Number(readFileSync(pidfile, 'utf8')));
+      }
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(JSON.parse(readFileSync(join(dir, 'sessiond.log'), 'utf8')), proxy);
+    } finally { f.cleanup(); }
+  });
+}
+
 test('stop reads the same config as start', () => {
   const f = fixture();
   try {

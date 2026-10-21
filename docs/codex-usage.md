@@ -20,6 +20,27 @@ Codex 作为独立的 `pi-web.codex` 插件运行，入口位于 Workspace 工�
 
 Codex CLI 是可选依赖，插件首次使用时才启动子进程。未安装或未登录时页面显示错误或登录提示，Pi 和 Terminal 仍可使用。插件不会安装 CLI、代为登录或复制认证文件。
 
+## app-server 代理
+
+插件直接启动 `codex app-server`，不会读取 shell alias。app-server 继承 `pi-web-sessiond` 的环境变量，可在 `data/pi-web.conf` 中配置（无需 `export`）：
+
+```bash
+HTTP_PROXY='http://10.30.0.16:7890'
+HTTPS_PROXY='http://10.30.0.16:7890'
+NO_PROXY='localhost,127.0.0.1,::1'
+```
+
+也可以在服务尚未启动时，通过启动命令传入：
+
+```bash
+HTTP_PROXY=http://10.30.0.16:7890 HTTPS_PROXY=http://10.30.0.16:7890 \
+NO_PROXY=localhost,127.0.0.1,::1 bash scripts/pi-web-run-jmfederico.sh start
+```
+
+配置文件中的同名变量优先；未填写的变量保留启动环境中的值。这些变量也会被其他服务子进程继承，并非仅作用于 Codex。已有 `NO_PROXY` 例外请保留，并按需补充内部服务地址。
+
+已运行的 sessiond 不会读取新的环境变量，刷新页面或重连 Codex 不会使代理配置生效。需先检查活跃会话、等待任务结束并保存恢复信息，在允许中断时用 `scripts/pi-web-run-jmfederico.sh stop` 停止，再用 `start` 启动。若操作会中断当前维护会话，应由独立维护进程完成停止、启动和就绪检查。
+
 ## 页面布局
 
 首页采用紧凑的 **Chats** 列表：每行显示圆点、会话标题及更新时间，默认显示前 5 个。**More** 固定在第 5 个之后，点击展开下方其余会话，再点击收起；展开后可用 **Load older conversations** 加载后续分页。输入区固定在底部，只有发送时才创建新会话。

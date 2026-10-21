@@ -5,6 +5,12 @@ PI_WEB_PORT=8024
 PI_WEB_HOST=0.0.0.0
 PI_WEB_PASSWORD=''
 
+# 可选：Codex app-server 继承 sessiond 的代理环境变量；其他服务子进程也会继承。
+# 不填写时保留启动命令的环境变量；填写时覆盖同名变量，无需 export。
+# HTTP_PROXY='http://10.30.0.16:7890'
+# HTTPS_PROXY='http://10.30.0.16:7890'
+# NO_PROXY='localhost,127.0.0.1,::1'
+
 # 语音输入入口开关：true/false，默认关闭，图标仍可见但不可用。识别尚未实现，开启后也暂不可用。
 PI_WEB_VOICE_INPUT_ENABLED=false
 

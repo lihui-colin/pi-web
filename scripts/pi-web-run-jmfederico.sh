@@ -71,6 +71,7 @@ PI WEB (jmfederico) 手动运行管理脚本
   PI_WEB_DATA_DIR  状态目录，默认 data/pi-web/<port>/state
   PI_WEB_RUN_DIR   日志和 PID 目录，默认 data/pi-web/<port>
   PI_WEB_SESSIOND_SOCKET  默认 <状态目录>/sessiond.sock
+  HTTP_PROXY / HTTPS_PROXY / NO_PROXY  代理环境变量，传给服务及 Codex app-server；未填写时继承启动环境
   PI_WEB_UPSTREAM_URL  官方上游 Git URL 覆盖
   PI_WEB_INSTALL_ROOT  安装目录父路径
   PI_WEB_TEST_MAX_WORKERS / PI_WEB_TEST_TIMEOUT_MS  构建测试限制
