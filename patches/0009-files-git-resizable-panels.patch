@@ -1,0 +1,220 @@
+diff --git a/pi-web-plugins/files/FilesPanel.ts b/pi-web-plugins/files/FilesPanel.ts
+index 66184062b11effbd6cd6606b98134f342c2c9526..62516121ce5cf86bf73da2ffaec4e9df6eeace60 100644
+--- a/pi-web-plugins/files/FilesPanel.ts
++++ b/pi-web-plugins/files/FilesPanel.ts
+@@ -1,5 +1,6 @@
++import { renderVerticalSplit, verticalSplitStyle, verticalSplitStyles } from "./verticalSplit.js";
+ import type { ContentRenderingCapability, FileTreeEntry, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
+-import { css, html, LitElement, nothing, type PropertyValues, type TemplateResult } from "lit";
++import { css, html, LitElement, unsafeCSS, nothing, type PropertyValues, type TemplateResult } from "lit";
+ import { property, query, state } from "lit/decorators.js";
+ import {
+   FilesRuntime,
+@@ -121,10 +122,11 @@ export class WorkspaceFilesPanel extends LitElement {
+         </section>
+         ${scope.error === undefined ? null : html`<p class="files-error" role="alert">${scope.error}</p>`}
+         ${this.renderUploadProgress(context, runtime, scope)}
+-        <section class="split">
++        <section class="split" style=${verticalSplitStyle("pi-web:files:split")}>
+           <div class="list tree ui-file-list">
+             ${scope.fileTree.length === 0 ? html`<p class="muted">No files loaded.</p>` : scope.fileTree.map((entry) => this.renderTreeEntry(context, runtime, scope, entry, 0))}
+           </div>
++          ${renderVerticalSplit(html, "pi-web:files:split", "Resize file list and preview")}
+           <div class="viewer">
+             <pi-web-files-viewer
+               .contentRendering=${this.contentRendering}
+@@ -452,8 +454,9 @@ export class WorkspaceFilesPanel extends LitElement {
+     .files-error { flex: 0 0 auto; margin: 0; border-bottom: 1px solid var(--pi-danger); color: var(--pi-danger); padding: 8px; overflow-wrap: anywhere; }
+     .capability-error { box-sizing: border-box; width: min(100%, 420px); margin: auto; display: grid; gap: 8px; color: var(--pi-danger); padding: 24px; text-align: center; }
+     .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0; }
+-    .split { flex: 1 1 auto; min-height: 0; display: grid; grid-template-rows: minmax(160px, 34%) minmax(0, 1fr); }
+-    .list { border-bottom: 1px solid var(--pi-border); }
++    ${unsafeCSS(verticalSplitStyles())}
++    .split { flex: 1 1 auto; min-height: 0; display: grid; grid-template-rows: minmax(0, 34fr) 4px minmax(0, 66fr); }
++    .list { min-height: 0; overflow: auto; border-bottom: 1px solid var(--pi-border); }
+     .viewer { min-height: 0; overflow: auto; display: flex; flex-direction: column; }
+     pi-web-files-viewer { flex: 1 1 auto; min-height: 0; }
+     p { margin: 10px; }
+diff --git a/pi-web-plugins/files/verticalSplit.test.ts b/pi-web-plugins/files/verticalSplit.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..485db7596dc062c7f857c051b35163a0a60a4beb
+--- /dev/null
++++ b/pi-web-plugins/files/verticalSplit.test.ts
+@@ -0,0 +1,59 @@
++// @vitest-environment happy-dom
++import { html, render } from "lit";
++import { afterEach, expect, it, vi } from "vitest";
++import { renderVerticalSplit, verticalSplitRatio, verticalSplitStyle } from "./verticalSplit.js";
++
++afterEach(() => {
++  document.body.replaceChildren();
++  localStorage.clear();
++  vi.restoreAllMocks();
++});
++
++function mount(key = "files") {
++  const container = document.createElement("section");
++  document.body.append(container);
++  render(renderVerticalSplit(html, key, "Resize panels"), container);
++  const handle = container.querySelector<HTMLElement>('[role="separator"]');
++  if (handle === null) throw new Error("Missing separator");
++  return { container, handle };
++}
++
++it("keeps panel preferences separate, clamps keyboard resizing and resets", () => {
++  const { handle } = mount();
++  handle.dispatchEvent(new KeyboardEvent("keydown", { key: "End" }));
++  handle.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown" }));
++  expect(handle.getAttribute("aria-valuenow")).toBe("90");
++  expect(verticalSplitRatio("files")).toBe(90);
++  expect(verticalSplitRatio("git")).toBe(34);
++  expect(mount().handle.getAttribute("aria-valuenow")).toBe("90");
++  handle.dispatchEvent(new MouseEvent("dblclick"));
++  expect(verticalSplitRatio("files")).toBe(34);
++});
++
++it("resizes only the captured pointer and releases it on cancellation", () => {
++  const { container, handle } = mount();
++  vi.spyOn(container, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 100, 400, 404));
++  let captured: number | undefined;
++  handle.setPointerCapture = (id) => { captured = id; };
++  handle.hasPointerCapture = (id) => captured === id;
++  handle.releasePointerCapture = () => { captured = undefined; };
++  handle.dispatchEvent(new PointerEvent("pointerdown", { pointerId: 1, button: 0, isPrimary: true }));
++  handle.dispatchEvent(new PointerEvent("pointermove", { pointerId: 2, clientY: 302 }));
++  expect(verticalSplitRatio("files")).toBe(34);
++  handle.dispatchEvent(new PointerEvent("pointermove", { pointerId: 1, clientY: 302 }));
++  expect(handle.getAttribute("aria-valuenow")).toBe("50");
++  handle.dispatchEvent(new PointerEvent("pointercancel", { pointerId: 1 }));
++  handle.dispatchEvent(new PointerEvent("pointermove", { pointerId: 1, clientY: 500 }));
++  expect(verticalSplitRatio("files")).toBe(50);
++  expect(captured).toBeUndefined();
++});
++
++it("allows keyboard resizing when storage is blocked and ignores corrupt preferences", () => {
++  localStorage.setItem("files", "invalid");
++  expect(verticalSplitStyle("files")).toContain("34fr");
++  vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => { throw new Error("blocked"); });
++  vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => { throw new Error("blocked"); });
++  const { handle } = mount();
++  handle.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp" }));
++  expect(handle.getAttribute("aria-valuenow")).toBe("32");
++});
+diff --git a/pi-web-plugins/files/verticalSplit.ts b/pi-web-plugins/files/verticalSplit.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..41721c3d1596e165e9aaa868f6239dc220fcf288
+--- /dev/null
++++ b/pi-web-plugins/files/verticalSplit.ts
+@@ -0,0 +1,67 @@
++import type { HtmlTemplateTag } from "@jmfederico/pi-web/plugin-api";
++
++const minimum = 10;
++const maximum = 90;
++
++export function verticalSplitRatio(key: string, fallback = 34): number {
++  try {
++    const value = localStorage.getItem(key);
++    const ratio = value === null ? NaN : Number(value);
++    if (Number.isFinite(ratio)) return Math.max(minimum, Math.min(maximum, ratio));
++  } catch { /* Storage is optional in restricted browsers. */ }
++  return fallback;
++}
++
++export function verticalSplitStyle(key: string, fallback = 34): string {
++  const ratio = verticalSplitRatio(key, fallback);
++  return `grid-template-rows:minmax(0, ${String(ratio)}fr) 4px minmax(0, ${String(100 - ratio)}fr)`;
++}
++
++export function renderVerticalSplit(html: HtmlTemplateTag, key: string, label: string, fallback = 34) {
++  const update = (handle: HTMLElement, value: number): void => {
++    const ratio = Math.max(minimum, Math.min(maximum, value));
++    const split = handle.parentElement;
++    if (split === null) return;
++    split.style.gridTemplateRows = `minmax(0, ${String(ratio)}fr) 4px minmax(0, ${String(100 - ratio)}fr)`;
++    handle.setAttribute("aria-valuenow", String(Math.round(ratio)));
++    try { localStorage.setItem(key, String(ratio)); } catch { /* Resizing still works without storage. */ }
++  };
++  const move = (event: PointerEvent): void => {
++    const handle = event.currentTarget;
++    if (!(handle instanceof HTMLElement) || !handle.hasPointerCapture(event.pointerId)) return;
++    const bounds = handle.parentElement?.getBoundingClientRect();
++    if (bounds === undefined || bounds.height <= 4) return;
++    update(handle, (event.clientY - bounds.top - 2) / (bounds.height - 4) * 100);
++  };
++  const release = (event: PointerEvent): void => {
++    const handle = event.currentTarget;
++    if (handle instanceof HTMLElement && handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
++  };
++  return html`<div class="vertical-split-handle" role="separator" tabindex="0"
++    aria-label=${label} aria-orientation="horizontal" aria-valuemin=${minimum} aria-valuemax=${maximum}
++    aria-valuenow=${Math.round(verticalSplitRatio(key, fallback))}
++    title="Drag to resize. Double-click to reset."
++    @pointerdown=${(event: PointerEvent) => {
++      if (event.button !== 0 || !event.isPrimary || !(event.currentTarget instanceof HTMLElement)) return;
++      event.preventDefault();
++      event.currentTarget.focus();
++      event.currentTarget.setPointerCapture(event.pointerId);
++    }} @pointermove=${move} @pointerup=${release} @pointercancel=${release}
++    @dblclick=${(event: MouseEvent) => { if (event.currentTarget instanceof HTMLElement) update(event.currentTarget, fallback); }}
++    @keydown=${(event: KeyboardEvent) => {
++      const handle = event.currentTarget;
++      if (!(handle instanceof HTMLElement)) return;
++      const current = Number(handle.getAttribute("aria-valuenow"));
++      const step = event.shiftKey ? 10 : 2;
++      const value = event.key === "ArrowUp" ? current - step : event.key === "ArrowDown" ? current + step
++        : event.key === "Home" ? minimum : event.key === "End" ? maximum : undefined;
++      if (value === undefined) return;
++      event.preventDefault();
++      update(handle, value);
++    }}></div>`;
++}
++
++export const verticalSplitStyles = (scope = "") => `
++  ${scope}.vertical-split-handle { min-height: 0; cursor: row-resize; touch-action: none; user-select: none; background: var(--pi-border-muted); }
++  ${scope}.vertical-split-handle:hover, ${scope}.vertical-split-handle:focus-visible { background: var(--pi-accent); outline: none; }
++`;
+diff --git a/pi-web-plugins/git/browser/git-panel.ts b/pi-web-plugins/git/browser/git-panel.ts
+index 3afbc0500fe5c17e24390458a436392cd2db94d7..bdb65462fb334e03c144048a0488673560ab29eb 100644
+--- a/pi-web-plugins/git/browser/git-panel.ts
++++ b/pi-web-plugins/git/browser/git-panel.ts
+@@ -1,3 +1,4 @@
++import { renderVerticalSplit, verticalSplitStyle, verticalSplitStyles } from "./verticalSplit.js";
+ import type {
+   HtmlTemplateTag,
+   JsonValue,
+@@ -438,8 +439,9 @@ function renderGitPanel(html: HtmlTemplateTag, controller: GitUiController, cont
+         </div>
+       </section>
+       ${state.error === undefined ? null : html`<div class="git-error" role="alert">${state.error}</div>`}
+-      <section class="git-split">
++      <section class="git-split" style=${verticalSplitStyle("pi-web:git:split")}>
+         <div class="ui-file-list git-file-list">${renderFileList(html, controller, context, state, viewState)}</div>
++        ${renderVerticalSplit(html, "pi-web:git:split", "Resize changed files and diff")}
+         <div class="git-viewer">${renderDiffViewer(html, state)}</div>
+       </section>
+     </section>
+@@ -723,6 +725,7 @@ function errorMessage(error: unknown): string {
+ }
+ 
+ const gitPanelStyles = `
++  ${verticalSplitStyles(".git-panel ")}
+   .git-panel { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; overflow: hidden; color: var(--pi-text); background: var(--pi-bg); font: 13px system-ui, sans-serif; }
+   .git-panel ${activityElementTag} { display: none; }
+   .git-panel small, .git-panel .git-muted { color: var(--pi-muted); }
+@@ -734,7 +737,7 @@ const gitPanelStyles = `
+   .git-panel .git-toolbar .ui-button[aria-pressed="true"] { background: var(--pi-surface-hover); color: var(--pi-text); }
+   .git-panel .git-stale { border: 1px solid var(--pi-warning-border); border-radius: 999px; color: var(--pi-warning); padding: 1px 6px; font-size: 12px; align-self: center; }
+   .git-panel .git-error { flex: 0 0 auto; margin: 8px; border: 1px solid var(--pi-danger); border-radius: 7px; color: var(--pi-danger); padding: 8px; }
+-  .git-panel .git-split { flex: 1 1 auto; min-height: 0; display: grid; grid-template-rows: minmax(160px, 34%) minmax(0, 1fr); }
++  .git-panel .git-split { flex: 1 1 auto; min-height: 0; display: grid; grid-template-rows: minmax(0, 34fr) 4px minmax(0, 66fr); }
+   .git-panel .git-file-list { border-bottom: 1px solid var(--pi-border); }
+   .git-panel .git-summary { margin: 10px 12px 8px; color: var(--pi-muted); }
+   .git-panel .submodule-badge { display: inline-block; margin-left: 6px; border: 1px solid var(--pi-border); border-radius: 999px; color: var(--pi-muted); padding: 0 5px; font-size: 11px; font-weight: 400; vertical-align: baseline; }
+diff --git a/pi-web-plugins/git/browser/verticalSplit.ts b/pi-web-plugins/git/browser/verticalSplit.ts
+new file mode 120000
+index 0000000000000000000000000000000000000000..d0734f8b99dd4f8b28178b355fe6b6f3d8c21d56
+--- /dev/null
++++ b/pi-web-plugins/git/browser/verticalSplit.ts
+@@ -0,0 +1 @@
++../../files/verticalSplit.ts
+\ No newline at end of file

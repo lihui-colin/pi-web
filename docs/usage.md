@@ -8,7 +8,7 @@
 
 ## 补丁分组
 
-当前维护 7 个按功能划分的补丁：
+当前维护 9 个按功能划分的补丁：
 
 | 编号 | 内容 |
 | --- | --- |
@@ -19,6 +19,8 @@
 | `0005` | Shift+← 软键 |
 | `0006` | 完整 Codex 插件、移动端布局、Plan 入口、复制兼容和构建集成及测试 |
 | `0007` | 添加项目弹窗中的候选目录自动换行，并显示完整已选路径 |
+| `0008` | iOS 终端输入事件兼容修复 |
+| `0009` | Files / Git 的列表与预览区域可拖动调整高度，分别保存比例 |
 
 原 `0007`–`0017` 的最终效果已合并到上述补丁，不再保留中间界面方案。共用的 `terminal/clipboard.ts` 修复归入 `0003`，其余 Codex 调整归入 `0006`。未来修改已有功能时，更新对应补丁；不要将已经被后续实现替换的中间步骤继续堆叠为新补丁。
 
@@ -133,3 +135,7 @@ bash scripts/pi-web-run-jmfederico.sh update --dry-run        # 预览操作
 `install` 先执行 `sync.sh` 复用缓存（缺失时下载）并应用补丁；`update` 默认先将 Pi Agent 更新到 latest，再获取官方 `main` 最新提交并原子写入 `patches/base-commit`，随后调用 `sync.sh` 同步并应用补丁，随后安装依赖、测试、构建和替换全局命令。更新不需要 origin 的推送权限，也不会自动更新补丁分支；新基线如与补丁冲突，更新停止并保留新基线和冲突目录，需适配补丁后重试。拉取失败不改写基线，`--dry-run` 不拉取或改写基线。补丁冲突或测试构建失败时，不会替换已安装的 pi-web；之前已完成的 Agent 更新或源码同步不会回滚。
 
 `update` 不启停服务。支持 `--update-relay`；update 的 Agent 目标固定为 `latest`，`PI_VERSION` 只控制普通 install 补装 Agent 的版本。pi-web 使用 `patches/base-commit`，不使用 `PI_WEB_VERSION`。更新仅通过运行脚本 `pi-web-run-jmfederico.sh update` 执行；`install.sh` 只负责安装，不接受 `update` 子命令。更新完成后，如需生效，先确认活跃会话允许中断并保存恢复信息，再执行 `bash scripts/pi-web-run-jmfederico.sh restart`；实例由当前 `data/pi-web.conf` 选择，不接受 `--port` 参数。旧的 `update-pi-web-jmfederico.sh` 已移除；`install.sh` 不带子命令时默认执行 `install`，运行管理脚本则必须指定子命令。
+
+## Files / Git 面板高度
+
+拖动文件列表与预览内容之间的分隔条可调整上下区域高度，Files 和 Git 分别记住比例。双击分隔条恢复默认；聚焦分隔条后也可用上下方向键调整，Shift 加速，Home / End 移至上下限。此改动需要安装包含 `0009` 的版本，并在允许中断会话的时机完成服务切换后刷新页面。
