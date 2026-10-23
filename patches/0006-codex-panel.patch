@@ -51,10 +51,10 @@ index 868bc3372d0058823bfa65d23ba74f1e39a6fc94..c6c336bca5b5478ed4f9487f2e0de54e
      "node-pty": "^1.1.0",
 diff --git a/pi-web-plugins/codex/CodexBrowserRuntime.ts b/pi-web-plugins/codex/CodexBrowserRuntime.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..ce1d52c1eb84cb9436d873476c2a4fb0b5836616
+index 0000000000000000000000000000000000000000..cb4ffa6a2dcd3baa5d3317e13f436eaf17cb0f22
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexBrowserRuntime.ts
-@@ -0,0 +1,480 @@
+@@ -0,0 +1,481 @@
 +import type { PluginPeerChannel, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
 +import { MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, IMAGE_MIME_TYPES, array, errorText, object, string, text, permissionMode, type PermissionMode, chatMode, type ChatMode, type RecordValue } from "./server/protocol.js";
 +
@@ -88,6 +88,7 @@ index 0000000000000000000000000000000000000000..ce1d52c1eb84cb9436d873476c2a4fb0
 +  snapshot: RecordValue;
 +  error: string;
 +  notice: string;
++  commandReplies: { threadId: string; afterId: string; item: RecordValue }[];
 +  voiceInputEnabled: boolean;
 +  connected: boolean;
 +  pending: boolean;
@@ -117,7 +118,7 @@ index 0000000000000000000000000000000000000000..ce1d52c1eb84cb9436d873476c2a4fb0
 +    let view = this.views.get(key);
 +    if (view === undefined) {
 +      const threadId = "";
-+      view = { context, key, threadId, draft: this.read(`${key}:${threadId}:draft`), references: this.readReferences(key, threadId), attachments: [], model: this.read(`${key}:${threadId}:model`), effort: this.read(`${key}:${threadId}:effort`), models: [], defaultModel: "", defaultEffort: "", threads: [], loadingStages: [], cursor: "", snapshot: {}, error: "", notice: "", voiceInputEnabled: false, connected: false, pending: false, permissionMode: this.readPermissionMode(key), mode: this.readMode(key, threadId), modeDirty: this.read(`${key}:${threadId}:mode`) !== "", sending: false, offset: 0, listeners: new Set(), timer: undefined, polling: false, generation: 0 };
++      view = { context, key, threadId, draft: this.read(`${key}:${threadId}:draft`), references: this.readReferences(key, threadId), attachments: [], model: this.read(`${key}:${threadId}:model`), effort: this.read(`${key}:${threadId}:effort`), models: [], defaultModel: "", defaultEffort: "", threads: [], loadingStages: [], cursor: "", snapshot: {}, error: "", notice: "", commandReplies: [], voiceInputEnabled: false, connected: false, pending: false, permissionMode: this.readPermissionMode(key), mode: this.readMode(key, threadId), modeDirty: this.read(`${key}:${threadId}:mode`) !== "", sending: false, offset: 0, listeners: new Set(), timer: undefined, polling: false, generation: 0 };
 +      view.attachments = this.readAttachments(view, threadId);
 +      this.views.set(key, view);
 +    }
@@ -537,13 +538,14 @@ index 0000000000000000000000000000000000000000..ce1d52c1eb84cb9436d873476c2a4fb0
 +}
 diff --git a/pi-web-plugins/codex/CodexPanel.test.ts b/pi-web-plugins/codex/CodexPanel.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..19c46fb78518e8ae4b68f2bbdfdc6ead46806486
+index 00000000..b0d50591
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.test.ts
-@@ -0,0 +1,2017 @@
+@@ -0,0 +1,2066 @@
 +// @vitest-environment happy-dom
 +import { afterEach, describe, expect, it, vi } from "vitest";
 +import type { WorkspaceFileUploadOptions, WorkspaceFileUploadTask, PluginPeerChannelOptions, FileContentResponse, FileTreeResponse, JsonValue, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
++import { requirePluginBackendOperation } from "../../src/shared/pluginBackendProtocol.js";
 +import { CodexPanel } from "./CodexPanel.js";
 +import { CodexBrowserRuntime } from "./CodexBrowserRuntime.js";
 +import { object, type RecordValue } from "./server/protocol.js";
@@ -556,7 +558,7 @@ index 0000000000000000000000000000000000000000..19c46fb78518e8ae4b68f2bbdfdc6ead
 +    navigate: () => Promise.resolve(), machine: { id: machine, name: machine, kind: "local" },
 +    workspace: { id: "workspace", projectId: "project", path: workspacePath, label: "main", isMain: true },
 +    files: { readFile: vi.fn(), listFiles: vi.fn(), writeFile: vi.fn(), deleteFile: vi.fn(), moveFile: vi.fn() },
-+    peer: { request }, host: { requestRender: vi.fn() }, prompt: { insertText: vi.fn(), getText: () => "", getSelection: () => null }, terminal: { open: vi.fn(), runCommand: vi.fn() },
++    peer: { request: (operation, input) => request(requirePluginBackendOperation(operation), input) }, host: { requestRender: vi.fn() }, prompt: { insertText: vi.fn(), getText: () => "", getSelection: () => null }, terminal: { open: vi.fn(), runCommand: vi.fn() },
 +  };
 +}
 +async function fixture(workspacePath = "/repo") {
@@ -1560,7 +1562,7 @@ index 0000000000000000000000000000000000000000..19c46fb78518e8ae4b68f2bbdfdc6ead
 +    selected.focus();
 +    view.snapshot = { ...view.snapshot, queue: queue.slice(1) }; panel.requestUpdate(); await panel.updateComplete;
 +    selected.click();
-+    await vi.waitFor(() => { expect(request).toHaveBeenCalledWith(action === "steer-queued" ? "steer" : "removeQueued", { threadId: "thread", messageId: "q2", ...(action === "steer-queued" ? { expectedTurnId: "active" } : {}) }); });
++    await vi.waitFor(() => { expect(request).toHaveBeenCalledWith(action === "steer-queued" ? "steer" : "remove-queued", { threadId: "thread", messageId: "q2", ...(action === "steer-queued" ? { expectedTurnId: "active" } : {}) }); });
 +  });
 +  it("preserves queued input on a failed Steer and allows removal and explicit resume", async () => {
 +    const { request, view, panel } = await fixture();
@@ -1571,12 +1573,12 @@ index 0000000000000000000000000000000000000000..19c46fb78518e8ae4b68f2bbdfdc6ead
 +    await vi.waitFor(() => { expect(view.error).toContain("Steering failed"); }); await panel.updateComplete;
 +    expect(panel.shadowRoot?.querySelector(".queued-message")?.textContent).toContain("Keep this queued");
 +    required(panel.shadowRoot?.querySelector<HTMLButtonElement>(".remove-queued")).click();
-+    await vi.waitFor(() => { expect(request).toHaveBeenCalledWith("removeQueued", { threadId: "thread", messageId: "q1" }); expect(view.pending).toBe(false); });
++    await vi.waitFor(() => { expect(request).toHaveBeenCalledWith("remove-queued", { threadId: "thread", messageId: "q1" }); expect(view.pending).toBe(false); });
 +    view.snapshot = { ...view.snapshot, busy: false, queuePaused: true }; panel.requestUpdate(); await panel.updateComplete;
 +    expect(panel.shadowRoot?.querySelector(".steer-queued")).toBeNull();
 +    expect(panel.shadowRoot?.querySelector(".queue-heading")?.textContent).toContain("Queue paused");
 +    required(panel.shadowRoot?.querySelector<HTMLButtonElement>(".resume-queue")).click();
-+    await vi.waitFor(() => { expect(request).toHaveBeenCalledWith("resumeQueue", { threadId: "thread" }); });
++    await vi.waitFor(() => { expect(request).toHaveBeenCalledWith("resume-queue", { threadId: "thread" }); });
 +  });
 +  it("uses one composer button to send, stop and return to idle when the input is empty", async () => {
 +    const { request, panel, textarea, view } = await fixture();
@@ -2558,12 +2560,61 @@ index 0000000000000000000000000000000000000000..19c46fb78518e8ae4b68f2bbdfdc6ead
 +    expect(required(panel.shadowRoot?.querySelector<HTMLButtonElement>(".voice-input"))).toMatchObject({ disabled: true, title: "Voice input is disabled" });
 +  });
 +});
++
++
++describe("composer session actions", () => {
++  it.each(["Enter", "button"])("sends slash text literally with %s", async (method) => {
++    vi.stubGlobal("matchMedia", vi.fn().mockReturnValue({ matches: false }));
++    const { panel, textarea, view, request } = await fixture();
++    textarea.value = "/compact"; textarea.dispatchEvent(new Event("input")); await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelector(".slash-menu")).toBeNull();
++    const tab = new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
++    textarea.dispatchEvent(tab);
++    expect(tab.defaultPrevented).toBe(false);
++    expect(view.draft).toBe("/compact");
++    if (method === "Enter") textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
++    else required(panel.shadowRoot?.querySelector<HTMLButtonElement>(".primary")).click();
++    await vi.waitFor(() => { expect(request).toHaveBeenCalledWith("send", expect.objectContaining({ text: "/compact" })); });
++    expect(request.mock.calls.some(([operation]) => operation === "compact")).toBe(false);
++  });
++
++  it.each(["status", "compact"])("runs %s from Add without consuming the draft or references", async (command) => {
++    const { panel, view, request } = await fixture();
++    view.draft = "unfinished message"; view.references = ["file.ts"];
++    request.mockResolvedValue({ threadId: "thread", cwd: "/repo" });
++    panel.requestUpdate(); await panel.updateComplete;
++    required(panel.shadowRoot?.querySelector<HTMLDetailsElement>(".context-picker")).open = true;
++    required(panel.shadowRoot?.querySelector<HTMLButtonElement>(`.add-${command}`)).click();
++    await vi.waitFor(() => { expect(request).toHaveBeenCalledWith(command === "status" ? "session-status" : "compact", command === "status" ? { threadId: "thread" } : { threadId: "thread", permissionMode: "full-access" }); });
++    await vi.waitFor(() => { expect(view.pending).toBe(false); });
++    expect(view.draft).toBe("unfinished message"); expect(view.references).toEqual(["file.ts"]);
++    expect(panel.shadowRoot?.querySelector<HTMLDetailsElement>(".context-picker")?.open).toBe(false);
++    if (command === "status") expect(panel.shadowRoot?.querySelector(".status-popup")?.textContent).toContain("thread");
++    else expect(view.commandReplies.at(-1)?.item["text"]).toContain("已请求压缩上下文");
++    expect(request.mock.calls.some(([operation]) => operation === "send")).toBe(false);
++  });
++
++  it("disables Compact without an idle conversation and reports RPC failures", async () => {
++    const { panel, view, request } = await fixture();
++    for (const snapshot of [{ busy: true }, { queue: [{ id: "queued" }] }]) {
++      view.snapshot = snapshot; panel.requestUpdate(); await panel.updateComplete;
++      expect(panel.shadowRoot?.querySelector<HTMLButtonElement>(".add-compact")?.disabled).toBe(true);
++    }
++    view.snapshot = {}; view.threadId = ""; panel.requestUpdate(); await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelector<HTMLButtonElement>(".add-compact")?.disabled).toBe(true);
++    expect(panel.shadowRoot?.querySelector<HTMLButtonElement>(".add-status")?.disabled).toBe(false);
++    view.threadId = "thread"; request.mockRejectedValue(new Error("Compact failed")); panel.requestUpdate(); await panel.updateComplete;
++    required(panel.shadowRoot?.querySelector<HTMLButtonElement>(".add-compact")).click();
++    await vi.waitFor(() => { expect(view.commandReplies.at(-1)?.item["text"]).toContain("Compact failed"); });
++  });
++});
 diff --git a/pi-web-plugins/codex/CodexPanel.ts b/pi-web-plugins/codex/CodexPanel.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..d261407c5357e69e45c033acfc80646f099f71df
+index 0000000000000000000000000000000000000000..ffeb19f9c890a4e33bf897b74a52753e918bac0a
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.ts
-@@ -0,0 +1,1091 @@
+@@ -0,0 +1,1150 @@
++import { statusReply } from "./statusReply.js";
 +import { LitElement, css, html, svg, nothing } from "lit";
 +import { property } from "lit/decorators.js";
 +import { until } from "lit/directives/until.js";
@@ -2580,6 +2631,7 @@ index 0000000000000000000000000000000000000000..d261407c5357e69e45c033acfc80646f
 +  @property({ attribute: false }) context: WorkspacePanelContext | undefined;
 +  @property({ attribute: false }) runtime: CodexBrowserRuntime | undefined;
 +  private view: CodexView | undefined;
++  private statusPopup: { view: CodexView; generation: number; threadId: string; data: RecordValue } | undefined;
 +  private readonly copyTimers = new WeakMap<HTMLButtonElement, ReturnType<typeof setTimeout>>();
 +  private unsubscribe: (() => void) | undefined;
 +  private historyNavigation: { view: CodexView; generation: number; entries: string[]; index: number; draft: string; value: string } | undefined;
@@ -2800,6 +2852,40 @@ index 0000000000000000000000000000000000000000..d261407c5357e69e45c033acfc80646f
 +    // Keep the browser's native caret placement when a tap already focused the editor.
 +    if (editor && !editor.matches(":focus")) editor.focus({ preventScroll: true });
 +  }
++  private appendCommandReply(view: CodexView, command: string, body: string, failed = false): void {
++    const id = Array.from(crypto.getRandomValues(new Uint32Array(4)), (part) => part.toString(16).padStart(8, "0")).join("");
++    view.commandReplies.push({ threadId: view.threadId, afterId: text(object(array(view.snapshot["items"]).at(-1) ?? {})["id"]),
++      item: { id: `command:${id}`, kind: "agentMessage", command, text: body, failed } });
++    this.follow = true;
++    this.requestUpdate();
++  }
++  private submitComposer(view: CodexView): void {
++    if (!this.runtime || view.pending || view.sending || !view.connected) return;
++    this.action((owner, state) => owner.send(state));
++  }
++  private runSessionAction(view: CodexView, command: "status" | "compact"): void {
++    if (view.pending || view.sending || !view.connected) return;
++    if (command === "compact" && (!view.threadId || view.snapshot["busy"] === true || array(view.snapshot["queue"]).length > 0)) return;
++    this.closeMenus(true, ".context-picker");
++    const generation = view.generation;
++    this.action(async (owner, state) => {
++      try {
++        if (command === "status") {
++          const result = await owner.request(state, "session-status", { threadId: state.threadId });
++          if (state.generation !== generation) return;
++          this.statusPopup = { view: state, generation, threadId: state.threadId, data: result };
++          this.requestUpdate();
++        } else {
++          await owner.request(state, "compact", { threadId: state.threadId, permissionMode: state.permissionMode });
++          if (state.generation !== generation) return;
++          this.appendCommandReply(state, command, "已请求压缩上下文。");
++          state.snapshot = { ...state.snapshot, version: -1 };
++        }
++      } catch (error) {
++        if (state.generation === generation) this.appendCommandReply(state, command, errorText(error), true);
++      }
++    });
++  }
 +  private composerKeydown(event: KeyboardEvent, view: CodexView): void {
 +    this.navigateInputHistory(event, view);
 +    if (event.key !== "Enter" || event.shiftKey || event.isComposing || this.composing) return;
@@ -2807,7 +2893,7 @@ index 0000000000000000000000000000000000000000..d261407c5357e69e45c033acfc80646f
 +    // Leave the native newline intact; mobile users submit with the send/queue button.
 +    if (this.ownerDocument.defaultView?.matchMedia("(pointer: coarse), (max-width: 760px)").matches === true) return;
 +    event.preventDefault();
-+    if (!view.pending && !view.sending && view.attachments.every((image) => image.status === "ready") && view.connected && (view.draft.trim() !== "" || view.references.length > 0 || view.attachments.length > 0)) this.action((runtime, state) => runtime.send(state));
++    if (!view.pending && !view.sending && view.attachments.every((image) => image.status === "ready") && view.connected && (view.draft.trim() !== "" || view.references.length > 0 || view.attachments.length > 0)) this.submitComposer(view);
 +  }
 +  private navigateInputHistory(event: KeyboardEvent, view: CodexView): void {
 +    if (!["ArrowUp", "ArrowDown"].includes(event.key) || event.isComposing || this.composing || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
@@ -3118,6 +3204,8 @@ index 0000000000000000000000000000000000000000..d261407c5357e69e45c033acfc80646f
 +          <button class="add-item add-files" ?disabled=${view.pending} @click=${() => { this.addPage = "files"; void this.browse(this.browsePath); }}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 15V6a4 4 0 0 1 8 0v10a6 6 0 0 1-12 0V7m8-1v10a2 2 0 0 1-4 0"/></svg><span>Files and folders</span></button>
 +          <button class="add-item add-files-upload" ?disabled=${view.pending || view.sending || view.context.files.capabilityVersion !== 1 || view.attachments.length >= MAX_ATTACHMENTS} @click=${() => { this.closeMenus(false, ".context-picker"); this.renderRoot.querySelector<HTMLInputElement>(".file-input")?.click(); }}><span aria-hidden="true">▧</span><span>Upload files</span><span class="add-description">From this device</span></button>
 +          <button class="add-item add-plan" aria-pressed=${view.mode === "plan"} ?disabled=${view.pending || view.sending || view.snapshot["busy"] === true} @click=${() => { this.togglePlan(view); }}>${this.planIcon()}<span>Plan mode</span><span class="add-description">${view.mode === "plan" ? "Turn plan mode off" : "Turn plan mode on"}</span>${view.mode === "plan" ? html`<span class="add-check" aria-hidden="true">✓</span>` : nothing}</button>
++          <button class="add-item add-status" ?disabled=${view.pending || view.sending || !view.connected} @click=${() => { this.runSessionAction(view, "status"); }}><span>Status</span><span class="add-description">Session status and account limits</span></button>
++          <button class="add-item add-compact" ?disabled=${view.pending || view.sending || !view.connected || !view.threadId || view.snapshot["busy"] === true || array(view.snapshot["queue"]).length > 0} @click=${() => { this.runSessionAction(view, "compact"); }}><span>Compact</span><span class="add-description">Compact conversation context</span></button>
 +          ${this.isMobileComposer() ? this.renderComposerSettings(view) : nothing}
 +        `}
 +      </div>
@@ -3225,6 +3313,7 @@ index 0000000000000000000000000000000000000000..d261407c5357e69e45c033acfc80646f
 +    return html`<div class="conversation-home" aria-label="Conversation history">
 +      <div class="home-content">
 +        ${this.renderStatusReply(view)}
++        ${this.renderTimeline(view.commandReplies.filter((reply) => reply.threadId === "").map((reply) => reply.item))}
 +        <div class="home-heading"><h1>Chats</h1></div>
 +        <div class="conversation-list">${this.renderConversationRows(view, view.threads.slice(0, 5))}</div>
 +        ${view.threads.length === 0 ? html`<p class="home-empty">${view.pending ? "Loading conversations…" : "No conversations yet. Send a message below to start one."}</p>` : nothing}
@@ -3241,11 +3330,16 @@ index 0000000000000000000000000000000000000000..d261407c5357e69e45c033acfc80646f
 +  override render() {
 +    const view = this.view;
 +    if (view === undefined) return html`<p>Select a workspace to open Codex.</p>`;
++    if (this.statusPopup && (this.statusPopup.view !== view || this.statusPopup.generation !== view.generation || this.statusPopup.threadId !== view.threadId)) this.statusPopup = undefined;
 +    const snapshot = view.snapshot;
 +    const busy = snapshot["busy"] === true;
 +    const queued = array(snapshot["queue"]).map(object);
 +    const queueInput = busy || queued.length > 0;
 +    const items = array(snapshot["items"]).map(object);
++    for (const reply of view.commandReplies.filter((reply) => reply.threadId === view.threadId).reverse()) {
++      const index = items.findIndex((item) => item["id"] === reply.afterId);
++      items.splice(index + 1, 0, reply.item);
++    }
 +    const home = view.threadId === "";
 +    const hasInput = view.draft.trim() !== "" || view.references.length > 0 || view.attachments.length > 0;
 +    const stopAction = busy && !hasInput;
@@ -3273,12 +3367,13 @@ index 0000000000000000000000000000000000000000..d261407c5357e69e45c033acfc80646f
 +      </div>
 +      ${!this.follow || view.offset > 0 ? html`<button class="latest" @click=${() => { this.follow = true; view.offset = 0; view.snapshot = { ...view.snapshot, version: -1 }; this.requestUpdate(); void this.runtime?.refresh(view); }}>Jump to latest</button>` : nothing}
 +      <section aria-label="Pending requests">${array(snapshot["approvals"]).some((approval) => object(approval)["method"] === "item/tool/requestUserInput") ? html`<div class="asking-question" role="status">Asking question</div>` : nothing}${repeat(array(snapshot["approvals"]), (approval) => JSON.stringify([view.key, view.threadId, text(object(approval)["id"])]), (approval) => this.renderApproval(view, object(approval)))}</section>`}
++      ${this.statusPopup ? statusReply(this.statusPopup.data, () => { this.statusPopup = undefined; this.requestUpdate(); this.renderRoot.querySelector<HTMLTextAreaElement>("textarea")?.focus(); }) : nothing}
 +      <footer @dragover=${(event: DragEvent) => { if (event.dataTransfer?.types.includes("Files") === true) event.preventDefault(); }} @drop=${(event: DragEvent) => { this.dropFiles(event, view); }} ?data-plan=${view.mode === "plan"} @click=${(event: MouseEvent) => { this.focusComposer(event); }}>
 +        ${queued.length > 0 ? html`<section class="queued-messages" aria-label="Queued messages">
-+          <div class="queue-heading"><span>${snapshot["queuePaused"] === true ? "Queue paused" : "Queued · runs after the current task"}</span>${!busy ? html`<button class="resume-queue" ?disabled=${view.pending || !view.connected} @click=${() => { this.action((runtime, state) => runtime.request(state, "resumeQueue", { threadId: state.threadId })); }}>Run next</button>` : nothing}</div>
++          <div class="queue-heading"><span>${snapshot["queuePaused"] === true ? "Queue paused" : "Queued · runs after the current task"}</span>${!busy ? html`<button class="resume-queue" ?disabled=${view.pending || !view.connected} @click=${() => { this.action((runtime, state) => runtime.request(state, "resume-queue", { threadId: state.threadId })); }}>Run next</button>` : nothing}</div>
 +          ${repeat(queued, (message) => text(message["id"]), (message) => html`<div class="queued-message"><p>${text(message["text"])}${Number(message["imageCount"]) > 0 ? html`<small> · ${message["imageCount"]} image(s)</small>` : nothing}</p><div class="queue-actions">
 +            ${busy ? html`<button class="steer-queued" title="Submit this message to the current response" ?disabled=${view.pending || !view.connected || snapshot["status"] === "starting" || !text(snapshot["turnId"])} @click=${() => { this.action((runtime, state) => runtime.request(state, "steer", { threadId: state.threadId, messageId: message["id"] ?? "", expectedTurnId: snapshot["turnId"] ?? "" })); }}>Steer</button>` : nothing}
-+            <button class="remove-queued" aria-label="Remove queued message" title="Remove queued message" ?disabled=${view.pending || !view.connected} @click=${() => { this.action((runtime, state) => runtime.request(state, "removeQueued", { threadId: state.threadId, messageId: message["id"] ?? "" })); }}>×</button>
++            <button class="remove-queued" aria-label="Remove queued message" title="Remove queued message" ?disabled=${view.pending || !view.connected} @click=${() => { this.action((runtime, state) => runtime.request(state, "remove-queued", { threadId: state.threadId, messageId: message["id"] ?? "" })); }}>×</button>
 +          </div></div>`)}
 +        </section>` : nothing}
 +        ${view.references.length > 0 ? html`<div class="context-tray" aria-label="Selected workspace context">${view.references.map((path) => html`<span title=${path}>${path}<button aria-label=${`Remove ${path}`} ?disabled=${view.pending} @click=${() => { this.runtime?.saveReferences(view, view.references.filter((entry) => entry !== path)); }}>×</button></span>`)}</div>` : nothing}
@@ -3293,7 +3388,7 @@ index 0000000000000000000000000000000000000000..d261407c5357e69e45c033acfc80646f
 +          <div class="composer-trailing">${this.renderModelPicker(view)}
 +          <button class="voice-input" aria-label="Voice input" title=${view.voiceInputEnabled ? "Voice input is not implemented yet" : "Voice input is disabled"} disabled><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="2" width="6" height="13" rx="3"></rect><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8"></path></svg></button>
 +          ${busy && hasInput ? html`<button class="stop-response" aria-label="Stop response" title="Stop response" ?disabled=${view.pending || view.sending || !view.connected} @click=${() => { this.action((runtime, state) => runtime.request(state, "stop", { threadId: state.threadId })); }}><span class="stop-icon" aria-hidden="true"></span></button>` : nothing}
-+          <button class="primary" aria-label=${view.sending ? "Sending message" : stopAction ? "Stop response" : queueInput ? "Queue message" : "Send message"} title=${view.sending ? "Sending message" : stopAction ? "Stop response" : queueInput ? "Queue message" : "Send message"} aria-busy=${view.sending} ?disabled=${view.pending || view.sending || !view.connected || (!stopAction && attachmentsPending) || (!busy && !hasInput)} @click=${() => { this.action((runtime, state) => stopAction ? runtime.request(state, "stop", { threadId: state.threadId }) : runtime.send(state)); }}>${view.sending ? html`<span class="send-spinner" aria-hidden="true"></span>` : stopAction ? html`<span class="stop-icon" aria-hidden="true"></span>` : html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20V4m-7 7 7-7 7 7"></path></svg>`}</button>
++          <button class="primary" aria-label=${view.sending ? "Sending message" : stopAction ? "Stop response" : queueInput ? "Queue message" : "Send message"} title=${view.sending ? "Sending message" : stopAction ? "Stop response" : queueInput ? "Queue message" : "Send message"} aria-busy=${view.sending} ?disabled=${view.pending || view.sending || !view.connected || (!stopAction && attachmentsPending) || (!busy && !hasInput)} @click=${() => { if (stopAction) this.action((runtime, state) => runtime.request(state, "stop", { threadId: state.threadId })); else this.submitComposer(view); }}>${view.sending ? html`<span class="send-spinner" aria-hidden="true"></span>` : stopAction ? html`<span class="stop-icon" aria-hidden="true"></span>` : html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20V4m-7 7 7-7 7 7"></path></svg>`}</button>
 +          </div>
 +        </div>
 +      </footer>
@@ -3382,6 +3477,7 @@ index 0000000000000000000000000000000000000000..d261407c5357e69e45c033acfc80646f
 +    const kind = text(item["kind"]);
 +    const body = text(item["text"]);
 +    const copy = this.renderCopyButton(body);
++    if (kind === "agentMessage" && text(item["command"])) return html`<article class="agentMessage command-reply status-reply" aria-label=${`Codex /${text(item["command"])} reply`}><div class="reply-label">Codex · /${text(item["command"])}</div><div class="reply-content">${item["failed"] === true ? this.renderError(body) : html`<p>${body}</p>`}</div><div class="message-actions">${copy}</div></article>`;
 +    if (kind === "userMessage" || kind === "agentMessage") {
 +      return html`<article class=${`${kind} ${text(item["phase"]) === "commentary" ? "commentary" : ""}`} aria-label=${kind === "userMessage" ? "Your message" : "Codex response"}>
 +        ${kind === "agentMessage" ? html`<div class="markdown">${unsafeHTML(this.markdownHtml(item))}</div>` : html`<div class="message-images">${this.renderMessageImages(item)}</div><div class="user-text">${body}</div>`}
@@ -3475,6 +3571,17 @@ index 0000000000000000000000000000000000000000..d261407c5357e69e45c033acfc80646f
 +    .more-conversations { display:flex; justify-content:space-between; align-items:center; width:100%; padding:5px 6px; text-align:left; border-radius:0; border-bottom:1px solid var(--pi-border-muted,#e5e5e5); color:var(--pi-muted,#888); font-size:12px; }
 +    .more-count { font-size:11px; } .load-conversations { align-self:flex-start; margin:6px; font-size:12px; color:var(--pi-muted,#888); }
 +    .transcript { flex:1; min-height:0; overflow:auto; padding:30px 32px 16px; overflow-anchor:none; }
++    .status-popup { flex:none; min-height:0; max-height:35%; overflow:auto; margin:8px 24px 0; padding:6px 10px 10px; border:1px solid var(--pi-border-muted,#e4e4e4); border-radius:18px; background:var(--pi-bg,#fff); }
++    .status-heading { display:flex; align-items:center; justify-content:space-between; margin-bottom:6px; color:var(--pi-muted,#888); font-size:12px; }
++    .status-heading button { font-size:11px; }
++    .status-data { display:grid; grid-template-columns:96px minmax(0,1fr); gap:6px 10px; font:11px/1.5 ui-monospace,monospace; }
++    .status-label,.status-detail { color:var(--pi-muted,#888); }
++    .status-value { min-width:0; overflow-wrap:anywhere; }
++    .status-quota { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
++    .status-meter { flex:1 1 100px; height:13px; background:repeating-linear-gradient(0deg,var(--pi-muted,#888) 0 1px,transparent 1px 3px); }
++    .status-meter-fill { height:100%; background:repeating-linear-gradient(90deg,transparent 0 5px,var(--pi-bg,#fff) 5px 6px),var(--pi-text,#171717); opacity:.75; }
++    .status-quota-copy { margin-left:auto; }
++    @container (max-width:520px) { .status-popup { margin:6px 12px 0; } .status-data { grid-template-columns:84px minmax(0,1fr); gap:6px; font-size:10px; } }
 +    .status-reply { overflow-wrap:anywhere; }
 +    .reply-label { color:var(--pi-muted,#888); font-size:12px; margin-bottom:8px; }
 +    .reply-content p { margin:0 0 8px; white-space:pre-wrap; }
@@ -3599,6 +3706,7 @@ index 0000000000000000000000000000000000000000..d261407c5357e69e45c033acfc80646f
 +    .effort-slider input:focus-visible { outline:2px solid var(--pi-accent,#559ff6); outline-offset:4px; border-radius:999px; }
 +    .effort-unavailable { margin:8px 0 0; text-align:center; color:var(--pi-muted,#888); font-size:12px; }
 +
++    .status-reply [role="status"] { white-space:pre-wrap; }
 +    .connection-status { flex-shrink:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; padding:3px 20px; min-height:22px; font-size:10px; color:var(--pi-muted,#888); }
 +    .latest { align-self:center; font-size:11px; border-color:var(--pi-border-muted,#eee); } section { flex-shrink:0; max-height:35%; overflow:auto; }
 +    .approval { margin:8px 16px; padding:12px; border:1px solid var(--pi-accent,#8ab4ff); border-radius:10px; } .approval strong,small { overflow-wrap:anywhere; } small { display:block; font-size:11px; color:var(--pi-muted,#777); } .approval pre { margin:8px 0; } label { display:block; } label input,label select { display:block; width:100%; border-color:var(--pi-border,#ddd); }
@@ -3646,7 +3754,8 @@ index 0000000000000000000000000000000000000000..d261407c5357e69e45c033acfc80646f
 +
 +      .context-menu button { min-height:44px; }
 +      .context-entries { max-height:25dvh; }
-+      .connection-status { padding:3px 12px max(3px,env(safe-area-inset-bottom)); }
++    .status-reply [role="status"] { white-space:pre-wrap; }
++    .connection-status { padding:3px 12px max(3px,env(safe-area-inset-bottom)); }
 +      .approval { margin:6px 8px; padding:10px; }
 +      .approval button { min-height:44px; }
 +      aside { top:52px; width:100%; }
@@ -4151,16 +4260,16 @@ index 0000000000000000000000000000000000000000..c6d45f6f2f76fc6a88b06245b82f9eab
 +export const createCodexConnection: ConnectionFactory = (cwd, event, exited) => new CodexProcess(cwd, event, exited);
 diff --git a/pi-web-plugins/codex/server/codexService.test.ts b/pi-web-plugins/codex/server/codexService.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..977d5276e8b401da68378c12f2b13cdab58bcfed
+index 00000000..c8be22a5
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/codexService.test.ts
-@@ -0,0 +1,1036 @@
+@@ -0,0 +1,1126 @@
 +import { mkdtemp, mkdir, writeFile, symlink, truncate, rm } from "node:fs/promises";
 +import { join } from "node:path";
 +import { tmpdir } from "node:os";
 +import { afterEach, describe, expect, it, vi } from "vitest";
 +import type { ServerPluginPeerRequestContext, ServerPluginPeerChannelOpenContext } from "@jmfederico/pi-web/server-plugin-api";
-+import { cloneBoundedPluginBackendJson, PLUGIN_BACKEND_RESPONSE_JSON_MAX_BYTES } from "../../../src/shared/pluginBackendProtocol.js";
++import { requirePluginBackendOperation, cloneBoundedPluginBackendJson, PLUGIN_BACKEND_RESPONSE_JSON_MAX_BYTES } from "../../../src/shared/pluginBackendProtocol.js";
 +import { CodexService } from "./codexService.js";
 +import type { CodexConnection } from "./codexProtocol.js";
 +import { array, object, text, type RecordValue } from "./protocol.js";
@@ -4186,7 +4295,7 @@ index 0000000000000000000000000000000000000000..977d5276e8b401da68378c12f2b13cda
 +  services.push(service);
 +  const call = (operation: string, input: RecordValue = {}, workspace = "/work/one") => service.request({
 +    project: { id: "project", name: "Project", path: "/work" }, workspace: { id: workspace, projectId: "project", path: workspace, label: "One", isMain: true },
-+    operation, input, signal: new AbortController().signal,
++    operation: requirePluginBackendOperation(operation), input, signal: new AbortController().signal,
 +  } satisfies ServerPluginPeerRequestContext).then(object);
 +  const open = (send: ServerPluginPeerChannelOpenContext["send"], signal: AbortSignal, id = "new", workspace = "/work/one") => service.openChannel({
 +    project: { id: "project", name: "Project", path: "/work" }, workspace: { id: workspace, projectId: "project", path: workspace, label: "One", isMain: true },
@@ -4801,7 +4910,7 @@ index 0000000000000000000000000000000000000000..977d5276e8b401da68378c12f2b13cda
 +    const sending = f.call("steer", { threadId: "new", messageId, expectedTurnId: "turn" });
 +    await vi.waitFor(() => { expect(f.request).toHaveBeenCalledWith("turn/steer", expect.anything()); });
 +    await expect(f.call("steer", { threadId: "new", messageId, expectedTurnId: "turn" })).rejects.toThrow("already being submitted");
-+    await expect(f.call("removeQueued", { threadId: "new", messageId })).rejects.toThrow("already being submitted");
++    await expect(f.call("remove-queued", { threadId: "new", messageId })).rejects.toThrow("already being submitted");
 +    f.emit({ method: "turn/completed", params: { threadId: "new", turn: { id: "turn", status: "completed" } } });
 +    expect(f.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(1);
 +    accept({ turnId: "turn" }); await sending;
@@ -4828,7 +4937,7 @@ index 0000000000000000000000000000000000000000..977d5276e8b401da68378c12f2b13cda
 +    f.emit({ method: "turn/completed", params: { threadId: "new", turn: { id: "turn", status } } });
 +    expect(await f.call("snapshot", { threadId: "new" })).toMatchObject({ busy: false, queuePaused: true, queue: [{ text: "next" }] });
 +    expect(f.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(1);
-+    await f.call("resumeQueue", { threadId: "new" });
++    await f.call("resume-queue", { threadId: "new" });
 +    expect(await f.call("snapshot", { threadId: "new" })).toMatchObject({ busy: true, queuePaused: false, queue: [] });
 +  });
 +  it("retains a failed queued start for explicit retry and keeps its selected settings", async () => {
@@ -4838,7 +4947,7 @@ index 0000000000000000000000000000000000000000..977d5276e8b401da68378c12f2b13cda
 +    f.emit({ method: "turn/completed", params: { threadId: "new", turn: { id: "turn", status: "completed" } } });
 +    await vi.waitFor(async () => { expect(await f.call("snapshot", { threadId: "new" })).toMatchObject({ busy: false, queuePaused: true, error: "Start rejected", queue: [{ text: "next" }] }); });
 +    expect(f.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(2);
-+    await f.call("resumeQueue", { threadId: "new" });
++    await f.call("resume-queue", { threadId: "new" });
 +    expect(f.request).toHaveBeenCalledWith("turn/start", expect.objectContaining({ model: "chosen", effort: "high", approvalPolicy: "on-request", collaborationMode: { mode: "plan", settings: { model: "chosen", reasoning_effort: "high", developer_instructions: null } } }));
 +    expect(await f.call("snapshot", { threadId: "new" })).toMatchObject({ busy: true, queue: [], queuePaused: false });
 +  });
@@ -4858,12 +4967,12 @@ index 0000000000000000000000000000000000000000..977d5276e8b401da68378c12f2b13cda
 +    for (let i = 0; i < 20; i++) await f.call("send", { threadId: "new", text: String(i) });
 +    await expect(f.call("send", { threadId: "new", text: "overflow" })).rejects.toThrow("At most 20");
 +    const messageId = object(array((await f.call("snapshot", { threadId: "new" }))["queue"])[0])["id"] ?? "";
-+    await f.call("removeQueued", { threadId: "new", messageId });
++    await f.call("remove-queued", { threadId: "new", messageId });
 +    expect((await f.call("snapshot", { threadId: "new" }))["queue"]).toHaveLength(19);
 +    f.emit({ method: "turn/completed", params: { threadId: "new", turn: { id: "turn", status: "completed" } } });
 +    await vi.waitFor(async () => { expect((await f.call("snapshot", { threadId: "new" }))["queue"]).toHaveLength(18); });
 +    expect(f.request.mock.calls.filter(([method]) => method === "turn/start").at(-1)?.[1]["input"]).toEqual([{ type: "text", text: "1", text_elements: [] }]);
-+    await expect(f.call("removeQueued", { threadId: "new", messageId }, "/work/two")).rejects.toThrow("No queued messages");
++    await expect(f.call("remove-queued", { threadId: "new", messageId }, "/work/two")).rejects.toThrow("No queued messages");
 +  });
 +  it.each([false, true])("stops the queued turn that is starting, never the previous turn (event first=%s)", async (eventFirst) => {
 +    const f = fixture(); await f.call("create"); await f.call("send", { threadId: "new", text: "original" });
@@ -4902,7 +5011,7 @@ index 0000000000000000000000000000000000000000..977d5276e8b401da68378c12f2b13cda
 +    expect(await f.call("snapshot", { threadId: "new" })).toMatchObject({ busy: false, queuePaused: true, queue });
 +    expect((await f.call("snapshot", { threadId: "new" }))["items"]).toMatchObject([{ text: "Saved answer" }]);
 +    expect(f.request).not.toHaveBeenCalledWith("thread/resume", expect.anything());
-+    await f.call("resumeQueue", { threadId: "new" });
++    await f.call("resume-queue", { threadId: "new" });
 +    expect(f.request).toHaveBeenCalledWith("thread/resume", expect.objectContaining({ threadId: "new", approvalPolicy: "on-request" }));
 +    expect(await f.call("snapshot", { threadId: "new" })).toMatchObject({ busy: true, queue: [] });
 +  });
@@ -4911,7 +5020,7 @@ index 0000000000000000000000000000000000000000..977d5276e8b401da68378c12f2b13cda
 +    await f.call("send", { threadId: "new", text: "remove me" }); await f.call("send", { threadId: "new", text: "keep me" });
 +    const messageId = object(array((await f.call("snapshot", { threadId: "new" }))["queue"])[0])["id"] ?? "";
 +    f.exit("Process stopped");
-+    await f.call("removeQueued", { threadId: "new", messageId });
++    await f.call("remove-queued", { threadId: "new", messageId });
 +    expect((await f.call("snapshot", { threadId: "new" }))["queue"]).toMatchObject([{ text: "keep me" }]);
 +    expect(f.request).not.toHaveBeenCalledWith("thread/resume", expect.anything());
 +  });
@@ -4921,11 +5030,11 @@ index 0000000000000000000000000000000000000000..977d5276e8b401da68378c12f2b13cda
 +    const original = f.request.getMockImplementation();
 +    if (original === undefined) throw new Error("Missing request fixture");
 +    f.request.mockImplementation((method, params) => method === "thread/resume" ? Promise.reject(new Error("already has an active writer")) : original(method, params));
-+    await expect(f.call("resumeQueue", { threadId: "new" })).rejects.toThrow("Close it there");
++    await expect(f.call("resume-queue", { threadId: "new" })).rejects.toThrow("Close it there");
 +    expect(await f.call("snapshot", { threadId: "new" })).toMatchObject({ queuePaused: true, queue: [{ text: "next" }] });
 +    expect(f.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(1);
 +    f.request.mockImplementation(original);
-+    await f.call("resumeQueue", { threadId: "new" });
++    await f.call("resume-queue", { threadId: "new" });
 +    expect((await f.call("snapshot", { threadId: "new" }))["queue"]).toEqual([]);
 +  });
 +  it("does not replace resumed live items with a delayed recovery snapshot", async () => {
@@ -4936,7 +5045,7 @@ index 0000000000000000000000000000000000000000..977d5276e8b401da68378c12f2b13cda
 +    let read!: (value: RecordValue) => void;
 +    f.request.mockImplementation((method, params) => method === "thread/read" && params["includeTurns"] === true ? new Promise<RecordValue>((resolve) => { read = resolve; }) : original(method, params));
 +    const reading = f.call("snapshot", { threadId: "new" });
-+    await f.call("resumeQueue", { threadId: "new" });
++    await f.call("resume-queue", { threadId: "new" });
 +    f.emit({ method: "item/started", params: { threadId: "new", turnId: "turn", item: { id: "live", type: "agentMessage", text: "New response" } } });
 +    read({ thread: { id: "new", cwd: "/work/one", turns: [] } });
 +    expect(array((await reading)["items"])).toContainEqual(expect.objectContaining({ id: "live", text: "New response" }));
@@ -5191,12 +5300,102 @@ index 0000000000000000000000000000000000000000..977d5276e8b401da68378c12f2b13cda
 +    } finally { vi.unstubAllEnvs(); }
 +  });
 +});
++
++
++describe("native Codex commands", () => {
++  it.each(["compact", "review"])("runs %s through the native RPC and releases busy state on completion", async (operation) => {
++    const f = fixture(); await f.call("create");
++    f.request.mockImplementation((method) => Promise.resolve(method === "review/start" ? { turn: { id: "review-turn", status: "inProgress" } } : {}));
++    await f.call(operation, { threadId: "new" });
++    expect(f.request).toHaveBeenCalledWith(operation === "compact" ? "thread/compact/start" : "review/start", operation === "compact" ? { threadId: "new" } : { threadId: "new", delivery: "inline", target: { type: "uncommittedChanges" } });
++    expect(await f.call("snapshot", { threadId: "new" })).toMatchObject({ busy: true });
++    await expect(f.call(operation, { threadId: "new" })).rejects.toThrow("Wait for the current task");
++    f.emit({ method: "turn/started", params: { threadId: "new", turn: { id: "command-turn", status: "inProgress" } } });
++    f.emit({ method: "turn/completed", params: { threadId: "new", turn: { id: "command-turn", status: "completed" } } });
++    expect(await f.call("snapshot", { threadId: "new" })).toMatchObject({ busy: false, status: "completed" });
++  });
++
++  it("passes custom review instructions and keeps fast completion authoritative", async () => {
++    const f = fixture(); await f.call("create");
++    f.request.mockImplementation((method) => {
++      if (method === "review/start") {
++        f.emit({ method: "turn/completed", params: { threadId: "new", turn: { id: "fast", status: "completed" } } });
++        return Promise.resolve({ turn: { id: "fast", status: "inProgress" } });
++      }
++      return Promise.resolve({});
++    });
++    await f.call("review", { threadId: "new", instructions: "Check permissions" });
++    expect(f.request).toHaveBeenCalledWith("review/start", { threadId: "new", delivery: "inline", target: { type: "custom", instructions: "Check permissions" } });
++    expect(await f.call("snapshot", { threadId: "new" })).toMatchObject({ busy: false, status: "completed" });
++  });
++
++  it("rejects cross-workspace commands and recovers after native RPC failure", async () => {
++    const f = fixture();
++    await expect(f.call("compact", { threadId: "saved" }, "/elsewhere")).rejects.toThrow("another workspace");
++    expect(f.request.mock.calls.some(([method]) => method === "thread/compact/start")).toBe(false);
++    await f.call("create");
++    f.request.mockImplementation((method) => method === "thread/compact/start" ? Promise.reject(new Error("Unsupported method")) : Promise.resolve({}));
++    await expect(f.call("compact", { threadId: "new" })).rejects.toThrow("Unsupported method");
++    expect(await f.call("snapshot", { threadId: "new" })).toMatchObject({ busy: false, status: "failed", error: "Unsupported method" });
++  });
++});
++
++
++it("does not run review under stale permissions after a permission change", async () => {
++  const f = fixture(); await f.call("create");
++  await expect(f.call("review", { threadId: "new", permissionMode: "ask-for-approval" })).rejects.toThrow("selected permissions");
++  expect(f.request.mock.calls.some(([method]) => method === "review/start")).toBe(false);
++});
++
++
++describe("native session status", () => {
++  it("uses Codex token usage events and queries limits without starting a turn", async () => {
++    const f = fixture(); await f.call("create");
++    const usage = { total: { totalTokens: 1200 }, last: { totalTokens: 300 }, modelContextWindow: 200000 };
++    f.emit({ method: "thread/tokenUsage/updated", params: { threadId: "new", tokenUsage: usage } });
++    const original = f.request.getMockImplementation();
++    if (!original) throw new Error("Missing mock implementation");
++    f.request.mockImplementation(async (method, params) => method === "account/rateLimits/read" ? { rateLimits: { primary: { usedPercent: 25, windowDurationMins: 300 } } } : original(method, params));
++    const result = await f.call("session-status", { threadId: "new" });
++    expect(result["tokenUsage"]).toEqual(usage);
++    expect(result["rateLimits"]).toMatchObject({ rateLimits: { primary: { usedPercent: 25 } } });
++    expect(f.request).toHaveBeenCalledWith("thread/read", { threadId: "new", includeTurns: false });
++    expect(f.request).toHaveBeenCalledWith("account/rateLimits/read", {});
++    expect(f.request).not.toHaveBeenCalledWith("thread/resume", expect.anything());
++    expect(f.request).not.toHaveBeenCalledWith("turn/start", expect.anything());
++  });
++
++  it("reads historical usage from the Codex rollout and keeps quota failures explicit", async () => {
++    const dir = await mkdtemp(join(tmpdir(), "codex-status-"));
++    try {
++      const path = join(dir, "rollout.jsonl");
++      const record = (n: number) => JSON.stringify({ type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { total_tokens: n, input_tokens: n - 100, output_tokens: 100 }, last_token_usage: { total_tokens: 200 }, model_context_window: 200000 } } });
++      await writeFile(path, record(400) + "\n" + record(900) + '\n{"partial":');
++      const f = fixture();
++      f.request.mockImplementation((method) => {
++        if (method === "thread/read") return Promise.resolve({ thread: { id: "saved", cwd: "/work/one", path } });
++        return Promise.reject(new Error("Quota unavailable"));
++      });
++      const result = await f.call("session-status", { threadId: "saved" });
++      expect(result["tokenUsage"]).toMatchObject({ total: { totalTokens: 900 }, last: { totalTokens: 200 }, modelContextWindow: 200000 });
++      expect(result["rateLimitsError"]).toContain("Quota unavailable");
++      await writeFile(path, "");
++      expect((await f.call("session-status", { threadId: "saved" }))["tokenUsage"]).toBeNull();
++    } finally { await rm(dir, { recursive: true, force: true }); }
++  });
++
++  it("rejects cross-workspace status reads", async () => {
++    const f = fixture(); f.cwd("/other");
++    await expect(f.call("session-status", { threadId: "saved" })).rejects.toThrow("another workspace");
++    expect(f.request).not.toHaveBeenCalledWith("account/rateLimits/read", expect.anything());
++  });
++});
 diff --git a/pi-web-plugins/codex/server/codexService.ts b/pi-web-plugins/codex/server/codexService.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..198281ed1785f7238f6a9e0f3bea81fde9ac9021
+index 0000000000000000000000000000000000000000..a511951d5866ef90c98a3ec390df7b1b40fcb649
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/codexService.ts
-@@ -0,0 +1,910 @@
+@@ -0,0 +1,991 @@
 +import { createHash, randomUUID } from "node:crypto";
 +import { imageSize } from "image-size";
 +import { isAbsolute, relative, resolve, sep } from "node:path";
@@ -5214,6 +5413,7 @@ index 0000000000000000000000000000000000000000..198281ed1785f7238f6a9e0f3bea81fd
 +  mode: ChatMode | undefined;
 +}
 +interface ThreadState {
++  tokenUsage?: RecordValue;
 +  turnTimes?: Map<string, RecordValue>;
 +  needsResume?: boolean;
 +  stopRequested?: boolean;
@@ -5257,6 +5457,8 @@ index 0000000000000000000000000000000000000000..198281ed1785f7238f6a9e0f3bea81fd
 +const policy = policies["full-access"];
 +// Include conversations created by the native app-server, not just CLI/IDE history.
 +const conversationSources = ["cli", "vscode", "appServer"];
++
++const supportedOperations = new Set(["status", "session-status", "activity", "list", "models", "create", "fork", "snapshot", "image", "send", "steer", "remove-queued", "resume-queue", "stop", "answer", "archive", "compact", "review"]);
 +
 +export class CodexService {
 +  private readonly imageChunks = new WeakMap<WorkspaceState, Map<string, string>>();
@@ -5337,14 +5539,13 @@ index 0000000000000000000000000000000000000000..198281ed1785f7238f6a9e0f3bea81fd
 +    this.disposed = true;
 +    this.closeSubscriptions();
 +    clearInterval(this.sweep);
-+    for (const state of this.workspaces.values()) { this.closeSubscriptions(state); state.connection.dispose(); }
++    for (const state of this.workspaces.values()) state.connection.dispose();
 +    this.workspaces.clear();
 +  }
 +
 +  async request(context: ServerPluginPeerRequestContext): Promise<JsonValue> {
 +    if (context.signal.aborted || this.disposed) throw new Error("Codex request cancelled");
-+    const supported = new Set(["status", "activity", "list", "models", "create", "fork", "snapshot", "image", "send", "steer", "removeQueued", "resumeQueue", "stop", "answer", "archive"]);
-+    if (!supported.has(context.operation)) throw new Error("Unsupported Codex operation");
++    if (!supportedOperations.has(context.operation)) throw new Error("Unsupported Codex operation");
 +    const input = object(context.input);
 +    const selectedPolicy = policies[permissionMode(input["permissionMode"])];
 +    const mode = input["mode"] === undefined ? undefined : chatMode(input["mode"]);
@@ -5354,6 +5555,20 @@ index 0000000000000000000000000000000000000000..198281ed1785f7238f6a9e0f3bea81fd
 +      case "status": {
 +        const account = await rpc("account/read", { refreshToken: false });
 +        return { voiceInputEnabled: process.env["PI_WEB_VOICE_INPUT_ENABLED"] === "true", authenticated: account["account"] !== null, requiresOpenaiAuth: account["requiresOpenaiAuth"] ?? true, policy, cwd: state.cwd };
++      }
++      case "session-status": {
++        const id = text(input["threadId"]);
++        // Validate through Codex without acquiring a writer or starting a turn.
++        const saved = id ? workspaceThread(state, await rpc("thread/read", { threadId: id, includeTurns: false })) : {};
++        const local = state.threads.get(id);
++        let tokenUsage = local?.needsResume !== true ? local?.tokenUsage : undefined;
++        if (!tokenUsage && text(saved["path"])) tokenUsage = await storedTokenUsage(text(saved["path"]));
++        let rateLimits: RecordValue = {};
++        let rateLimitsError = "";
++        try { rateLimits = await rpc("account/rateLimits/read", {}); }
++        catch (error) { rateLimitsError = errorText(error); }
++        return { threadId: id, cwd: state.cwd, model: saved["model"] ?? local?.model ?? null,
++          status: saved["status"] ?? local?.status ?? null, tokenUsage: tokenUsage ?? null, rateLimits, rateLimitsError };
 +      }
 +      case "activity": return { busyThreadIds: [...state.threads.values()].filter((thread) => thread.busy).map((thread) => thread.id) };
 +      case "models": {
@@ -5379,7 +5594,7 @@ index 0000000000000000000000000000000000000000..198281ed1785f7238f6a9e0f3bea81fd
 +      case "archive": {
 +        const id = string(input["threadId"], "threadId");
 +        const read = await rpc("thread/read", { threadId: id, includeTurns: false });
-+        if (resolve(string(object(read["thread"])["cwd"], "thread cwd", 4096)) !== state.cwd) throw new Error("Conversation belongs to another workspace");
++        workspaceThread(state, read);
 +        if (state.archiving.has(id)) throw new Error("Conversation is being archived");
 +        if (state.opening.has(id)) throw new Error("Conversation is being opened. Wait before archiving it.");
 +        const cached = state.threads.get(id);
@@ -5398,8 +5613,7 @@ index 0000000000000000000000000000000000000000..198281ed1785f7238f6a9e0f3bea81fd
 +        const lastTurnId = string(input["turnId"], "turnId");
 +        // Validate stored history without taking the source conversation's writer.
 +        const read = await rpc("thread/read", { threadId: sourceId, includeTurns: true });
-+        const source = object(read["thread"]);
-+        if (resolve(string(source["cwd"], "thread cwd", 4096)) !== state.cwd) throw new Error("Conversation belongs to another workspace");
++        const source = workspaceThread(state, read);
 +        const turn = array(source["turns"]).map(object).find((entry) => entry["id"] === lastTurnId);
 +        if (turn?.["status"] !== "completed") throw new Error("Choose a completed response to branch from");
 +        if (state.archiving.has(sourceId)) throw new Error("Conversation is being archived");
@@ -5438,7 +5652,7 @@ index 0000000000000000000000000000000000000000..198281ed1785f7238f6a9e0f3bea81fd
 +    const imageKey = JSON.stringify([id, input["itemId"], input["index"], input["source"]]);
 +    const cachedImage = context.operation === "image" ? this.imageChunks.get(state)?.get(imageKey) : undefined;
 +    if (cachedImage !== undefined) return this.imageChunk(cachedImage, input["offset"] ?? 0);
-+    const localQueueAction = context.operation === "steer" || context.operation === "removeQueued";
++    const localQueueAction = context.operation === "steer" || context.operation === "remove-queued";
 +    const thread = localQueueAction ? state.threads.get(id) : ["snapshot", "image"].includes(context.operation) ? await this.readSnapshot(state, id) : await this.load(state, id, selectedPolicy);
 +    if (thread === undefined) throw new Error("No queued messages for this conversation in the current workspace");
 +    context.signal.throwIfAborted();
@@ -5472,6 +5686,33 @@ index 0000000000000000000000000000000000000000..198281ed1785f7238f6a9e0f3bea81fd
 +      return this.boundedSnapshot({ changed: true, id, mode: thread.mode, model: thread.model, effort: thread.effort, version: thread.version, status: thread.status, busy: thread.busy, turnId: thread.turnId, error: thread.error,
 +        queue: thread.queue.map((message) => ({ id: message.id, text: bounded(message.prompt), imageCount: message.input.filter((entry) => entry["type"] === "localImage").length })), queuePaused: thread.queuePaused,
 +        inputHistory: [...thread.inputHistory.values()], items: [...thread.items.values()].slice(Math.max(0, end - 40), end), offset, total: thread.items.size, approvals: [...thread.approvals.values()], policy: thread.policy });
++    }
++    if (context.operation === "compact" || context.operation === "review") {
++      if (thread.busy || thread.sending || thread.queue.length > 0) throw new Error("Wait for the current task and queued messages before running this command");
++      // Native review inherits thread permissions; it has no per-request policy override.
++      if (context.operation === "review" && JSON.stringify(thread.policy) !== JSON.stringify(selectedPolicy)) throw new Error("Send a message with the selected permissions before starting a review");
++      const instructions = input["instructions"] === undefined ? "" : string(input["instructions"], "instructions", 64000);
++      thread.sending = true;
++      thread.busy = true;
++      thread.turnId = "";
++      thread.stopRequested = false;
++      thread.status = "starting";
++      thread.error = "";
++      this.changed(thread);
++      try {
++        if (context.operation === "compact") await rpc("thread/compact/start", { threadId: id });
++        else {
++          const result = await rpc("review/start", { threadId: id, delivery: "inline", target: instructions ? { type: "custom", instructions } : { type: "uncommittedChanges" } });
++          const turn = object(result["turn"]);
++          thread.turnId = string(turn["id"]);
++          this.rememberTurnTimes(thread, turn);
++          this.started(thread);
++        }
++        return { accepted: true };
++      } catch (error) {
++        thread.busy = false; thread.status = "failed"; thread.error = errorText(error);
++        throw error;
++      } finally { thread.sending = false; this.changed(thread); }
 +    }
 +    if (context.operation === "send") {
 +      if (thread.sending) throw new Error("A message is already being submitted to this conversation");
@@ -5538,12 +5779,12 @@ index 0000000000000000000000000000000000000000..198281ed1785f7238f6a9e0f3bea81fd
 +        void this.drainQueue(state, thread);
 +      }
 +    }
-+    if (context.operation === "steer" || context.operation === "removeQueued") {
++    if (context.operation === "steer" || context.operation === "remove-queued") {
 +      if (thread.sending) throw new Error("A message is already being submitted to this conversation");
 +      const messageId = string(input["messageId"], "messageId");
 +      const message = thread.queue.find((entry) => entry.id === messageId);
 +      if (message === undefined) throw new Error("This queued message was already submitted or removed");
-+      if (context.operation === "removeQueued") {
++      if (context.operation === "remove-queued") {
 +        thread.queue.splice(thread.queue.indexOf(message), 1);
 +        this.changed(thread);
 +        return { removed: true };
@@ -5562,7 +5803,7 @@ index 0000000000000000000000000000000000000000..198281ed1785f7238f6a9e0f3bea81fd
 +        void this.drainQueue(state, thread);
 +      }
 +    }
-+    if (context.operation === "resumeQueue") {
++    if (context.operation === "resume-queue") {
 +      if (thread.sending || thread.busy) throw new Error("Wait for the current response before resuming the queue");
 +      thread.queuePaused = false;
 +      const error = await this.drainQueue(state, thread);
@@ -5800,7 +6041,7 @@ index 0000000000000000000000000000000000000000..198281ed1785f7238f6a9e0f3bea81fd
 +    const key = JSON.stringify([context.project.id, context.workspace.id, cwd]);
 +    let state = this.workspaces.get(key);
 +    const threads = new Map<string, ThreadState>();
-+    if (state?.error !== undefined && state.error !== "" && !["snapshot", "activity", "steer", "removeQueued"].includes(context.operation)) {
++    if (state?.error !== undefined && state.error !== "" && !["snapshot", "activity", "steer", "remove-queued"].includes(context.operation)) {
 +      for (const [id, thread] of state.threads) {
 +        if (thread.queue.length > 0) threads.set(id, { ...thread, queue: [...thread.queue], items: new Map(), inputHistory: new Map(), approvals: new Map(), turnTimes: new Map(),
 +          busy: false, sending: false, turnId: "", stopRequested: false, needsResume: true, queuePaused: true, version: thread.version + 1,
@@ -5857,8 +6098,7 @@ index 0000000000000000000000000000000000000000..198281ed1785f7238f6a9e0f3bea81fd
 +    if (resuming !== undefined) return resuming;
 +    existing = state.threads.get(id);
 +    if (existing !== undefined && (existing.needsResume !== true || state.error !== "")) return existing;
-+    const saved = object(read["thread"]);
-+    if (resolve(string(saved["cwd"], "thread cwd", 4096)) !== state.cwd) throw new Error("Conversation belongs to another workspace");
++    const saved = workspaceThread(state, read);
 +    const thread = { ...createThread(id), model: text(saved["model"]), effort: text(saved["reasoningEffort"]),
 +      version: --this.historyVersion, status: "Stored history" };
 +    for (const entry of array(saved["turns"])) {
@@ -5886,7 +6126,7 @@ index 0000000000000000000000000000000000000000..198281ed1785f7238f6a9e0f3bea81fd
 +  }
 +  private async restore(state: WorkspaceState, id: string, selectedPolicy: RecordValue): Promise<ThreadState> {
 +    const read = await state.connection.request("thread/read", { threadId: id, includeTurns: false });
-+    if (resolve(string(object(read["thread"])["cwd"], "thread cwd", 4096)) !== state.cwd) throw new Error("Conversation belongs to another workspace");
++    workspaceThread(state, read);
 +    const thread = this.remember(state, id);
 +    try {
 +      if (thread.needsResume === true) { thread.items.clear(); thread.inputHistory.clear(); thread.turnTimes?.clear(); }
@@ -6036,7 +6276,9 @@ index 0000000000000000000000000000000000000000..198281ed1785f7238f6a9e0f3bea81fd
 +      return;
 +    }
 +    if (thread === undefined) return;
-+    if (method === "thread/settings/updated") {
++    if (method === "thread/tokenUsage/updated") {
++      thread.tokenUsage = object(params["tokenUsage"]);
++    } else if (method === "thread/settings/updated") {
 +      const settings = object(params["threadSettings"]);
 +      this.settings(thread, { model: settings["model"] ?? null, reasoningEffort: settings["effort"] ?? null, collaborationMode: settings["collaborationMode"] ?? null });
 +    } else if (method === "turn/started" || method === "turn/completed") {
@@ -6096,6 +6338,12 @@ index 0000000000000000000000000000000000000000..198281ed1785f7238f6a9e0f3bea81fd
 +  }
 +}
 +
++function workspaceThread(state: WorkspaceState, response: RecordValue): RecordValue {
++  const thread = object(response["thread"]);
++  if (resolve(string(thread["cwd"], "thread cwd", 4096)) !== state.cwd) throw new Error("Conversation belongs to another workspace");
++  return thread;
++}
++
 +function createThread(id: string): ThreadState {
 +  return { id, model: "", effort: "", version: 0, turnId: "", status: "idle", error: "", busy: false, sending: false,
 +    queue: [], queuePaused: false, items: new Map(), inputHistory: new Map(), approvals: new Map(), policy: null, mode: null };
@@ -6106,6 +6354,38 @@ index 0000000000000000000000000000000000000000..198281ed1785f7238f6a9e0f3bea81fd
 +    const first = entries.keys().next().value;
 +    if (first !== undefined) entries.delete(first);
 +  }
++}
++
++/** Read only Codex's returned rollout path, never a browser-supplied path. */
++async function storedTokenUsage(path: string): Promise<RecordValue | undefined> {
++  const file = await open(path, "r").catch(() => undefined);
++  if (!file) return undefined;
++  try {
++    const size = (await file.stat()).size;
++    // Bound I/O for large histories. A missing record is unknown, never zero usage.
++    const start = Math.max(0, size - 2 * 1024 * 1024);
++    const buffer = Buffer.alloc(size - start);
++    const { bytesRead } = await file.read(buffer, 0, buffer.length, start);
++    const lines = buffer.subarray(0, bytesRead).toString("utf8").split("\n");
++    if (start > 0) lines.shift();
++    for (const line of lines.reverse()) {
++      try {
++        const event = object(JSON.parse(line));
++        const payload = object(event["payload"]);
++        if (event["type"] !== "event_msg" || payload["type"] !== "token_count" || payload["info"] == null) continue;
++        const info = object(payload["info"]);
++        const convert = (value: unknown): RecordValue => {
++          const usage = object(value);
++          return { totalTokens: usage["total_tokens"] ?? null, inputTokens: usage["input_tokens"] ?? null,
++            cachedInputTokens: usage["cached_input_tokens"] ?? null, outputTokens: usage["output_tokens"] ?? null,
++            reasoningOutputTokens: usage["reasoning_output_tokens"] ?? null };
++        };
++        return { total: convert(info["total_token_usage"]), last: convert(info["last_token_usage"]), modelContextWindow: info["model_context_window"] ?? null };
++      } catch { /* Ignore partial records while Codex is appending. */ }
++    }
++  } catch { return undefined; }
++  finally { await file.close(); }
++  return undefined;
 +}
 diff --git a/pi-web-plugins/codex/server/protocol.ts b/pi-web-plugins/codex/server/protocol.ts
 new file mode 100644
@@ -6276,7 +6556,7 @@ index 92416a139d5e8fb0f345826d2c32d1ef0b9f3ddd..02c629dbe292d90054bea9b99d4c5ab5
      const alpha = vi.fn(() => html`<b>Alpha</b>`);
      const beta = vi.fn(() => html`<b>Beta</b>`);
 diff --git a/pi-web-plugins/files/workspaceMarkdown.ts b/pi-web-plugins/files/workspaceMarkdown.ts
-index 42e25cf03fb70e5a5384908b3d5e4d83251cb132..bda3647ffbdd7e129633ba313d1c2a80523172ce 100644
+index 42e25cf03fb70e5a5384908b3d5e4d83251cb132..96453b26aad0587367af6eae001c3d5c4e6c39c8 100644
 --- a/pi-web-plugins/files/workspaceMarkdown.ts
 +++ b/pi-web-plugins/files/workspaceMarkdown.ts
 @@ -1,12 +1,7 @@
@@ -6295,7 +6575,7 @@ index 42e25cf03fb70e5a5384908b3d5e4d83251cb132..bda3647ffbdd7e129633ba313d1c2a80
  
  const NO_ATTRIBUTES = new Set<string>();
  
-@@ -45,22 +40,69 @@ const SAFE_LINK_PROTOCOLS = new Set(["http:", "https:", "mailto:"]);
+@@ -45,22 +40,72 @@ const SAFE_LINK_PROTOCOLS = new Set(["http:", "https:", "mailto:"]);
  const SAFE_TABLE_ALIGNMENTS = new Set(["left", "center", "right"]);
  const TABLE_SCROLL_CLASS = "table-scroll";
  
@@ -6342,8 +6622,7 @@ index 42e25cf03fb70e5a5384908b3d5e4d83251cb132..bda3647ffbdd7e129633ba313d1c2a80
 +    })),
    });
 -  return sanitizeWorkspaceMarkdownHtml(generated);
-+  const template = document.createElement("template");
-+  template.innerHTML = sanitizeWorkspaceMarkdownHtml(parser.parse(markdown, { async: false }), resolveFileLink);
++  const template = sanitizedWorkspaceMarkdown(parser.parse(markdown, { async: false }), resolveFileLink);
 +  // Only renderer-generated placeholders can introduce KaTeX output. Untrusted
 +  // Markdown is sanitized first; raw HTML cannot bypass the workspace policy.
 +  for (const code of template.content.querySelectorAll("code")) {
@@ -6371,10 +6650,14 @@ index 42e25cf03fb70e5a5384908b3d5e4d83251cb132..bda3647ffbdd7e129633ba313d1c2a80
   */
 -export function sanitizeWorkspaceMarkdownHtml(generatedHtml: string): string {
 +export function sanitizeWorkspaceMarkdownHtml(generatedHtml: string, resolveFileLink?: FileLinkResolver): string {
++  return sanitizedWorkspaceMarkdown(generatedHtml, resolveFileLink).innerHTML;
++}
++
++function sanitizedWorkspaceMarkdown(generatedHtml: string, resolveFileLink?: FileLinkResolver): HTMLTemplateElement {
    const template = document.createElement("template");
    template.innerHTML = generatedHtml;
  
-@@ -72,6 +114,7 @@ export function sanitizeWorkspaceMarkdownHtml(generatedHtml: string): string {
+@@ -72,6 +117,7 @@ export function sanitizeWorkspaceMarkdownHtml(generatedHtml: string): string {
        continue;
      }
  
@@ -6382,7 +6665,7 @@ index 42e25cf03fb70e5a5384908b3d5e4d83251cb132..bda3647ffbdd7e129633ba313d1c2a80
      for (const attribute of [...element.attributes]) {
        const name = attribute.name.toLowerCase();
        if (!allowedAttributes.has(name) || !isAllowedAttributeValue(tag, name, attribute.value)) {
-@@ -79,7 +122,17 @@ export function sanitizeWorkspaceMarkdownHtml(generatedHtml: string): string {
+@@ -79,11 +125,21 @@ export function sanitizeWorkspaceMarkdownHtml(generatedHtml: string): string {
        }
      }
  
@@ -6401,6 +6684,11 @@ index 42e25cf03fb70e5a5384908b3d5e4d83251cb132..bda3647ffbdd7e129633ba313d1c2a80
    }
  
    wrapTablesInScrollRegions(template.content);
+-  return template.innerHTML;
++  return template;
+ }
+ 
+ function secureWorkspaceMarkdownLink(element: Element): void {
 diff --git a/pi-web-plugins/pluginPublicApi.test.ts b/pi-web-plugins/pluginPublicApi.test.ts
 index 7f230bed7360104ca64174d51ba36294fd9b80d2..4338c8478ccc165371dfa0fb1c2378116924f0e9 100644
 --- a/pi-web-plugins/pluginPublicApi.test.ts
@@ -6759,3 +7047,92 @@ index 999882ef8609281722ac5dbea740e4ed85d06bf0..c9ffd52f67c9ac6b2d628ba9a979bd80
    :host([pwa-display-mode]) { --pi-app-safe-area-bottom: env(safe-area-inset-bottom); }
    @media (display-mode: standalone), (display-mode: fullscreen), (display-mode: minimal-ui) {
      :host { --pi-app-safe-area-bottom: env(safe-area-inset-bottom); }
+diff --git a/pi-web-plugins/codex/statusReply.ts b/pi-web-plugins/codex/statusReply.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..7d26922ecf9ef742197f4309221363e5f200e587
+--- /dev/null
++++ b/pi-web-plugins/codex/statusReply.ts
+@@ -0,0 +1,41 @@
++import { html, nothing } from "lit";
++import { object as requireObject, text, type RecordValue } from "./server/protocol.js";
++
++const object = (value: unknown): RecordValue => value !== null && typeof value === "object" && !Array.isArray(value) ? requireObject(value) : {};
++const number = (value: unknown): number | undefined => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
++const percent = (value: number): number => Math.round(Math.max(0, Math.min(100, value)));
++const count = (value: number): string => value.toLocaleString("en-US");
++
++export function statusReply(status: RecordValue, close: () => void) {
++  const usage = object(status["tokenUsage"]);
++  // The last turn describes the current context; cumulative usage includes previous turns.
++  const used = number(object(usage["last"])["totalTokens"]);
++  const total = number(object(usage["total"])["totalTokens"]);
++  const capacity = number(usage["modelContextWindow"]);
++  const limits = object(status["rateLimits"]);
++  const buckets = Object.values(object(limits["rateLimitsByLimitId"]));
++  if (buckets.length === 0 && limits["rateLimits"] != null) buckets.push(limits["rateLimits"]);
++  const windows = buckets.flatMap((value) => {
++    const bucket = object(value);
++    return ["primary", "secondary"].flatMap((key) => {
++      const window = object(bucket[key]);
++      const usedPercent = number(window["usedPercent"]);
++      if (usedPercent === undefined) return [];
++      const minutes = number(window["windowDurationMins"]);
++      const duration = minutes === undefined ? key : minutes % 1440 === 0 ? `${String(minutes / 1440)}d` : minutes % 60 === 0 ? `${String(minutes / 60)}h` : `${String(minutes)}m`;
++      const timestamp = number(window["resetsAt"]);
++      const reset = timestamp === undefined ? undefined : new Date(timestamp * 1000);
++      return [{ label: `${buckets.length > 1 ? `${text(bucket["limitName"]) || text(bucket["limitId"]) || "Codex"} ` : ""}${duration} limit:`, left: percent(100 - usedPercent), reset: reset && Number.isFinite(reset.getTime()) ? reset.toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "" }];
++    });
++  });
++  return html`<section class="status-popup" aria-label="Status">
++    <div class="status-heading"><span>Status</span><button type="button" aria-label="Close status" @click=${close}>Close</button></div>
++    <div class="status-data">
++      ${text(status["threadId"]) ? html`<span class="status-label">Session/Thread:</span><span class="status-value">${text(status["threadId"]) || "New session"}</span>
++      <span class="status-label">Context:</span><span class="status-value">${used !== undefined && capacity !== undefined && capacity > 0 ? html`${percent(100 - used / capacity * 100)}% left <span class="status-detail">(${count(used)} used / ${capacity >= 1000 ? `${count(Math.round(capacity / 1000))}K` : count(capacity)})</span>` : "Unavailable"}</span>
++      <span class="status-label">Token usage:</span><span class="status-value">${total === undefined ? "Unavailable" : count(total)} total <span class="status-detail">(${used === undefined ? "Unavailable" : count(used)} last)</span></span>` : nothing}
++      ${windows.map((window) => html`<span class="status-label">${window.label}</span><div class="status-value status-quota"><div class="status-meter" role="progressbar" aria-label=${window.label} aria-valuemin="0" aria-valuemax="100" aria-valuenow=${window.left} aria-valuetext=${`${String(window.left)}% left`}><div class="status-meter-fill" style=${`width:${String(window.left)}%`}></div></div><span class="status-quota-copy">${window.left}% left ${window.reset ? html`<span class="status-detail">(resets ${window.reset})</span>` : nothing}</span></div>`)}
++      ${windows.length === 0 ? html`<span class="status-label">Limits:</span><span class="status-value status-detail">${text(status["rateLimitsError"]) || "Unavailable"}</span>` : nothing}
++    </div>
++  </section>`;
++}
+diff --git a/pi-web-plugins/codex/statusReply.test.ts b/pi-web-plugins/codex/statusReply.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..0a624f80efc60062a8722efc6dee08d5edb0afc6
+--- /dev/null
++++ b/pi-web-plugins/codex/statusReply.test.ts
+@@ -0,0 +1,36 @@
++// @vitest-environment happy-dom
++import { render } from "lit";
++import { describe, expect, it } from "vitest";
++import { statusReply } from "./statusReply.js";
++import type { RecordValue } from "./server/protocol.js";
++
++function popup(data: RecordValue) {
++  const container = document.createElement("div");
++  render(statusReply(data, () => undefined), container);
++  return container;
++}
++describe("status popup", () => {
++  it("shows account limits without session information on the home screen", () => {
++    const result = popup({ rateLimits: { rateLimits: { secondary: { usedPercent: 17, windowDurationMins: 10080 } } } });
++    expect(result.textContent).toContain("7d limit:");
++    expect(result.textContent).toContain("83% left");
++    expect(result.textContent).not.toContain("Session/Thread");
++    expect(result.textContent).not.toContain("Context:");
++    expect(result.textContent).not.toContain("Token usage:");
++  });
++  it("uses last-turn context separately from cumulative tokens", () => {
++    const result = popup({ threadId: "thread", tokenUsage: { total: { totalTokens: 300000 }, last: { totalTokens: 23200 }, modelContextWindow: 258000 } });
++    expect(result.textContent).toContain("91% left");
++    expect(result.textContent).toContain("23,200 used / 258K");
++    expect(result.textContent).toContain("300,000 total");
++    expect(result.textContent).toContain("23,200 last");
++  });
++  it("distinguishes missing and zero usage and clamps limits", () => {
++    expect(popup({ threadId: "t" }).textContent).toContain("Unavailable");
++    const result = popup({ threadId: "t", tokenUsage: { last: { totalTokens: 0 }, total: { totalTokens: 0 }, modelContextWindow: 200000 }, rateLimits: { rateLimits: { primary: { usedPercent: 120, windowDurationMins: 300 }, secondary: { usedPercent: 0, windowDurationMins: 10080, resetsAt: 1700000000 } } } });
++    expect(result.textContent).toContain("100% left");
++    expect(result.textContent).toContain("0 total");
++    expect([...result.querySelectorAll('[role="progressbar"]')].map((bar) => bar.getAttribute("aria-valuenow"))).toEqual(["0", "100"]);
++    expect(result.textContent).toContain("resets");
++  });
++});

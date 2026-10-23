@@ -1,0 +1,35 @@
+diff --git a/scripts/docs-site.test.mjs b/scripts/docs-site.test.mjs
+index ed214aaac4bb3b7184e8390d6562e986df79b798..1c76437272df9afee11cee9e1de6dc80c3775371 100644
+--- a/scripts/docs-site.test.mjs
++++ b/scripts/docs-site.test.mjs
+@@ -6,7 +6,7 @@ const siteScript = readFileSync(new URL("../docs/site.js", import.meta.url), "ut
+ const siteStyles = readFileSync(new URL("../docs/styles.css", import.meta.url), "utf8");
+ 
+ function createAnimatedHomePage(initialScrollY = 0) {
+-  const window = new Window({ url: "https://pi-web.dev/" });
++  const window = new Window({ url: "https://pi-web.dev/", settings: { disableCSSFileLoading: true, disableJavaScriptFileLoading: true } });
+   const style = window.document.createElement("style");
+   style.textContent = siteStyles;
+   window.document.head.append(style);
+@@ -217,7 +217,7 @@ describe("homepage screenshot themes", () => {
+ 
+   function openPage({ reducedMotion = false, runScript = true, pageTheme = "dark", systemLight = false } = {}) {
+     vi.useFakeTimers();
+-    window = new Window({ url: "https://pi-web.dev/" });
++    window = new Window({ url: "https://pi-web.dev/", settings: { disableCSSFileLoading: true, disableJavaScriptFileLoading: true } });
+     window.document.write(readFileSync(new URL("../docs/index.html", import.meta.url), "utf8"));
+     // Only clock and browser preference/visibility boundaries are controlled.
+     window.setTimeout = setTimeout;
+diff --git a/scripts/plugin-search.test.mjs b/scripts/plugin-search.test.mjs
+index d979c170e2595ff5651061255a91787c35838b07..6e4a10814e56aa4a59f6db4be1a1f5e77f7cc34d 100644
+--- a/scripts/plugin-search.test.mjs
++++ b/scripts/plugin-search.test.mjs
+@@ -11,7 +11,7 @@ afterEach(async () => {
+ });
+ 
+ function setup(fetch) {
+-  const window = new Window({ url: "https://pi-web.dev/dev/community-plugins" });
++  const window = new Window({ url: "https://pi-web.dev/dev/community-plugins", settings: { disableCSSFileLoading: true, disableJavaScriptFileLoading: true } });
+   windows.push(window);
+   window.document.write(html);
+   window.fetch = fetch;

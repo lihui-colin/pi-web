@@ -17,7 +17,7 @@ sh scripts/install.sh
 
 `data/` 已被 Git 忽略。可单独运行 `sh scripts/sync.sh` 同步并准备源码；`--local` 仅使用 `data/pi-web-upstream.git` 缓存。`PI_WEB_INSTALL_ROOT` 可覆盖构建安装目录，Git 下载缓存仍保存在 `data/`。运行中的版本依赖对应 release 目录，请勿删除。
 
-当前补丁按功能合并为 3 个：`0001-terminal.patch` 包含全部终端修复与增强，`0006-codex-panel.patch` 包含完整 Codex 插件、Codex / Files 共用公式渲染及历史图片渲染，`0007-workspace-panels.patch` 包含项目弹窗长路径显示和 Files / Git 面板拖动调整。保留主要分组编号，按文件名顺序应用。详细的同步、冲突处理和补丁维护方法见 [使用文档](docs/usage.md)。
+当前补丁按功能分为 4 个：`0001-terminal.patch` 包含全部终端修复与增强，`0006-codex-panel.patch` 包含完整 Codex 插件、Codex / Files 共用公式渲染及历史图片渲染，`0007-workspace-panels.patch` 包含项目弹窗长路径显示和 Files / Git 面板拖动调整。`0008-test-isolation.patch` 禁止网站单元测试加载外部 CSS/脚本，避免网络不可用时安装测试挂起。保留主要分组编号，按文件名顺序应用。详细的同步、冲突处理和补丁维护方法见 [使用文档](docs/usage.md)。
 
 终端补丁还会在裁剪回放缓存时保留鼠标跟踪、备用屏幕及粘贴等模式，修复 Codex CLI 长时间运行后刷新页面无法滚动历史的问题。更新后需要重启 `pi-web-sessiond`，再新建终端并用 `codex resume` 恢复会话；旧守护进程已经丢弃的状态无法补回。
 
