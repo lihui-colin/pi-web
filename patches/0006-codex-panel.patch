@@ -51,10 +51,10 @@ index 868bc3372d0058823bfa65d23ba74f1e39a6fc94..c6c336bca5b5478ed4f9487f2e0de54e
      "node-pty": "^1.1.0",
 diff --git a/pi-web-plugins/codex/CodexBrowserRuntime.ts b/pi-web-plugins/codex/CodexBrowserRuntime.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..2bd25e09456618f1ec639b06357e02615050ad7f
+index 0000000000000000000000000000000000000000..ce1d52c1eb84cb9436d873476c2a4fb0b5836616
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexBrowserRuntime.ts
-@@ -0,0 +1,469 @@
+@@ -0,0 +1,480 @@
 +import type { PluginPeerChannel, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
 +import { MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, IMAGE_MIME_TYPES, array, errorText, object, string, text, permissionMode, type PermissionMode, chatMode, type ChatMode, type RecordValue } from "./server/protocol.js";
 +
@@ -83,6 +83,7 @@ index 0000000000000000000000000000000000000000..2bd25e09456618f1ec639b06357e0261
 +  defaultModel: string;
 +  defaultEffort: string;
 +  threads: RecordValue[];
++  loadingStages: string[];
 +  cursor: string;
 +  snapshot: RecordValue;
 +  error: string;
@@ -116,7 +117,7 @@ index 0000000000000000000000000000000000000000..2bd25e09456618f1ec639b06357e0261
 +    let view = this.views.get(key);
 +    if (view === undefined) {
 +      const threadId = "";
-+      view = { context, key, threadId, draft: this.read(`${key}:${threadId}:draft`), references: this.readReferences(key, threadId), attachments: [], model: this.read(`${key}:${threadId}:model`), effort: this.read(`${key}:${threadId}:effort`), models: [], defaultModel: "", defaultEffort: "", threads: [], cursor: "", snapshot: {}, error: "", notice: "", voiceInputEnabled: false, connected: false, pending: false, permissionMode: this.readPermissionMode(key), mode: this.readMode(key, threadId), modeDirty: this.read(`${key}:${threadId}:mode`) !== "", sending: false, offset: 0, listeners: new Set(), timer: undefined, polling: false, generation: 0 };
++      view = { context, key, threadId, draft: this.read(`${key}:${threadId}:draft`), references: this.readReferences(key, threadId), attachments: [], model: this.read(`${key}:${threadId}:model`), effort: this.read(`${key}:${threadId}:effort`), models: [], defaultModel: "", defaultEffort: "", threads: [], loadingStages: [], cursor: "", snapshot: {}, error: "", notice: "", voiceInputEnabled: false, connected: false, pending: false, permissionMode: this.readPermissionMode(key), mode: this.readMode(key, threadId), modeDirty: this.read(`${key}:${threadId}:mode`) !== "", sending: false, offset: 0, listeners: new Set(), timer: undefined, polling: false, generation: 0 };
 +      view.attachments = this.readAttachments(view, threadId);
 +      this.views.set(key, view);
 +    }
@@ -140,19 +141,29 @@ index 0000000000000000000000000000000000000000..2bd25e09456618f1ec639b06357e0261
 +    if (peer?.request === undefined) throw new Error("Codex backend unavailable. Restart sessiond after installing the plugin.");
 +    return object(await peer.request(operation, input));
 +  }
++  private async loading<T>(view: CodexView, stage: string, action: () => Promise<T>): Promise<T> {
++    view.loadingStages.push(stage);
++    this.changed(view);
++    try { return await action(); }
++    finally {
++      const index = view.loadingStages.indexOf(stage);
++      if (index !== -1) view.loadingStages.splice(index, 1);
++      this.changed(view);
++    }
++  }
 +  async initialize(view: CodexView): Promise<void> {
 +    this.disconnect(view); view.generation++;
 +    // History does not depend on account or model metadata. Publish it as soon
 +    // as it arrives, while keeping initialization pending until all work settles.
 +    const results = await Promise.allSettled([
 +      this.list(view),
-+      this.request(view, "status").then((status) => {
++      this.loading(view, "检查登录状态", () => this.request(view, "status")).then((status) => {
 +        view.voiceInputEnabled = status["voiceInputEnabled"] === true;
 +        view.connected = true;
 +        view.notice = status["authenticated"] === false && status["requiresOpenaiAuth"] !== false
 +          ? "Sign in with `codex login` on this workspace's machine, then reconnect." : "";
 +      }),
-+      this.request(view, "models").then((models) => {
++      this.loading(view, "加载模型配置", () => this.request(view, "models")).then((models) => {
 +        view.models = array(models["data"]).map(object);
 +        view.defaultModel = text(models["defaultModel"]);
 +        view.defaultEffort = text(models["defaultEffort"]);
@@ -163,10 +174,10 @@ index 0000000000000000000000000000000000000000..2bd25e09456618f1ec639b06357e0261
 +    }
 +    view.snapshot = {};
 +    this.connect(view);
-+    await this.refresh(view);
++    await this.loading(view, "同步会话状态", () => this.refresh(view));
 +  }
 +  async list(view: CodexView, more = false): Promise<void> {
-+    const result = await this.request(view, "list", more && view.cursor !== "" ? { cursor: view.cursor } : {});
++    const result = await this.loading(view, more ? "加载更多会话" : "加载会话列表", () => this.request(view, "list", more && view.cursor !== "" ? { cursor: view.cursor } : {}));
 +    const entries = array(result["data"]).map(object);
 +    view.threads = more ? [...new Map([...view.threads, ...entries].map((entry) => [text(entry["id"]), entry])).values()] : entries;
 +    view.cursor = text(result["nextCursor"]);
@@ -526,10 +537,10 @@ index 0000000000000000000000000000000000000000..2bd25e09456618f1ec639b06357e0261
 +}
 diff --git a/pi-web-plugins/codex/CodexPanel.test.ts b/pi-web-plugins/codex/CodexPanel.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..d8f0891c3eb1cc889b4b75fafa3741008a7a5d23
+index 0000000000000000000000000000000000000000..19c46fb78518e8ae4b68f2bbdfdc6ead46806486
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.test.ts
-@@ -0,0 +1,2008 @@
+@@ -0,0 +1,2017 @@
 +// @vitest-environment happy-dom
 +import { afterEach, describe, expect, it, vi } from "vitest";
 +import type { WorkspaceFileUploadOptions, WorkspaceFileUploadTask, PluginPeerChannelOptions, FileContentResponse, FileTreeResponse, JsonValue, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
@@ -585,6 +596,11 @@ index 0000000000000000000000000000000000000000..d8f0891c3eb1cc889b4b75fafa374100
 +      await vi.waitFor(() => { expect(panel.shadowRoot?.querySelector(".conversation-title")?.textContent).toBe("Recent conversation"); });
 +      expect(view.pending).toBe(true);
 +      expect(view.cursor).toBe("older");
++      const statusBar = required(panel.shadowRoot?.querySelector('.connection-status[role="status"]'));
++      expect(statusBar.textContent).toBe("检查登录状态 · 加载模型配置…");
++      expect(panel.shadowRoot?.querySelector('[role="log"]')).toBeNull();
++      finishStatus({ authenticated: true, voiceInputEnabled: true });
++      await vi.waitFor(() => { expect(statusBar.textContent).toBe("加载模型配置…"); });
 +    } finally {
 +      finishStatus({ authenticated: true, voiceInputEnabled: true });
 +      finishModels({ data: [{ model: "test-model" }], defaultModel: "test-model", defaultEffort: "high" });
@@ -595,6 +611,9 @@ index 0000000000000000000000000000000000000000..d8f0891c3eb1cc889b4b75fafa374100
 +    expect(view.defaultModel).toBe("test-model");
 +    expect(view.defaultEffort).toBe("high");
 +    expect(view.error).toBe("");
++    await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelector(".connection-status")?.textContent).toBe("Ready");
++    expect(view.loadingStages).toEqual([]);
 +  });
 +
 +  it("keeps returned history and waits for outstanding initialization after a metadata error", async () => {
@@ -617,6 +636,7 @@ index 0000000000000000000000000000000000000000..d8f0891c3eb1cc889b4b75fafa374100
 +    }
 +    expect(view.pending).toBe(false);
 +    expect(view.error).toContain("Models unavailable");
++    expect(view.loadingStages).toEqual([]);
 +    expect(view.notice).toContain("codex login");
 +    expect(view.threads[0]?.["id"]).toBe("recent");
 +  });
@@ -2540,7 +2560,7 @@ index 0000000000000000000000000000000000000000..d8f0891c3eb1cc889b4b75fafa374100
 +});
 diff --git a/pi-web-plugins/codex/CodexPanel.ts b/pi-web-plugins/codex/CodexPanel.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..2436f24910d5cfaab0e019f17636468e06194b4b
+index 0000000000000000000000000000000000000000..d261407c5357e69e45c033acfc80646f099f71df
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.ts
 @@ -0,0 +1,1091 @@
@@ -3277,7 +3297,7 @@ index 0000000000000000000000000000000000000000..2436f24910d5cfaab0e019f17636468e
 +          </div>
 +        </div>
 +      </footer>
-+      <div class="connection-status" role="status">${view.pending ? "Working…" : text(snapshot["status"]) || (view.connected ? "Ready" : "Connecting…")}</div>
++      <div class="connection-status" role="status" title=${view.loadingStages.join(" · ")}>${view.loadingStages.length > 0 ? `${view.loadingStages.join(" · ")}…` : view.pending ? "Working…" : text(snapshot["status"]) || (view.connected ? "Ready" : "Connecting…")}</div>
 +      </main>
 +      ${reviewOpen ? html`<aside id="review-panel" aria-label="Review changes">
 +        <div class="review-resize" role="separator" tabindex="0" aria-label="Resize review panel" aria-controls="review-panel" aria-orientation="vertical"
@@ -3579,7 +3599,7 @@ index 0000000000000000000000000000000000000000..2436f24910d5cfaab0e019f17636468e
 +    .effort-slider input:focus-visible { outline:2px solid var(--pi-accent,#559ff6); outline-offset:4px; border-radius:999px; }
 +    .effort-unavailable { margin:8px 0 0; text-align:center; color:var(--pi-muted,#888); font-size:12px; }
 +
-+    .connection-status { padding:3px 20px; min-height:22px; font-size:10px; color:var(--pi-muted,#888); }
++    .connection-status { flex-shrink:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; padding:3px 20px; min-height:22px; font-size:10px; color:var(--pi-muted,#888); }
 +    .latest { align-self:center; font-size:11px; border-color:var(--pi-border-muted,#eee); } section { flex-shrink:0; max-height:35%; overflow:auto; }
 +    .approval { margin:8px 16px; padding:12px; border:1px solid var(--pi-accent,#8ab4ff); border-radius:10px; } .approval strong,small { overflow-wrap:anywhere; } small { display:block; font-size:11px; color:var(--pi-muted,#777); } .approval pre { margin:8px 0; } label { display:block; } label input,label select { display:block; width:100%; border-color:var(--pi-border,#ddd); }
 +    .error { color:var(--pi-danger,#c33); overflow-wrap:anywhere; max-height:120px; overflow:auto; } main>p { margin:8px 16px; } .empty { color:var(--pi-muted,#888); margin:12px 0; }

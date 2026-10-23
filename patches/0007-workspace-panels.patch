@@ -246,7 +246,7 @@ index 0000000000000000000000000000000000000000..d0734f8b99dd4f8b28178b355fe6b6f3
 +../../files/verticalSplit.ts
 \ No newline at end of file
 diff --git a/src/client/src/components/ProjectDialog.ts b/src/client/src/components/ProjectDialog.ts
-index 6cfbca50acb74f6008d869be3a03dfabe54a649f..047321db3e374f8d6c1ef9647df9cd8e0690b6a2 100644
+index 6cfbca50acb74f6008d869be3a03dfabe54a649f..22ed7d431dd9dd63d3576be0209ba2118f6dc2c2 100644
 --- a/src/client/src/components/ProjectDialog.ts
 +++ b/src/client/src/components/ProjectDialog.ts
 @@ -189,6 +189,7 @@ export class ProjectDialog extends LitElement {
@@ -257,7 +257,18 @@ index 6cfbca50acb74f6008d869be3a03dfabe54a649f..047321db3e374f8d6c1ef9647df9cd8e
            ${this.suggestionError ? html`
              <div id="project-folder-error" class="trust-error ui-form-error" role="alert">Could not load folders on this machine. Check the connection and retry, or enter a folder path.</div>
              <button class="ui-button" type="button" @click=${() => { void this.loadSuggestions(); }}>Retry folder lookup</button>
-@@ -219,8 +220,11 @@ export class ProjectDialog extends LitElement {
+@@ -196,9 +197,7 @@ export class ProjectDialog extends LitElement {
+           <div id="project-folder-status" class="suggestions ui-selection-list" aria-live="polite">
+             ${this.loading ? html`<div class="hint">Loading folders…</div>` : null}
+             ${this.suggestions.map((suggestion, index) => html`
+-              <button type="button" class=${`ui-button ui-selection-option ${index === this.selected ? "selected" : ""}`} @click=${() => { this.pick(suggestion); }}>
+-                ${suggestion.path}
+-              </button>
++              <button type="button" class=${`ui-button ui-selection-option ${index === this.selected ? "selected" : ""}`} @click=${() => { this.pick(suggestion); }}>${suggestion.path}</button>
+             `)}
+             ${!this.loading && !this.suggestionError && this.suggestions.length === 0 ? html`<div class="hint">No matching folders. Enter a new path to create it.</div>` : null}
+           </div>
+@@ -219,8 +218,11 @@ export class ProjectDialog extends LitElement {
  
    static override styles = [uiDialogStyles, uiFormStyles, uiSelectionStyles, css`
      :host { --ui-dialog-max-height: 700px; --ui-input-font-family: var(--pi-control-monospace-font-family, var(--pi-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace)); }
@@ -265,7 +276,7 @@ index 6cfbca50acb74f6008d869be3a03dfabe54a649f..047321db3e374f8d6c1ef9647df9cd8e
 -    .suggestions button { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 13px var(--pi-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); }
 +    .suggestions { flex: 0 1 auto; min-height: 72px; max-height: 280px; }
 +    .suggestions button, .path-preview { white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.5 var(--pi-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); }
-+    .suggestions button { min-height: 36px; padding: 7px 12px; text-align: left; line-height: 1.4; }
++    .suggestions button { display: block; min-height: 36px; padding: 7px 12px; text-align: left; line-height: 1.4; }
 +    @media (pointer: coarse) { .suggestions button { min-height: 44px; } }
 +    .path-preview { display: block; min-width: 0; color: var(--pi-muted); }
      .hint { padding: 12px; color: var(--pi-muted); }
