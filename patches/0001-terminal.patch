@@ -166,10 +166,10 @@ index 0000000000000000000000000000000000000000..c9834f3364bee9c20165f529dd03f6f9
 +  });
 +});
 diff --git a/pi-web-plugins/terminal/TerminalPanel.test.ts b/pi-web-plugins/terminal/TerminalPanel.test.ts
-index 96757345ffe2ac714d2fab6b2bb415ae75415b6e..8245596738a201cc22797e9316f7f8d28d5570e2 100644
+index 16e8813cd2ad5d78425c4c71a96b60b63123e687..d1fc82d743ec95c9f1a58563b03d19d7122a8e91 100644
 --- a/pi-web-plugins/terminal/TerminalPanel.test.ts
 +++ b/pi-web-plugins/terminal/TerminalPanel.test.ts
-@@ -800,6 +800,91 @@ describe("Terminal panel lifecycle", () => {
+@@ -887,6 +887,91 @@ describe("Terminal panel lifecycle", () => {
      panel.disconnectedCallback();
    });
  
@@ -261,7 +261,7 @@ index 96757345ffe2ac714d2fab6b2bb415ae75415b6e..8245596738a201cc22797e9316f7f8d2
    it("clears a stale connection error after a successful reattach", async () => {
      const panel = createTerminalPanel();
      const channel = { closed: new Promise<never>(() => undefined), send: vi.fn(), close: vi.fn() };
-@@ -917,7 +1002,7 @@ describe("Terminal panel lifecycle", () => {
+@@ -1004,7 +1089,7 @@ describe("Terminal panel lifecycle", () => {
      callPanelMethod(panel, "handleChannelFrame", 0, { type: "error", message: "pty failed" }, "terminal-1", terminal);
      callPanelMethod(panel, "handleChannelFrame", 0, { type: "exit", exitCode: 7 }, "terminal-1", terminal);
  
@@ -270,13 +270,21 @@ index 96757345ffe2ac714d2fab6b2bb415ae75415b6e..8245596738a201cc22797e9316f7f8d2
      expect(terminal.writeln).toHaveBeenCalledWith(expect.stringContaining("pty failed"));
      expect(terminal.writeln).toHaveBeenCalledWith(expect.stringContaining("code 7"));
      expect(Reflect.get(panel, "terminals")).toEqual([expect.objectContaining({ id: "terminal-1", exited: true, exitCode: 7 })]);
+@@ -1044,6 +1129,7 @@ describe("Terminal panel lifecycle", () => {
+ function fakeTerminalBoundary() {
+   const terminals: { options: ITerminalOptions; dispose: ReturnType<typeof vi.fn> }[] = [];
+   class FakeTerminal {
++    parser = { registerOscHandler: vi.fn(() => ({ dispose: vi.fn() })) };
+     options: ITerminalOptions;
+     dispose = vi.fn();
+     loadAddon = vi.fn();
 diff --git a/pi-web-plugins/terminal/TerminalPanel.ts b/pi-web-plugins/terminal/TerminalPanel.ts
-index c318dd233ea43e3a2e0b2d7457dfe08de6e42ff6..75bfacd133587e1a650dc217a6db103b0e8f14fe 100644
+index ffa0237b6b32bce66854743068e9bc2570ef75da..995ba475e1f66c6768a60749d43d1bd7eb2e5bf3 100644
 --- a/pi-web-plugins/terminal/TerminalPanel.ts
 +++ b/pi-web-plugins/terminal/TerminalPanel.ts
 @@ -7,6 +7,9 @@ import { FitAddon, type ITerminalDimensions } from "@xterm/addon-fit";
  import xtermStyles from "@xterm/xterm/css/xterm.css?inline";
- import type { PluginPeerChannel, PluginPeerChannelClose, TerminalCommandRun, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
+ import type { StylesheetIntegrationCapabilityV1, PluginPeerChannel, PluginPeerChannelClose, TerminalCommandRun, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
  import { writeClipboardText } from "./clipboard";
 +import { attachTerminalIosInput } from "./terminalIosInput";
 +import { attachTerminalTouchScroll } from "./terminalTouchScroll";
@@ -293,7 +301,7 @@ index c318dd233ea43e3a2e0b2d7457dfe08de6e42ff6..75bfacd133587e1a650dc217a6db103b
  const CHANNEL_RECONNECT_DELAYS_MS = [250, 500, 1_000, 2_000, 5_000] as const;
  const WORKSPACE_LOAD_RETRY_DELAYS_MS = [1_000, 2_000, 5_000] as const;
  
-@@ -62,7 +67,12 @@ export class TerminalPanel extends LitElement {
+@@ -88,7 +93,12 @@ export class TerminalPanel extends LitElement {
    @state() private copySnapshot: TerminalCopySnapshot | undefined;
    @state() private copyStatus: string | undefined;
  
@@ -306,15 +314,15 @@ index c318dd233ea43e3a2e0b2d7457dfe08de6e42ff6..75bfacd133587e1a650dc217a6db103b
    private fitAddon: FitAddon | undefined;
    private channel: PluginPeerChannel | undefined;
    private channelAbort: AbortController | undefined;
-@@ -78,6 +88,7 @@ export class TerminalPanel extends LitElement {
+@@ -104,6 +114,7 @@ export class TerminalPanel extends LitElement {
    private readonly operationAborts = new Set<AbortController>();
    private workspaceGeneration = 0;
    private terminalNavigationGeneration = 0;
 +  private terminalRedrawTimer: number | undefined;
    private resizeObserver: ResizeObserver | undefined;
    private intersectionObserver: IntersectionObserver | undefined;
-   private themeObserver: MutationObserver | undefined;
-@@ -589,6 +600,9 @@ export class TerminalPanel extends LitElement {
+   private replayInputSuppression: TerminalReplayInputSuppression | undefined;
+@@ -613,6 +624,9 @@ export class TerminalPanel extends LitElement {
      terminal.loadAddon(fitAddon);
      terminal.open(terminalHost);
      this.terminal = terminal;
@@ -324,7 +332,7 @@ index c318dd233ea43e3a2e0b2d7457dfe08de6e42ff6..75bfacd133587e1a650dc217a6db103b
      this.fitAddon = fitAddon;
      if (typeof ResizeObserver !== "undefined") {
        this.resizeObserver = new ResizeObserver(() => { this.fitAndNotify(); });
-@@ -636,7 +650,7 @@ export class TerminalPanel extends LitElement {
+@@ -660,7 +674,7 @@ export class TerminalPanel extends LitElement {
        for (const frame of bufferedFrames) this.handleChannelFrame(generation, frame, terminalId, terminal);
        this.channelReconnectAttempt = 0;
        this.connectionError = undefined;
@@ -333,7 +341,7 @@ index c318dd233ea43e3a2e0b2d7457dfe08de6e42ff6..75bfacd133587e1a650dc217a6db103b
        void channel.closed.then((close) => { this.handleChannelClosed(generation, terminalId, terminal, close); });
      }).catch((error: unknown) => {
        if (controller.signal.aborted || !this.channelIsCurrent(generation, terminalId, terminal)) return;
-@@ -715,7 +729,7 @@ export class TerminalPanel extends LitElement {
+@@ -739,7 +753,7 @@ export class TerminalPanel extends LitElement {
      frame: Extract<TerminalServerFrame, { type: "output" }>,
    ): void {
      if (!frame.replay) {
@@ -342,7 +350,7 @@ index c318dd233ea43e3a2e0b2d7457dfe08de6e42ff6..75bfacd133587e1a650dc217a6db103b
        return;
      }
      let suppression = this.replayInputSuppression;
-@@ -725,15 +739,93 @@ export class TerminalPanel extends LitElement {
+@@ -749,15 +763,93 @@ export class TerminalPanel extends LitElement {
        suppression = { generation, terminalId, terminal };
        this.replayInputSuppression = suppression;
      }
@@ -437,7 +445,7 @@ index c318dd233ea43e3a2e0b2d7457dfe08de6e42ff6..75bfacd133587e1a650dc217a6db103b
      const size = this.fitTerminal();
      if (size === undefined) return;
      this.send({ type: "resize", ...size });
-@@ -805,6 +897,12 @@ export class TerminalPanel extends LitElement {
+@@ -829,6 +921,12 @@ export class TerminalPanel extends LitElement {
    }
  
    private disposeTerminalView(): void {
@@ -450,7 +458,7 @@ index c318dd233ea43e3a2e0b2d7457dfe08de6e42ff6..75bfacd133587e1a650dc217a6db103b
      this.channelGeneration += 1;
      if (this.channelReconnectTimer !== undefined) window.clearTimeout(this.channelReconnectTimer);
      this.channelReconnectTimer = undefined;
-@@ -816,6 +914,13 @@ export class TerminalPanel extends LitElement {
+@@ -840,6 +938,13 @@ export class TerminalPanel extends LitElement {
      this.resizeObserver?.disconnect();
      this.resizeObserver = undefined;
      this.replayInputSuppression = undefined;
@@ -464,7 +472,7 @@ index c318dd233ea43e3a2e0b2d7457dfe08de6e42ff6..75bfacd133587e1a650dc217a6db103b
      this.terminal?.dispose();
      this.terminal = undefined;
      this.fitAddon = undefined;
-@@ -1063,6 +1168,7 @@ export class TerminalPanel extends LitElement {
+@@ -1088,6 +1193,7 @@ export class TerminalPanel extends LitElement {
          <div class="terminal-stage">
            <div class=${this.copySnapshot === undefined ? "terminal-host" : "terminal-host copying"} ?inert=${this.copySnapshot !== undefined}></div>
            ${this.renderCopyMode()}
@@ -472,16 +480,16 @@ index c318dd233ea43e3a2e0b2d7457dfe08de6e42ff6..75bfacd133587e1a650dc217a6db103b
          </div>
        </section>
      `;
-@@ -1108,6 +1214,9 @@ export class TerminalPanel extends LitElement {
-     .command-run-notice code { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--pi-text-secondary); font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-     .command-run-notice kbd { border: 1px solid var(--pi-border); border-radius: 4px; background: var(--pi-bg); padding: 0 4px; font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+@@ -1129,6 +1235,9 @@ export class TerminalPanel extends LitElement {
+     .command-run-notice code { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--pi-text-secondary); font: 12px var(--pi-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); }
+     .command-run-notice kbd { border: 1px solid var(--pi-border); border-radius: 4px; background: var(--pi-bg); padding: 0 4px; font: 11px var(--pi-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); }
      .command-run-notice button { justify-self: end; max-width: none; }
 +    .terminal-clipboard-notice { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); z-index: 20; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; box-sizing: border-box; width: max-content; max-width: calc(100% - 24px); padding: 8px 12px; border: 1px solid var(--pi-border); border-radius: 8px; background: var(--pi-surface); color: var(--pi-text); box-shadow: 0 4px 16px #0003; font: 12px system-ui, sans-serif; }
 +    .terminal-clipboard-notice.copied { pointer-events: none; border-color: var(--pi-success-border); }
 +    .terminal-clipboard-notice > span { min-width: 0; overflow-wrap: anywhere; }
      .terminal-stage { position: relative; flex: 1 1 auto; min-height: 0; overflow: hidden; background: var(--pi-terminal-bg); }
-     .terminal-host { position: absolute; inset: 0; padding: 6px; box-sizing: border-box; overflow: hidden; }
-     .terminal-host.copying { visibility: hidden; pointer-events: none; }
+     /* FitAddon measures the host's CSS size without subtracting its padding. */
+     .terminal-host { position: absolute; inset: 6px; overflow: hidden; }
 diff --git a/pi-web-plugins/terminal/clipboard.ts b/pi-web-plugins/terminal/clipboard.ts
 index 1feccb2619ea487d438384ed8411ae6755c7b8d7..ec16a725c9c628128d5415a1c6a77825e292cd29 100644
 --- a/pi-web-plugins/terminal/clipboard.ts
@@ -1061,10 +1069,10 @@ index 0000000000000000000000000000000000000000..ddbf8809ed6f566a67c381b576513838
 +});
 diff --git a/pi-web-plugins/terminal/terminalIosInput.ts b/pi-web-plugins/terminal/terminalIosInput.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..596464ca4bbd79355dc2a36207ab31b02f6f4b64
+index 0000000000000000000000000000000000000000..f56037aec75418d90e6ec820f29bc88a354abc67
 --- /dev/null
 +++ b/pi-web-plugins/terminal/terminalIosInput.ts
-@@ -0,0 +1,86 @@
+@@ -0,0 +1,77 @@
 +import type { Terminal } from "@xterm/xterm";
 +
 +/** xterm 6 relies on keypress and a keydown-229 timer for text. iOS can
@@ -1116,39 +1124,30 @@ index 0000000000000000000000000000000000000000..596464ca4bbd79355dc2a36207ab31b0
 +      default: return undefined;
 +    }
 +  };
-+  const beforeInput = (event: InputEvent): void => {
++  const edit = (event: InputEvent): void => {
 +    const data = dataFor(event);
-+    if (data === undefined || !event.cancelable) return;
-+    // Keeping the helper unchanged also prevents stale text being resent.
-+    event.preventDefault();
++    const before = event.type === "beforeinput";
++    if (data === undefined || (before && !event.cancelable)) return;
++    // Cancelable beforeinput leaves the helper intact. Otherwise input is the
++    // fallback and must clear it so xterm cannot resend stale text.
++    if (before) event.preventDefault();
 +    event.stopPropagation();
 +    if (!keyboardHandled) terminal.input(data, true);
 +    keyboardHandled = false;
++    if (!before) textarea.value = "";
 +  };
-+  const input = (event: InputEvent): void => {
-+    const data = dataFor(event);
-+    if (data === undefined) return;
-+    // Non-cancelable beforeinput (or no beforeinput) still needs a fallback.
-+    event.stopPropagation();
-+    if (!keyboardHandled) terminal.input(data, true);
-+    keyboardHandled = false;
-+    textarea.value = "";
-+  };
-+  host.addEventListener("keydown", keydown, true);
-+  host.addEventListener("keyup", keyup, true);
-+  host.addEventListener("compositionstart", compositionStart, true);
-+  host.addEventListener("compositionend", compositionEnd, true);
-+  host.addEventListener("beforeinput", beforeInput, true);
-+  host.addEventListener("input", input, true);
++  const listeners = new AbortController();
++  const options = { capture: true, signal: listeners.signal };
++  host.addEventListener("keydown", keydown, options);
++  host.addEventListener("keyup", keyup, options);
++  host.addEventListener("compositionstart", compositionStart, options);
++  host.addEventListener("compositionend", compositionEnd, options);
++  host.addEventListener("beforeinput", edit, options);
++  host.addEventListener("input", edit, options);
 +  return () => {
 +    clearTimeout(finishTimer);
 +    keySubscription.dispose();
-+    host.removeEventListener("keydown", keydown, true);
-+    host.removeEventListener("keyup", keyup, true);
-+    host.removeEventListener("compositionstart", compositionStart, true);
-+    host.removeEventListener("compositionend", compositionEnd, true);
-+    host.removeEventListener("beforeinput", beforeInput, true);
-+    host.removeEventListener("input", input, true);
++    listeners.abort();
 +  };
 +}
 diff --git a/pi-web-plugins/terminal/terminalKeys.ts b/pi-web-plugins/terminal/terminalKeys.ts
@@ -1249,10 +1248,10 @@ index 0000000000000000000000000000000000000000..64abf6789e1ed054ce5fde6495a2499c
 +});
 diff --git a/pi-web-plugins/terminal/terminalTouchScroll.ts b/pi-web-plugins/terminal/terminalTouchScroll.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..8ea17d4b3e52da1c6b4ce461ca65b7cb6fadab4e
+index 0000000000000000000000000000000000000000..f73f91ed912b97f77128c86484bbd39a35f9bee7
 --- /dev/null
 +++ b/pi-web-plugins/terminal/terminalTouchScroll.ts
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,48 @@
 +/** Translate single-finger drags for mouse-reporting TUIs through xterm's own
 + * wheel handler, so encoding, coordinates and input suppression stay shared.
 + * Ordinary shell scrollback and copy-mode gestures keep their native behavior.
@@ -1290,16 +1289,15 @@ index 0000000000000000000000000000000000000000..8ea17d4b3e52da1c6b4ce461ca65b7cb
 +      }));
 +    }
 +  };
-+  host.addEventListener("touchstart", start, { capture: true, passive: true });
-+  host.addEventListener("touchmove", move, { capture: true, passive: false });
-+  host.addEventListener("touchend", reset, true);
-+  host.addEventListener("touchcancel", reset, true);
++  const listeners = new AbortController();
++  const options = { capture: true, signal: listeners.signal };
++  host.addEventListener("touchstart", start, { ...options, passive: true });
++  host.addEventListener("touchmove", move, { ...options, passive: false });
++  host.addEventListener("touchend", reset, options);
++  host.addEventListener("touchcancel", reset, options);
 +  return () => {
 +    reset();
-+    host.removeEventListener("touchstart", start, true);
-+    host.removeEventListener("touchmove", move, true);
-+    host.removeEventListener("touchend", reset, true);
-+    host.removeEventListener("touchcancel", reset, true);
++    listeners.abort();
 +  };
 +}
 diff --git a/src/client/src/clipboard.focus.test.ts b/src/client/src/clipboard.focus.test.ts
