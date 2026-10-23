@@ -51,10 +51,10 @@ index 868bc3372d0058823bfa65d23ba74f1e39a6fc94..c6c336bca5b5478ed4f9487f2e0de54e
      "node-pty": "^1.1.0",
 diff --git a/pi-web-plugins/codex/CodexBrowserRuntime.ts b/pi-web-plugins/codex/CodexBrowserRuntime.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..738f718728bd9ccfd2765d0760c96ad583a61476
+index 0000000000000000000000000000000000000000..2bd25e09456618f1ec639b06357e02615050ad7f
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexBrowserRuntime.ts
-@@ -0,0 +1,460 @@
+@@ -0,0 +1,469 @@
 +import type { PluginPeerChannel, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
 +import { MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, IMAGE_MIME_TYPES, array, errorText, object, string, text, permissionMode, type PermissionMode, chatMode, type ChatMode, type RecordValue } from "./server/protocol.js";
 +
@@ -142,16 +142,25 @@ index 0000000000000000000000000000000000000000..738f718728bd9ccfd2765d0760c96ad5
 +  }
 +  async initialize(view: CodexView): Promise<void> {
 +    this.disconnect(view); view.generation++;
-+    const status = await this.request(view, "status");
-+    view.voiceInputEnabled = status["voiceInputEnabled"] === true;
-+    view.connected = true;
-+    view.notice = status["authenticated"] === false && status["requiresOpenaiAuth"] !== false
-+      ? "Sign in with `codex login` on this workspace's machine, then reconnect." : "";
-+    const models = await this.request(view, "models");
-+    view.models = array(models["data"]).map(object);
-+    view.defaultModel = text(models["defaultModel"]);
-+    view.defaultEffort = text(models["defaultEffort"]);
-+    await this.list(view);
++    // History does not depend on account or model metadata. Publish it as soon
++    // as it arrives, while keeping initialization pending until all work settles.
++    const results = await Promise.allSettled([
++      this.list(view),
++      this.request(view, "status").then((status) => {
++        view.voiceInputEnabled = status["voiceInputEnabled"] === true;
++        view.connected = true;
++        view.notice = status["authenticated"] === false && status["requiresOpenaiAuth"] !== false
++          ? "Sign in with `codex login` on this workspace's machine, then reconnect." : "";
++      }),
++      this.request(view, "models").then((models) => {
++        view.models = array(models["data"]).map(object);
++        view.defaultModel = text(models["defaultModel"]);
++        view.defaultEffort = text(models["defaultEffort"]);
++      }),
++    ]);
++    for (const result of results) {
++      if (result.status === "rejected") throw result.reason;
++    }
 +    view.snapshot = {};
 +    this.connect(view);
 +    await this.refresh(view);
@@ -517,10 +526,10 @@ index 0000000000000000000000000000000000000000..738f718728bd9ccfd2765d0760c96ad5
 +}
 diff --git a/pi-web-plugins/codex/CodexPanel.test.ts b/pi-web-plugins/codex/CodexPanel.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..a0bab40595fe7acdd2ae23408e09eb0280a81423
+index 0000000000000000000000000000000000000000..d8f0891c3eb1cc889b4b75fafa3741008a7a5d23
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.test.ts
-@@ -0,0 +1,1948 @@
+@@ -0,0 +1,2008 @@
 +// @vitest-environment happy-dom
 +import { afterEach, describe, expect, it, vi } from "vitest";
 +import type { WorkspaceFileUploadOptions, WorkspaceFileUploadTask, PluginPeerChannelOptions, FileContentResponse, FileTreeResponse, JsonValue, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
@@ -552,6 +561,66 @@ index 0000000000000000000000000000000000000000..a0bab40595fe7acdd2ae23408e09eb02
 +  if (!(textarea instanceof HTMLTextAreaElement)) throw new Error("Expected message editor");
 +  return { request, runtime, view, panel, textarea, scope };
 +}
++
++describe("conversation list initialization", () => {
++  it("renders history before account and model metadata finish loading", async () => {
++    let finishStatus: (value: JsonValue) => void = () => undefined;
++    const status = new Promise<JsonValue>((resolve) => { finishStatus = resolve; });
++    let finishModels: (value: JsonValue) => void = () => undefined;
++    const models = new Promise<JsonValue>((resolve) => { finishModels = resolve; });
++    const request = vi.fn(async (operation: string): Promise<JsonValue> => {
++      if (operation === "status") return await status;
++      if (operation === "models") return await models;
++      if (operation === "list") return { data: [{ id: "recent", preview: "Recent conversation" }], nextCursor: "older" };
++      return {};
++    });
++    const runtime = new CodexBrowserRuntime(); runtimes.push(runtime);
++    const scope = context(request);
++    const view = runtime.view(scope);
++    const panel = document.createElement("codex-panel-test");
++    if (!(panel instanceof CodexPanel)) throw new Error("Expected Codex panel");
++    panel.context = scope; panel.runtime = runtime;
++    document.body.append(panel);
++    try {
++      await vi.waitFor(() => { expect(panel.shadowRoot?.querySelector(".conversation-title")?.textContent).toBe("Recent conversation"); });
++      expect(view.pending).toBe(true);
++      expect(view.cursor).toBe("older");
++    } finally {
++      finishStatus({ authenticated: true, voiceInputEnabled: true });
++      finishModels({ data: [{ model: "test-model" }], defaultModel: "test-model", defaultEffort: "high" });
++    }
++    await vi.waitFor(() => { expect(view.pending).toBe(false); });
++    expect(view.connected).toBe(true);
++    expect(view.voiceInputEnabled).toBe(true);
++    expect(view.defaultModel).toBe("test-model");
++    expect(view.defaultEffort).toBe("high");
++    expect(view.error).toBe("");
++  });
++
++  it("keeps returned history and waits for outstanding initialization after a metadata error", async () => {
++    let finishStatus: (value: JsonValue) => void = () => undefined;
++    const status = new Promise<JsonValue>((resolve) => { finishStatus = resolve; });
++    const runtime = new CodexBrowserRuntime(); runtimes.push(runtime);
++    const view = runtime.view(context(async (operation) => {
++      if (operation === "status") return await status;
++      if (operation === "models") throw new Error("Models unavailable");
++      if (operation === "list") return { data: [{ id: "recent", preview: "Recent conversation" }] };
++      return {};
++    }));
++    const initialization = runtime.run(view, () => runtime.initialize(view));
++    try {
++      await vi.waitFor(() => { expect(view.threads).toHaveLength(1); });
++      expect(view.pending).toBe(true);
++    } finally {
++      finishStatus({ authenticated: false });
++      await initialization;
++    }
++    expect(view.pending).toBe(false);
++    expect(view.error).toContain("Models unavailable");
++    expect(view.notice).toContain("codex login");
++    expect(view.threads[0]?.["id"]).toBe("recent");
++  });
++});
 +
 +function required<T>(value: T | null | undefined): T {
 +  if (value === null || value === undefined) throw new Error("Expected rendered control");
