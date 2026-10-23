@@ -9,6 +9,46 @@ index 0000000000000000000000000000000000000000..b864cc1c7375582254410edbe397fcf2
 +---
 +
 +Add an optional Codex workspace plugin with persistent conversations, streamed responses, tool output, approvals, and model selection using the workspace machine's Codex CLI. Restart sessiond after installing the plugin.
+diff --git a/package-lock.json b/package-lock.json
+index 35cc93412d544e2284b60a8a88a44476a7eb8305..8b952a90ebe11f86b19dfc0de09556203069b617 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -31,6 +31,7 @@
+         "fastify": "^5.12.7",
+         "highlight.js": "^11.12.0",
+         "image-size": "^2.0.4",
++        "katex": "^0.18.10",
+         "lit": "^3.3.3",
+         "marked": "^18.1.1",
+         "node-pty": "^1.1.0",
+@@ -6254,7 +6255,6 @@
+       "version": "0.18.10",
+       "resolved": "https://registry.npmjs.org/katex/-/katex-0.18.10.tgz",
+       "integrity": "sha512-/B6p9eY9DX7aHBfpkHdpirDTZ5QH9xTwL9y837PWuzuv41O5jFdqNQwVQEQsimY0/iVNkwBY4+4hMfhQ7d4Dbw==",
+-      "dev": true,
+       "funding": [
+         "https://opencollective.com/katex",
+         "https://github.com/sponsors/katex"
+@@ -6271,7 +6271,6 @@
+       "version": "15.0.0",
+       "resolved": "https://registry.npmjs.org/commander/-/commander-15.0.0.tgz",
+       "integrity": "sha512-z67u4ZhzCL/Tydu1lJARtEZYWbWaN7oYLHbsuzocr6y4N6WZAagG3RQ4FW61V1/0+jImpj293XfrcYnd1qxtPg==",
+-      "dev": true,
+       "license": "MIT",
+       "engines": {
+         "node": ">=22.12.0"
+diff --git a/package.json b/package.json
+index dbeac73959a1935f8275e0d046ce88a6f0f8771e..8da01a081b9320a2bf5577c5769803661fe3d99e 100644
+--- a/package.json
++++ b/package.json
+@@ -100,6 +100,7 @@
+     "fastify": "^5.12.7",
+     "highlight.js": "^11.12.0",
+     "image-size": "^2.0.4",
++    "katex": "^0.18.10",
+     "lit": "^3.3.3",
+     "marked": "^18.1.1",
+     "node-pty": "^1.1.0",
 diff --git a/pi-web-plugins/codex/CodexBrowserRuntime.ts b/pi-web-plugins/codex/CodexBrowserRuntime.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..d6a26fbc21df8b66e23047351b50d476dfe1805a
@@ -479,16 +519,16 @@ index 0000000000000000000000000000000000000000..d6a26fbc21df8b66e23047351b50d476
 +}
 diff --git a/pi-web-plugins/codex/CodexPanel.test.ts b/pi-web-plugins/codex/CodexPanel.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..7cf5a7c30fd8dc12b2e18e57aa028051fd35997b
+index 0000000000000000000000000000000000000000..a91cb86f52b63873e5a3ab99817d00da4e5bec1e
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.test.ts
-@@ -0,0 +1,1823 @@
+@@ -0,0 +1,1907 @@
 +// @vitest-environment happy-dom
 +import { afterEach, describe, expect, it, vi } from "vitest";
 +import type { WorkspaceFileUploadOptions, WorkspaceFileUploadTask, PluginPeerChannelOptions, FileContentResponse, FileTreeResponse, JsonValue, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
 +import { CodexPanel } from "./CodexPanel.js";
 +import { CodexBrowserRuntime } from "./CodexBrowserRuntime.js";
-+import type { RecordValue } from "./server/protocol.js";
++import { object, type RecordValue } from "./server/protocol.js";
 +
 +customElements.define("codex-panel-test", CodexPanel);
 +const runtimes: CodexBrowserRuntime[] = [];
@@ -549,6 +589,23 @@ index 0000000000000000000000000000000000000000..7cf5a7c30fd8dc12b2e18e57aa028051
 +  transfer.items.add(new File([new Uint8Array(300_000)], "screenshot.png", { type: "image/png" }));
 +  return transfer;
 +}
++
++describe("Codex conversation rendering on HTTP", () => {
++  it("keeps replies and the composer visible without crypto.randomUUID", async () => {
++    const { panel, view } = await fixture();
++    vi.stubGlobal("crypto", { getRandomValues: crypto.getRandomValues.bind(crypto) });
++    view.snapshot = { items: [
++      { id: "user", kind: "userMessage", text: "Question" },
++      { id: "reply", kind: "agentMessage", text: "A **reply** with $x^2$" },
++    ] };
++    panel.requestUpdate();
++    await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelector(".user-text")?.textContent).toBe("Question");
++    expect(panel.shadowRoot?.querySelector(".agentMessage strong")?.textContent).toBe("reply");
++    expect(panel.shadowRoot?.querySelector(".agentMessage math")).not.toBeNull();
++    expect(panel.shadowRoot?.querySelector("textarea")).not.toBeNull();
++  });
++});
 +
 +describe("Codex ordinary file input", () => {
 +  it.each(["picker", "drop", "paste"])("uploads ordinary files via %s without requiring text", async (action) => {
@@ -714,6 +771,50 @@ index 0000000000000000000000000000000000000000..7cf5a7c30fd8dc12b2e18e57aa028051
 +    expect(upload).toHaveBeenCalledOnce();
 +  });
 +
++  it("loads embedded history images in chunks and reuses them on rerender", async () => {
++    const { panel, view, request } = await fixture();
++    const url = "data:image/png;base64,aGVsbG8=";
++    request.mockImplementation(async (operation, input) => {
++      await Promise.resolve();
++      if (operation !== "image") return { changed: false };
++      const offset = object(input)["offset"];
++      if (typeof offset !== "number") throw new Error("Invalid offset");
++      return { data: url.slice(offset, offset + 12), total: url.length };
++    });
++    view.snapshot = { items: [{ id: "picture", kind: "userMessage", text: "", images: [{ source: "digest" }, { url: "https://example.test/image.png" }, { url: "javascript:alert(1)" }] }] };
++    panel.requestUpdate(); await panel.updateComplete;
++    await vi.waitFor(() => { expect(panel.shadowRoot?.querySelector(`img[src="${url}"]`)).not.toBeNull(); });
++    expect(panel.shadowRoot?.querySelectorAll(".message-image")).toHaveLength(2);
++    const calls = request.mock.calls.filter(([operation]) => operation === "image").length;
++    expect(calls).toBe(3);
++    panel.requestUpdate(); await panel.updateComplete;
++    expect(request.mock.calls.filter(([operation]) => operation === "image")).toHaveLength(calls);
++  });
++
++  it.each(["navigate", "detach"])("stops fetching stale image chunks after %s", async (action) => {
++    const { panel, runtime, view, request } = await fixture();
++    let finish!: (value: JsonValue) => void;
++    request.mockImplementation((operation) => operation === "image"
++      ? new Promise((resolve) => { finish = resolve; }) : Promise.resolve({ changed: false }));
++    view.snapshot = { items: [{ id: "picture", kind: "userMessage", images: [{ source: "digest" }] }] };
++    panel.requestUpdate(); await panel.updateComplete;
++    expect(request.mock.calls.filter(([operation]) => operation === "image")).toHaveLength(1);
++    if (action === "navigate") runtime.select(view, "other");
++    else panel.remove();
++    finish({ data: "data:image/png;", total: 100 });
++    await new Promise((resolve) => setTimeout(resolve, 0));
++    expect(request.mock.calls.filter(([operation]) => operation === "image")).toHaveLength(1);
++  });
++
++  it("shows a recoverable failure when history image loading fails", async () => {
++    const { panel, view, request } = await fixture();
++    request.mockImplementation(async (operation) => { await Promise.resolve(); if (operation === "image") throw new Error("offline"); return { changed: false }; });
++    view.snapshot = { items: [{ id: "picture", kind: "userMessage", text: "", images: [{ source: "digest" }] }] };
++    panel.requestUpdate(); await panel.updateComplete;
++    await vi.waitFor(() => { expect(panel.shadowRoot?.querySelector(".message-image-label")?.textContent).toContain("Image unavailable"); });
++    expect(panel.shadowRoot?.querySelector(".message-image-label button")?.textContent).toBe("Retry");
++  });
++
 +  it("renders uploaded history images through the workspace preview API", async () => {
 +    const { panel, view } = await attachmentFixture();
 +    view.snapshot = { items: [{ id: "picture", kind: "userMessage", text: "", images: [{ path: "/repo/.pi-web/uploads/test.png" }, { path: "/elsewhere/private.png" }] }] };
@@ -721,6 +822,29 @@ index 0000000000000000000000000000000000000000..7cf5a7c30fd8dc12b2e18e57aa028051
 +    expect(panel.shadowRoot?.querySelectorAll(".message-image")).toHaveLength(1);
 +    expect(panel.shadowRoot?.querySelector(".message-image")?.getAttribute("src")).toContain(encodeURIComponent(".pi-web/uploads/test.png"));
 +    expect(panel.shadowRoot?.querySelector(".message-image-label")?.textContent).toContain("private.png");
++  });
++
++  it("renders reloaded history images from their URL when no workspace path remains", async () => {
++    const { panel, view } = await attachmentFixture();
++    const url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
++    view.snapshot = { items: [{ id: "picture", kind: "userMessage", text: "See", images: [{ url }, { url: "javascript:alert(1)" }, { path: "/elsewhere/private.png" }] }] };
++    panel.requestUpdate(); await panel.updateComplete;
++    const images = [...(panel.shadowRoot?.querySelectorAll(".message-image") ?? [])];
++    expect(images).toHaveLength(1);
++    expect(images[0]?.getAttribute("src")).toBe(url);
++    expect(panel.shadowRoot?.querySelector(".message-image-label")?.textContent).toContain("private.png");
++    expect(panel.shadowRoot?.innerHTML).not.toContain("javascript:");
++  });
++
++  it("renders math when a historical assistant message is shown again", async () => {
++    const { panel, view } = await fixture();
++    view.snapshot = { items: [{ id: "answer", kind: "agentMessage", text: "Energy $E=mc^2$ and $$\\frac{1}{2}$$.\n\nCost is $5 and $10.\n\n`$not math$`" }] };
++    panel.requestUpdate(); await panel.updateComplete;
++    const markdown = panel.shadowRoot?.querySelector(".markdown");
++    expect(markdown?.querySelectorAll("math")).toHaveLength(2);
++    expect(markdown?.querySelector("math[display=block] annotation")?.textContent).toBe("\\frac{1}{2}");
++    expect(markdown?.textContent).toContain("$5 and $10");
++    expect(markdown?.querySelector("code")?.textContent).toBe("$not math$");
 +  });
 +});
 +
@@ -2255,16 +2379,16 @@ index 0000000000000000000000000000000000000000..7cf5a7c30fd8dc12b2e18e57aa028051
 +describe("Review resizing", () => {
 +  async function reviewFixture() {
 +    const f = await fixture();
-+    vi.spyOn(f.panel, "getBoundingClientRect").mockReturnValue({ width: 1200 } as DOMRect);
++    vi.spyOn(f.panel, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 1200, 800));
 +    required(f.panel.shadowRoot?.querySelector<HTMLButtonElement>('[aria-label="Toggle review panel"]')).click();
 +    await f.panel.updateComplete;
 +    const handle = required(f.panel.shadowRoot?.querySelector<HTMLElement>('[aria-label="Resize review panel"]'));
 +    const aside = required(f.panel.shadowRoot?.querySelector('aside'));
-+    vi.spyOn(aside, "getBoundingClientRect").mockReturnValue({ width: 300 } as DOMRect);
-+    handle.setPointerCapture = vi.fn(); handle.hasPointerCapture = vi.fn().mockReturnValue(true); handle.releasePointerCapture = vi.fn();
++    vi.spyOn(aside, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 0, 300, 800));
++    handle.setPointerCapture = vi.fn(); handle.hasPointerCapture = vi.fn().mockReturnValue(true); const releasePointerCapture = vi.fn(); handle.releasePointerCapture = releasePointerCapture;
 +    const width = () => required(f.panel.shadowRoot?.querySelector<HTMLElement>('.layout')).style.getPropertyValue('--review-width');
 +    const pointer = (type: string, x: number, pointerId = 1) => handle.dispatchEvent(new PointerEvent(type, { pointerId, clientX: x, button: 0, bubbles: true }));
-+    return { ...f, handle, width, pointer };
++    return { ...f, handle, width, pointer, releasePointerCapture };
 +  }
 +  it("drags left to expand, clamps the chat space, and stops after cancellation", async () => {
 +    const f = await reviewFixture();
@@ -2276,7 +2400,7 @@ index 0000000000000000000000000000000000000000..7cf5a7c30fd8dc12b2e18e57aa028051
 +    f.pointer("pointercancel", -500); f.pointer("pointermove", 1100);
 +    await f.panel.updateComplete; expect(f.width()).toBe("880px");
 +    expect(f.textarea.value).toBe("keep draft");
-+    expect(f.handle.releasePointerCapture).toHaveBeenCalledWith(1);
++    expect(f.releasePointerCapture).toHaveBeenCalledWith(1);
 +  });
 +  it("supports keyboard limits, retains width on reopen, and resets on double click", async () => {
 +    const f = await reviewFixture();
@@ -2298,7 +2422,7 @@ index 0000000000000000000000000000000000000000..7cf5a7c30fd8dc12b2e18e57aa028051
 +  it("keeps the entry visible and disabled and follows server configuration on reconnect", async () => {
 +    const { request, runtime, view, panel } = await fixture();
 +    expect(required(panel.shadowRoot?.querySelector<HTMLButtonElement>(".voice-input"))).toMatchObject({ disabled: true, title: "Voice input is disabled" });
-+    request.mockImplementation(async (operation) => operation === "status" ? { voiceInputEnabled: true } : { changed: false });
++    request.mockImplementation((operation) => Promise.resolve(operation === "status" ? { voiceInputEnabled: true } : { changed: false }));
 +    await runtime.initialize(view); panel.requestUpdate(); await panel.updateComplete;
 +    expect(required(panel.shadowRoot?.querySelector<HTMLButtonElement>(".voice-input"))).toMatchObject({ disabled: true, title: "Voice input is not implemented yet" });
 +    request.mockResolvedValue({ changed: false });
@@ -2308,19 +2432,20 @@ index 0000000000000000000000000000000000000000..7cf5a7c30fd8dc12b2e18e57aa028051
 +});
 diff --git a/pi-web-plugins/codex/CodexPanel.ts b/pi-web-plugins/codex/CodexPanel.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..bc3e2b1a8ff6adefb7ea740b8217a5c1fa488264
+index 0000000000000000000000000000000000000000..ba98c51520fe56e356abd34bd86bf8418c834926
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.ts
-@@ -0,0 +1,1059 @@
+@@ -0,0 +1,1091 @@
 +import { LitElement, css, html, svg, nothing } from "lit";
 +import { property } from "lit/decorators.js";
++import { until } from "lit/directives/until.js";
 +import { repeat } from "lit/directives/repeat.js";
 +import { unsafeHTML } from "lit/directives/unsafe-html.js";
 +import type { FileContentResponse, FileTreeEntry, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
 +import { CodexBrowserRuntime, type CodexView } from "./CodexBrowserRuntime.js";
-+import { MAX_ATTACHMENTS, array, errorText, object, text, type PermissionMode, type RecordValue } from "./server/protocol.js";
++import { MAX_ATTACHMENTS, MAX_IMAGE_URL_CHARS, array, errorText, object, safeImageUrl, text, type PermissionMode, type RecordValue } from "./server/protocol.js";
 +import { writeClipboardText } from "../terminal/clipboard.js";
-+import { renderWorkspaceMarkdownHtml } from "../files/workspaceMarkdown.js";
++import { renderWorkspaceMarkdownHtml as renderCodexMarkdownHtml } from "../files/workspaceMarkdown.js";
 +import { workspaceFileLink, type WorkspaceFileLink } from "./fileLinks.js";
 +
 +export class CodexPanel extends LitElement {
@@ -2351,35 +2476,37 @@ index 0000000000000000000000000000000000000000..bc3e2b1a8ff6adefb7ea740b8217a5c1
 +    this.reviewWidth = Math.round(Math.max(240, Math.min(this.reviewMaxWidth(), width)));
 +    this.requestUpdate();
 +  }
-+  private startReviewResize(event: PointerEvent): void {
++  private readonly startReviewResize = (event: PointerEvent): void => {
 +    if (event.button !== 0 || this.reviewDrag) return;
-+    const handle = event.currentTarget as HTMLElement;
++    const handle = event.currentTarget;
++    if (!(handle instanceof HTMLElement)) return;
 +    const width = this.renderRoot.querySelector("aside")?.getBoundingClientRect().width;
-+    if (!width) return;
++    if (width === undefined || width <= 0) return;
 +    event.preventDefault();
 +    handle.setPointerCapture(event.pointerId);
 +    this.reviewDrag = { pointerId: event.pointerId, x: event.clientX, width };
-+  }
-+  private moveReviewResize(event: PointerEvent): void {
++  };
++  private readonly moveReviewResize = (event: PointerEvent): void => {
 +    const drag = this.reviewDrag;
-+    if (!drag || drag.pointerId !== event.pointerId) return;
++    if (drag?.pointerId !== event.pointerId) return;
 +    event.preventDefault();
 +    this.setReviewWidth(drag.width + drag.x - event.clientX);
-+  }
-+  private endReviewResize(event: PointerEvent): void {
++  };
++  private readonly endReviewResize = (event: PointerEvent): void => {
 +    if (this.reviewDrag?.pointerId !== event.pointerId) return;
 +    this.reviewDrag = undefined;
-+    const handle = event.currentTarget as HTMLElement;
++    const handle = event.currentTarget;
++    if (!(handle instanceof HTMLElement)) return;
 +    if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
-+  }
-+  private keyReviewResize(event: KeyboardEvent): void {
++  };
++  private readonly keyReviewResize = (event: KeyboardEvent): void => {
 +    const width = this.renderRoot.querySelector("aside")?.getBoundingClientRect().width ?? 300;
 +    const step = event.shiftKey ? 72 : 24;
 +    const next = event.key === "ArrowLeft" ? width + step : event.key === "ArrowRight" ? width - step : event.key === "Home" ? 240 : event.key === "End" ? this.reviewMaxWidth() : undefined;
 +    if (next === undefined) return;
 +    event.preventDefault();
 +    this.setReviewWidth(next);
-+  }
++  };
 +  private reviewFile: WorkspaceFileLink | undefined;
 +  private reviewContent: FileContentResponse | undefined;
 +  private reviewError = "";
@@ -2393,6 +2520,7 @@ index 0000000000000000000000000000000000000000..bc3e2b1a8ff6adefb7ea740b8217a5c1
 +  private archiveConfirmation = "";
 +  private compactScope = false;
 +  private readonly resizeObserver = new ResizeObserver(() => { this.requestUpdate(); });
++  private readonly historyImages = new Map<string, Promise<ReturnType<typeof html>>>();
 +  private readonly markdown = new Map<string, { text: string; html: string }>();
 +
 +  private closeMenus(restoreFocus = false, selector = ".model-picker, .context-picker, .permission-picker, .header-actions"): void {
@@ -2443,6 +2571,7 @@ index 0000000000000000000000000000000000000000..bc3e2b1a8ff6adefb7ea740b8217a5c1
 +      this.clearReviewFile(); this.reviewOpen = false;
 +      this.reviewGeneration = view.generation;
 +      this.markdown.clear();
++      this.historyImages.clear();
 +    }
 +    if (view !== this.view || view.threadId !== "" || !view.connected || !view.threads.some((thread) => text(thread["id"]) === this.archiveConfirmation && thread["busy"] !== true)) this.archiveConfirmation = "";
 +    if (view === this.view && this.unsubscribe !== undefined) return;
@@ -2582,7 +2711,7 @@ index 0000000000000000000000000000000000000000..bc3e2b1a8ff6adefb7ea740b8217a5c1
 +    const body = text(item["text"]);
 +    let cached = this.markdown.get(id);
 +    if (cached?.text !== body) {
-+      cached = { text: body, html: renderWorkspaceMarkdownHtml(body, (href) => workspaceFileLink(href, this.view?.context.workspace.path ?? "")) };
++      cached = { text: body, html: renderCodexMarkdownHtml(body, (href) => workspaceFileLink(href, this.view?.context.workspace.path ?? "")) };
 +      if (this.markdown.size > 512) this.markdown.clear();
 +      this.markdown.set(id, cached);
 +    }
@@ -2670,14 +2799,19 @@ index 0000000000000000000000000000000000000000..bc3e2b1a8ff6adefb7ea740b8217a5c1
 +    this.closeMenus(true, ".context-picker");
 +  }
 +  private addKeydown(event: KeyboardEvent): void {
-+    if ((event.target instanceof Element && event.target.closest(".settings-menu")) || this.addPage !== "menu" || !["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
-+    const picker = event.currentTarget;
-+    if (!(picker instanceof HTMLDetailsElement) || this.view?.pending === true) return;
-+    const buttons = [...picker.querySelectorAll<HTMLButtonElement>(".add-item")].filter((button) => !button.disabled);
++    if ((event.target instanceof Element && event.target.closest(".settings-menu")) || this.addPage !== "menu" || this.view?.pending === true) return;
++    this.menuKeydown(event, ".add-item");
++  }
++  private menuKeydown(event: KeyboardEvent, selector: string, preferChecked = false): void {
++    const menu = event.currentTarget;
++    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key) || !(menu instanceof HTMLElement)) return;
++    const buttons = [...menu.querySelectorAll<HTMLButtonElement>(selector)].filter((button) => !button.disabled);
 +    if (buttons.length === 0) return;
-+    event.preventDefault(); picker.open = true;
++    event.preventDefault();
++    if (menu instanceof HTMLDetailsElement) menu.open = true;
 +    const current = buttons.findIndex((button) => button === event.target);
-+    const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : current < 0 ? 0 : (current + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
++    const initial = preferChecked ? Math.max(0, buttons.findIndex((button) => button.getAttribute("aria-checked") === "true")) : 0;
++    const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : current < 0 ? initial : (current + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
 +    buttons[next]?.focus();
 +  }
 +  private isMobileComposer(): boolean {
@@ -2697,22 +2831,13 @@ index 0000000000000000000000000000000000000000..bc3e2b1a8ff6adefb7ea740b8217a5c1
 +    this.modelListOpen = false; this.requestUpdate(); await this.updateComplete;
 +    this.renderRoot.querySelector<HTMLButtonElement>(".effort-selection")?.focus();
 +  }
-+  private modelListKeydown(event: KeyboardEvent): void {
-+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key) || !(event.currentTarget instanceof HTMLElement)) return;
-+    const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>(".model-option:not(:disabled)")];
-+    if (buttons.length === 0) return;
-+    event.preventDefault();
-+    const current = buttons.findIndex((button) => button === event.target);
-+    const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : current < 0 ? 0 : (current + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
-+    buttons[next]?.focus();
-+  }
 +  private renderModelOptions(view: CodexView, selected: string, disabled: boolean) {
 +    const defaultModel = view.models.find((model) => text(model["model"]) === view.defaultModel);
 +    return html`<div class="model-list-heading"><span>Select model</span><button aria-label="Back to reasoning effort" title="Back to reasoning effort" @click=${async () => {
 +      this.modelListOpen = false; this.requestUpdate(); await this.updateComplete;
 +      this.renderRoot.querySelector<HTMLButtonElement>(".effort-selection")?.focus();
 +    }}>‹</button></div>
-+      <div class="model-options" role="menu" aria-label="Select model" @keydown=${(event: KeyboardEvent) => { this.modelListKeydown(event); }}>
++      <div class="model-options" role="menu" aria-label="Select model" @keydown=${(event: KeyboardEvent) => { this.menuKeydown(event, ".model-option"); }}>
 +        <button class="model-option model-default" role="menuitem" ?disabled=${disabled || !view.defaultModel} @click=${() => { void this.selectModel(view, view.defaultModel, view.defaultEffort); }}><span>Default<small>${view.defaultModel ? `Workspace default · ${text(defaultModel?.["displayName"]) || view.defaultModel}` : "Workspace default unavailable"}</small></span></button>
 +        ${view.models.map((model) => {
 +          const name = text(model["model"]);
@@ -2797,15 +2922,56 @@ index 0000000000000000000000000000000000000000..bc3e2b1a8ff6adefb7ea740b8217a5c1
 +      </div>`)}
 +    </div>`;
 +  }
++  private imagePreview(src: string, name: string) {
++    return html`<a href=${src} target="_blank" rel="noopener noreferrer"><img class="message-image" src=${src} alt=${name} loading="lazy" referrerpolicy="no-referrer"></a>`;
++  }
++  private async loadHistoryImage(view: CodexView, itemId: string, index: number, source: string) {
++    const runtime = this.runtime;
++    const threadId = view.threadId;
++    const generation = view.generation;
++    try {
++      if (!runtime) throw new Error("Codex backend unavailable");
++      let url = "";
++      let total = 0;
++      do {
++        const chunk = await runtime.request(view, "image", { threadId, itemId, index, source, offset: url.length });
++        if (!this.isConnected || this.view !== view || view.generation !== generation) return html``;
++        const data = text(chunk["data"]);
++        total = typeof chunk["total"] === "number" ? chunk["total"] : 0;
++        if (!data || !Number.isSafeInteger(total) || total > MAX_IMAGE_URL_CHARS || url.length + data.length > total) throw new Error("Invalid history image");
++        url += data;
++      } while (url.length < total);
++      if (!url.startsWith("data:") || safeImageUrl(url) === "") throw new Error("Invalid history image");
++      return this.imagePreview(url, "Image");
++    } catch {
++      return html`<span class="message-image-label">Image unavailable <button @click=${() => { this.historyImages.clear(); this.requestUpdate(); }}>Retry</button></span>`;
++    }
++  }
 +  private renderMessageImages(item: RecordValue) {
-+    const files = this.view?.context.files;
-+    const root = this.view?.context.workspace.path.replace(/\\/gu, "/").replace(/\/$/u, "");
-+    return html`${array(item["images"]).map((entry) => {
-+      const path = text(object(entry)["path"]).replace(/\\/gu, "/");
++    const view = this.view;
++    const files = view?.context.files;
++    const root = view?.context.workspace.path.replace(/\\/gu, "/").replace(/\/$/u, "");
++    return html`${array(item["images"]).map((entry, index) => {
++      const image = object(entry);
++      const source = text(image["source"]);
++      if (source && view) {
++        const key = JSON.stringify([view.key, view.threadId, item["id"], index, source]);
++        let preview = this.historyImages.get(key);
++        if (!preview) {
++          preview = this.loadHistoryImage(view, text(item["id"]), index, source);
++          if (this.historyImages.size >= 128) this.historyImages.clear();
++          this.historyImages.set(key, preview);
++        }
++        return until(preview, html`<span class="message-image-label">Loading image…</span>`);
++      }
++      const url = safeImageUrl(text(image["url"]));
++      if (url !== "") return this.imagePreview(url, "Image");
++      const path = text(image["path"]).replace(/\\/gu, "/");
++      if (path === "") return nothing;
 +      const relativePath = root !== undefined && path.startsWith(`${root}/`) ? path.slice(root.length + 1) : "";
 +      const name = path.split("/").filter(Boolean).at(-1) ?? "Image";
 +      if (files?.capabilityVersion !== 1 || !relativePath || relativePath.split("/").includes("..")) return html`<span class="message-image-label">📎 ${name}</span>`;
-+      return html`<a href=${files.previewUrl(relativePath)} target="_blank" rel="noopener noreferrer"><img class="message-image" src=${files.previewUrl(relativePath)} alt=${name} loading="lazy"></a>`;
++      return this.imagePreview(files.previewUrl(relativePath), name);
 +    })}`;
 +  }
 +  private renderContextPicker(view: CodexView) {
@@ -2833,17 +2999,6 @@ index 0000000000000000000000000000000000000000..bc3e2b1a8ff6adefb7ea740b8217a5c1
 +    if (mode === "ask-for-approval") return html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 12V5a1.5 1.5 0 0 1 3 0v6V3a1.5 1.5 0 0 1 3 0v8V5a1.5 1.5 0 0 1 3 0v7-4a1.5 1.5 0 0 1 3 0v6c0 5-3 8-7 8-3 0-5-2-7-5l-3-5a1.5 1.5 0 0 1 2.5-1.5L8 14"/></svg>`;
 +    return html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 2 9 4v6c0 5-4 8-9 10-5-2-9-5-9-10V6z"/>${mode === "full-access" ? svg`<path d="M12 7v6m0 4h.01"/>` : svg`<path d="m8 9 3 3-3 3m6 0h3"/>`}</svg>`;
 +  }
-+  private permissionKeydown(event: KeyboardEvent): void {
-+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
-+    const picker = event.currentTarget;
-+    if (!(picker instanceof HTMLDetailsElement)) return;
-+    const buttons = [...picker.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')].filter((button) => !button.disabled);
-+    if (buttons.length === 0) return;
-+    event.preventDefault(); picker.open = true;
-+    const current = buttons.findIndex((button) => button === event.target);
-+    const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : current < 0 ? Math.max(0, buttons.findIndex((button) => button.getAttribute("aria-checked") === "true")) : (current + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
-+    buttons[next]?.focus();
-+  }
 +  private renderPermissionPicker(view: CodexView) {
 +    const modes: { id: PermissionMode; label: string; description: string }[] = [
 +      { id: "ask-for-approval", label: "Ask for approval", description: "Always ask to edit external files and use the internet" },
@@ -2852,7 +3007,7 @@ index 0000000000000000000000000000000000000000..bc3e2b1a8ff6adefb7ea740b8217a5c1
 +    ];
 +    const selected = modes.find((mode) => mode.id === view.permissionMode) ?? modes[2];
 +    const disabled = view.pending || view.sending || view.snapshot["busy"] === true;
-+    return html`<details class="permission-picker" @keydown=${(event: KeyboardEvent) => { this.permissionKeydown(event); }}>
++    return html`<details class="permission-picker" @keydown=${(event: KeyboardEvent) => { this.menuKeydown(event, '[role="menuitemradio"]', true); }}>
 +      <summary class=${view.permissionMode === "full-access" ? "permission-warning" : ""} aria-label="Permission mode" aria-haspopup="menu" aria-disabled=${disabled} title="Permission mode for the next message" @click=${(event: Event) => { if (disabled) event.preventDefault(); }}>${this.permissionIcon(view.permissionMode)}<span>${selected?.label}</span></summary>
 +      <div class="permission-menu" role="menu" aria-label="How should Codex actions be approved?">
 +        <div class="permission-heading"><span>How should Codex actions be approved?</span><a href="https://developers.openai.com/codex/security/" target="_blank" rel="noopener noreferrer">Learn more</a></div>
@@ -2973,7 +3128,7 @@ index 0000000000000000000000000000000000000000..bc3e2b1a8ff6adefb7ea740b8217a5c1
 +    const headerActions = html`<button class="review-toggle" ?disabled=${home} aria-label="Toggle review panel" aria-expanded=${reviewOpen} @click=${() => { this.closeMenus(true); this.reviewOpen = !reviewOpen; if (!this.reviewOpen) this.clearReviewFile(); this.requestUpdate(); }}>Review${changes.length > 0 ? html` <span class="count">${changes.length}</span>` : nothing}</button>
 +        <button class="reconnect" aria-label="Reconnect" title="Reconnect" ?disabled=${view.pending} @click=${() => { this.closeMenus(true); this.action((runtime, state) => runtime.initialize(state)); }}>${this.isMobileComposer() ? "Reconnect" : html`<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M20 7a8 8 0 1 0 0 10M20 3v5h-5"></path></svg>`}</button>`;
 +    return html`
-+      <div class="layout" style=${this.reviewWidth === undefined ? "" : `--review-width:${this.reviewWidth}px`} ?data-review-open=${reviewOpen}>
++      <div class="layout" style=${this.reviewWidth === undefined ? "" : `--review-width:${String(this.reviewWidth)}px`} ?data-review-open=${reviewOpen}>
 +      <header><div class="header-heading">${home ? html`<strong>Codex</strong>` : html`<button class="back-button new-conversation" aria-label="Back to conversations" title="Back to conversations" ?disabled=${view.pending || !view.connected} @click=${() => { this.openConversation(view, ""); }}>←</button><span class="task-title" title=${text(currentThread?.["preview"])}>${text(currentThread?.["preview"]) || "New conversation"}</span>`}</div>
 +        <span class="scope" title=${view.context.workspace.path}><span class="scope-measure" aria-hidden="true">${view.context.workspace.path}</span><span class="scope-label">${this.compactScope ? view.context.workspace.path.split(/[\\/]/).filter(Boolean).at(-1) ?? view.context.workspace.path : view.context.workspace.path}</span></span>
 +        ${this.isMobileComposer() ? html`<details class="header-actions"><summary aria-label="More actions" title="More actions">···</summary><div class="header-actions-menu">${headerActions}</div></details>` : headerActions}
@@ -3208,6 +3363,7 @@ index 0000000000000000000000000000000000000000..bc3e2b1a8ff6adefb7ea740b8217a5c1
 +    .attachment img { width:56px; height:56px; object-fit:contain; border-radius:5px; }
 +    .attachment>div { min-width:0; max-width:180px; } .attachment-name { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px; }
 +    .attachment small { display:block; font-size:11px; overflow-wrap:anywhere; }
++    .markdown math[display="block"] { display:block; overflow-x:auto; margin:1em 0; max-width:100%; }
 +    .message-images { display:flex; flex-wrap:wrap; gap:8px; } .message-image { display:block; max-width:100%; width:180px; max-height:200px; object-fit:contain; border-radius:8px; margin-bottom:6px; }
 +    .message-image-label { font-size:12px; } .file-input[hidden] { display:none; }
 +    textarea { display:block; width:100%; resize:none; overflow-y:auto; line-height:1.5; min-height:calc(3em + 6px); max-height:180px; padding:3px 7px; border:0; background:transparent; caret-color:var(--pi-accent,#559ff6); }
@@ -3469,6 +3625,102 @@ index 0000000000000000000000000000000000000000..68e333b1a88ef6720ba050819b7a0591
 +  if (target.length <= root.length || root.some((part, index) => target[index] !== part)) return undefined;
 +  return { path: target.slice(root.length).join("/"), line };
 +}
+diff --git a/pi-web-plugins/codex/markdownMath.test.ts b/pi-web-plugins/codex/markdownMath.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..dcf0e638b3c64c1e14f368f639f92450b913f711
+--- /dev/null
++++ b/pi-web-plugins/codex/markdownMath.test.ts
+@@ -0,0 +1,90 @@
++// @vitest-environment happy-dom
++import { afterEach, describe, expect, it, vi } from "vitest";
++import { renderWorkspaceMarkdownHtml as renderCodexMarkdownHtml } from "../files/workspaceMarkdown.js";
++
++afterEach(() => vi.unstubAllGlobals());
++
++function render(text: string): HTMLTemplateElement {
++  const template = document.createElement("template");
++  template.innerHTML = renderCodexMarkdownHtml(text);
++  return template;
++}
++describe("Codex math Markdown", () => {
++  it("preserves completed and pending task markers alongside formulas", () => {
++    const root = document.createElement("div");
++    root.innerHTML = renderCodexMarkdownHtml("- [x] Completed $x^2$\n- [ ] Pending");
++    const items = root.querySelectorAll("li");
++    expect(items).toHaveLength(2);
++    expect(items[0]?.textContent).toContain("[x] Completed");
++    expect(items[1]?.textContent).toContain("[ ] Pending");
++    expect(items[0]?.querySelector("math")).not.toBeNull();
++    expect(root.querySelector("input")).toBeNull();
++  });
++
++  it("renders conversation replies when secure-context crypto APIs are unavailable", () => {
++    vi.stubGlobal("crypto", { getRandomValues: crypto.getRandomValues.bind(crypto) });
++    const root = document.createElement("div");
++    root.innerHTML = renderCodexMarkdownHtml("A **reply** with $x^2$.");
++    expect(root.querySelector("strong")?.textContent).toBe("reply");
++    expect(root.querySelector("math")).not.toBeNull();
++  });
++
++  it("does not replace user code that resembles a formula placeholder", () => {
++    const root = document.createElement("div");
++    root.innerHTML = renderCodexMarkdownHtml("`codex-math-0` and `codex-math--0` plus $x$");
++    expect([...root.querySelectorAll("code")].map((code) => code.textContent)).toEqual(["codex-math-0", "codex-math--0"]);
++    expect(root.querySelectorAll("math")).toHaveLength(1);
++  });
++  it("renders inline, display, and bracket formulas without touching code or currency", () => {
++    const html = renderCodexMarkdownHtml([
++      "Inline $x^2$ and $$\\frac{a}{b}$$ plus \\(y\\) and \\[z\\].",
++      "",
++      "```",
++      "$x$",
++      "```",
++      "",
++      "`$x$` and $12.50.",
++    ].join("\n"));
++    const root = document.createElement("div");
++    root.innerHTML = html;
++    expect(root.querySelectorAll("math")).toHaveLength(4);
++    expect(root.querySelector("math[display=block] annotation")?.textContent).toBe("\\frac{a}{b}");
++    expect(root.querySelector("pre")?.textContent).toContain("$x$");
++    expect([...root.querySelectorAll("code")].some((element) => element.textContent === "$x$")).toBe(true);
++    expect(root.textContent).toContain("$12.50");
++    expect(html).not.toContain("<script");
++  });
++  it("renders the reported Lagrangian with backslash delimiters", () => {
++    const result = render(String.raw`求解 \(\Delta\)：
++
++\[
++\min_\Delta \frac12\Delta^\mathsf{T}H_r\Delta,
++\qquad \Delta_0=-e
++\]
++
++所以 \(a^\mathsf{T}\Delta+e=0\)。`);
++    expect(result.content.querySelectorAll("math")).toHaveLength(3);
++    expect(result.content.querySelector('math[display="block"]')).not.toBeNull();
++    expect(result.content.querySelector("mfrac")).not.toBeNull();
++    expect(result.innerHTML).not.toContain("codex-math-");
++  });
++  it("supports dollar delimiters without treating prices or code as formulas", () => {
++    const result = render('Inline $x_1^2$\n\n$$\\frac{1}{2}$$\n\n`$x$`\n\n```tex\n\\[x\\]\n```\n\n$5 and $10');
++    expect(result.content.querySelectorAll("math")).toHaveLength(2);
++    expect(result.content.querySelector("pre code")?.textContent).toContain(String.raw`\[x\]`);
++    expect(result.innerHTML).toContain("$5 and $10");
++  });
++  it("keeps streaming and invalid formulas readable", () => {
++    expect(render(String.raw`\[\unknown{x}\]`).content.querySelector("code")?.textContent).toBe(String.raw`\unknown{x}`);
++    expect(render(String.raw`\[x +`).content.querySelector("math")).toBeNull();
++  });
++  it("keeps raw HTML and trusted TeX commands inert", () => {
++    const result = render(String.raw`<img src=x onerror=alert(1)> \(\href{javascript:alert(1)}{x}\)`);
++    expect(result.content.querySelector("img,script,[onclick],[onerror],a[href] ")).toBeNull();
++  });
++  it("preserves workspace file controls and Markdown emphasis", () => {
++    const result = renderCodexMarkdownHtml("**Hello** [File](/repo/a.ts)", () => ({ path: "a.ts", line: 4 }));
++    expect(result).toContain('<strong>Hello</strong>');
++    expect(result).toContain('data-file-path="a.ts"');
++  });
++});
 diff --git a/pi-web-plugins/codex/package.json b/pi-web-plugins/codex/package.json
 new file mode 100644
 index 0000000000000000000000000000000000000000..3fef6ee6103ca52ad0742b0bf051ad18f98acac9
@@ -3529,12 +3781,12 @@ index 0000000000000000000000000000000000000000..b46170701b2cd5074207c09ca25e8a45
 +export default plugin;
 diff --git a/pi-web-plugins/codex/server/codexProtocol.test.ts b/pi-web-plugins/codex/server/codexProtocol.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..03af5471f7b60d68897d499640bd994e41b11a28
+index 0000000000000000000000000000000000000000..40d19499dbdafd0eaf3c093557b058cbba38b25b
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/codexProtocol.test.ts
-@@ -0,0 +1,77 @@
+@@ -0,0 +1,104 @@
 +import { afterEach, describe, expect, it, vi } from "vitest";
-+import { CodexProcess } from "./codexProtocol.js";
++import { CodexFrameReader, CodexProcess } from "./codexProtocol.js";
 +import type { RecordValue } from "./protocol.js";
 +
 +const connections: CodexProcess[] = [];
@@ -3542,6 +3794,7 @@ index 0000000000000000000000000000000000000000..03af5471f7b60d68897d499640bd994e
 +const script = `
 +let buffer='';
 +process.stdin.on('data',chunk=>{ buffer+=chunk; let end; while((end=buffer.indexOf('\\n'))>=0){const line=buffer.slice(0,end);buffer=buffer.slice(end+1);const msg=JSON.parse(line);if(msg.method==='initialized')continue;
++ if(msg.method==='large-history'){const result={thread:{turns:[{items:[{type:'userMessage',content:[{type:'image',url:'data:image/png;base64,'+'A'.repeat(20*1024*1024)},{type:'text',text:'after image'}]}]}]}};process.stdout.write(JSON.stringify({id:msg.id,result})+'\\n');continue;}
 + if(msg.method==='hang'){continue;}
 + if(msg.method==='crash'){process.exit(3);}
 + if(msg.method==='malformed'){process.stdout.write('not-json\\n');continue;}
@@ -3565,6 +3818,14 @@ index 0000000000000000000000000000000000000000..03af5471f7b60d68897d499640bd994e
 +    const { connection } = fixture();
 +    const results = await Promise.all([connection.request("split", {}), connection.request("normal", {})]);
 +    expect(results.map((result) => result["message"])).toEqual(["你好 😀", "你好 😀"]);
++  });
++  it("reads history larger than 16 MiB without losing the connection", async () => {
++    const { connection, exited } = fixture();
++    const result = await connection.request("large-history", {});
++    expect(JSON.stringify(result)).toContain("after image");
++    expect(JSON.stringify(result).length).toBeGreaterThan(20 * 1024 * 1024);
++    expect(await connection.request("normal", {})).toHaveProperty("message", "你好 😀");
++    expect(exited).not.toHaveBeenCalled();
 +  });
 +  it("rejects pending requests on process exit and malformed frames", async () => {
 +    const first = fixture();
@@ -3610,14 +3871,31 @@ index 0000000000000000000000000000000000000000..03af5471f7b60d68897d499640bd994e
 +    await expect(missing.request("status", {})).rejects.toThrow("Install Codex CLI");
 +  });
 +});
++
++describe("Codex frame limits", () => {
++  it("accepts exact limits per line across chunk boundaries and multiple frames", () => {
++    const receive = vi.fn();
++    const reader = new CodexFrameReader(4);
++    reader.push(Buffer.from("ab"), receive);
++    reader.push(Buffer.from("cd\n1234\nx"), receive);
++    reader.push(Buffer.from("yz\n"), receive);
++    expect(receive.mock.calls).toEqual([["abcd"], ["1234"], ["xyz"]]);
++  });
++  it.each([false, true])("rejects oversized frames with or without a newline (terminated=%s)", (terminated) => {
++    const reader = new CodexFrameReader(4);
++    const receive = vi.fn();
++    reader.push(Buffer.from("ab"), receive);
++    expect(() => { reader.push(Buffer.from(`cde${terminated ? "\n" : ""}`), receive); }).toThrow("response exceeds");
++    expect(receive).not.toHaveBeenCalled();
++  });
++});
 diff --git a/pi-web-plugins/codex/server/codexProtocol.ts b/pi-web-plugins/codex/server/codexProtocol.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..e315f01fdd441c313abe22ea84610eaae4faa9c8
+index 0000000000000000000000000000000000000000..c6d45f6f2f76fc6a88b06245b82f9eab213fbf55
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/codexProtocol.ts
-@@ -0,0 +1,98 @@
+@@ -0,0 +1,126 @@
 +import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-+import { StringDecoder } from "node:string_decoder";
 +import { errorText, object, type RecordValue } from "./protocol.js";
 +
 +export interface CodexConnection {
@@ -3628,30 +3906,58 @@ index 0000000000000000000000000000000000000000..e315f01fdd441c313abe22ea84610eaa
 +}
 +export type ConnectionFactory = (cwd: string, event: (frame: RecordValue) => void, exited: (message: string) => void) => CodexConnection;
 +
++// A history response can contain ten 20 MiB attachments expanded to base64,
++// plus message text. Keep this separate from the much smaller browser snapshots.
++const MAX_CODEX_FRAME_BYTES = 320 * 1024 * 1024;
++
++/** Scan each incoming byte once; assemble UTF-8 only after the frame is complete. */
++export class CodexFrameReader {
++  private parts: Buffer[] = [];
++  private bytes = 0;
++
++  constructor(private readonly maxBytes = MAX_CODEX_FRAME_BYTES) {}
++
++  push(chunk: Buffer, receive: (line: string) => void): void {
++    let start = 0;
++    while (start < chunk.length) {
++      const newline = chunk.indexOf(10, start);
++      const end = newline === -1 ? chunk.length : newline;
++      const part = chunk.subarray(start, end);
++      if (this.bytes + part.length > this.maxBytes) {
++        this.clear();
++        throw new Error(`Codex response exceeds ${String(this.maxBytes)} bytes; history is too large to load.`);
++      }
++      if (part.length > 0) this.parts.push(part);
++      this.bytes += part.length;
++      if (newline === -1) return;
++      const line = Buffer.concat(this.parts, this.bytes).toString("utf8");
++      this.clear();
++      receive(line);
++      start = newline + 1;
++    }
++  }
++
++  clear(): void { this.parts = []; this.bytes = 0; }
++}
++
 +/** Owns stdio framing and pending RPCs. Never binds process lifetime to an HTTP request. */
 +export class CodexProcess implements CodexConnection {
 +  private readonly child: ChildProcessWithoutNullStreams;
 +  private readonly pending = new Map<number, { resolve: (value: RecordValue) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
 +  private nextId = 0;
-+  private buffer = "";
++  private readonly frames = new CodexFrameReader();
 +  private ended = false;
 +  private readonly ready: Promise<void>;
 +
 +  constructor(cwd: string, private readonly event: (frame: RecordValue) => void, private readonly exited: (message: string) => void,
 +    command = "codex", args = ["app-server", "--listen", "stdio://"]) {
 +    this.child = spawn(command, args, { cwd, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
-+    const decoder = new StringDecoder("utf8");
 +    this.child.stdout.on("data", (chunk: Buffer) => {
++      if (this.ended) return;
 +      try {
-+        this.buffer += decoder.write(chunk);
-+        let newline: number;
-+        while ((newline = this.buffer.indexOf("\n")) !== -1) {
-+          if (newline > 16 * 1024 * 1024) throw new Error("Codex response exceeds 16 MiB");
-+          const line = this.buffer.slice(0, newline);
-+          this.buffer = this.buffer.slice(newline + 1);
++        this.frames.push(chunk, (line) => {
 +          if (line.trim() !== "") this.receive(object(JSON.parse(line)));
-+        }
-+        if (this.buffer.length > 16 * 1024 * 1024) throw new Error("Codex response exceeds 16 MiB");
++        });
 +      } catch (error) { this.fail(`Codex protocol error: ${errorText(error)}`); }
 +    });
 +    // Drain diagnostics without retaining prompts, credentials, or unbounded logs.
@@ -3703,6 +4009,7 @@ index 0000000000000000000000000000000000000000..e315f01fdd441c313abe22ea84610eaa
 +  private fail(message: string): void {
 +    if (this.ended) return;
 +    this.ended = true;
++    this.frames.clear();
 +    for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(new Error(message)); }
 +    this.pending.clear();
 +    this.child.kill("SIGTERM");
@@ -3716,10 +4023,10 @@ index 0000000000000000000000000000000000000000..e315f01fdd441c313abe22ea84610eaa
 +export const createCodexConnection: ConnectionFactory = (cwd, event, exited) => new CodexProcess(cwd, event, exited);
 diff --git a/pi-web-plugins/codex/server/codexService.test.ts b/pi-web-plugins/codex/server/codexService.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..d6db00f6477f38a9b4a9be9eacbc1b98a725c8ca
+index 0000000000000000000000000000000000000000..977d5276e8b401da68378c12f2b13cdab58bcfed
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/codexService.test.ts
-@@ -0,0 +1,981 @@
+@@ -0,0 +1,1036 @@
 +import { mkdtemp, mkdir, writeFile, symlink, truncate, rm } from "node:fs/promises";
 +import { join } from "node:path";
 +import { tmpdir } from "node:os";
@@ -3728,7 +4035,7 @@ index 0000000000000000000000000000000000000000..d6db00f6477f38a9b4a9be9eacbc1b98
 +import { cloneBoundedPluginBackendJson, PLUGIN_BACKEND_RESPONSE_JSON_MAX_BYTES } from "../../../src/shared/pluginBackendProtocol.js";
 +import { CodexService } from "./codexService.js";
 +import type { CodexConnection } from "./codexProtocol.js";
-+import { array, object, type RecordValue } from "./protocol.js";
++import { array, object, text, type RecordValue } from "./protocol.js";
 +
 +const services: CodexService[] = [];
 +afterEach(() => { for (const service of services) service.dispose(); services.length = 0; });
@@ -3783,6 +4090,61 @@ index 0000000000000000000000000000000000000000..d6db00f6477f38a9b4a9be9eacbc1b98
 +      const snapshot = await f.call("snapshot", { threadId: "new" }, cwd);
 +      expect(array(snapshot["items"])).toContainEqual(expect.objectContaining({ id: "image-input", text: "", images: [{ path }] }));
 +    } finally { await rm(cwd, { recursive: true, force: true }); }
++  });
++
++  it("keeps image URLs when reloading historical user messages", async () => {
++    const url = `data:image/png;base64,${png.toString("base64")}`;
++    const f = fixture();
++    f.request.mockImplementation((method) => {
++      if (method === "thread/read") return Promise.resolve({ thread: { id: "saved", cwd: "/work/one", turns: [{ id: "old", status: "completed", items: [{ id: "pic", type: "userMessage", content: [
++        { type: "text", text: "Look", text_elements: [] },
++        { type: "image", image_url: url },
++        { type: "image", image_url: { url: "https://cdn.example.test/shot.png" } },
++        { type: "image", image_url: "javascript:alert(1)" },
++        { type: "image", image_url: "data:image/svg+xml;base64,PHN2Zy8+" },
++        { type: "localImage", path: "/work/one/.pi-web/uploads/keep.png" },
++      ] }] }] } });
++      return Promise.resolve({});
++    });
++    const snapshot = await f.call("snapshot", { threadId: "saved" });
++    const item = array(snapshot["items"]).find((entry) => object(entry)["id"] === "pic");
++    const source = text(object(array(object(item)["images"])[0])["source"]);
++    expect(source).toMatch(/^[a-f0-9]{64}$/u);
++    expect(object(item)["images"]).toEqual([
++      { source },
++      { url: "https://cdn.example.test/shot.png" },
++      { path: "/work/one/.pi-web/uploads/keep.png" },
++    ]);
++    expect(JSON.stringify(snapshot)).not.toContain("javascript:");
++    expect(JSON.stringify(snapshot)).not.toContain("svg");
++  });
++
++  it("restores URL images without placing their bytes in snapshots or acquiring a writer", async () => {
++    const f = fixture();
++    const url = `data:image/png;base64,${"A".repeat(8 * 1024 * 1024)}`;
++    f.request.mockResolvedValue({ thread: { id: "saved", cwd: "/work/one", turns: [{ id: "old", status: "completed", items: [
++      { id: "picture", type: "userMessage", content: [{ type: "image", url }, { type: "image", url: "https://example.test/a.png" }, { type: "image", url: "javascript:alert(1)" }] },
++    ] }] } });
++    const snapshot = await f.call("snapshot", { threadId: "saved" });
++    const item = object(array(snapshot["items"])[0]);
++    const images = array(item["images"]);
++    const source = text(object(images[0])["source"]);
++    expect(source).toEqual(expect.any(String));
++    expect(JSON.stringify(snapshot).length).toBeLessThan(4096);
++    expect(images[1]).toEqual({ url: "https://example.test/a.png" });
++    expect(images).toHaveLength(2);
++    let restored = "";
++    while (restored.length < url.length) {
++      const chunk = await f.call("image", { threadId: "saved", itemId: "picture", index: 0, source, offset: restored.length });
++      expect(text(chunk["data"]).length).toBeLessThanOrEqual(512 * 1024);
++      restored += text(chunk["data"]);
++    }
++    expect(restored).toBe(url);
++    expect(f.request).toHaveBeenCalledTimes(2);
++    await expect(f.call("image", { threadId: "saved", itemId: "picture", index: 0, source: "stale" })).rejects.toThrow("unavailable");
++    await expect(f.call("image", { threadId: "saved", itemId: "picture", index: -1, source })).rejects.toThrow("Invalid");
++    expect(f.request.mock.calls.every(([method]) => method === "thread/read")).toBe(true);
++    await expect(f.call("image", { threadId: "saved", itemId: "picture", index: 0, source }, "/another/workspace")).rejects.toThrow("another workspace");
 +  });
 +
 +  it("rejects unsafe paths, invalid image content, oversized images and malformed image lists before starting", async () => {
@@ -4703,17 +5065,17 @@ index 0000000000000000000000000000000000000000..d6db00f6477f38a9b4a9be9eacbc1b98
 +});
 diff --git a/pi-web-plugins/codex/server/codexService.ts b/pi-web-plugins/codex/server/codexService.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..a694704afd4552682fa40775db3b3ecea1a2dc7c
+index 0000000000000000000000000000000000000000..22268f9db1f1cff619c89d6afd716021bcb34ed7
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/codexService.ts
-@@ -0,0 +1,862 @@
-+import { randomUUID } from "node:crypto";
+@@ -0,0 +1,903 @@
++import { createHash, randomUUID } from "node:crypto";
 +import { imageSize } from "image-size";
 +import { isAbsolute, relative, resolve, sep } from "node:path";
 +import { open, realpath, stat } from "node:fs/promises";
 +import type { JsonValue, ServerPluginPeerRequestContext, ServerPluginPeerChannelOpenContext, ServerPluginPeerChannel } from "@jmfederico/pi-web/server-plugin-api";
 +import { createCodexConnection, type CodexConnection, type ConnectionFactory } from "./codexProtocol.js";
-+import { MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, array, bounded, errorText, object, string, text, permissionMode, type PermissionMode, chatMode, type ChatMode, type RecordValue } from "./protocol.js";
++import { MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, array, bounded, errorText, historyImages, object, string, text, permissionMode, type PermissionMode, chatMode, type ChatMode, type RecordValue } from "./protocol.js";
 +
 +interface QueuedMessage {
 +  id: string;
@@ -4769,6 +5131,8 @@ index 0000000000000000000000000000000000000000..a694704afd4552682fa40775db3b3ece
 +const conversationSources = ["cli", "vscode", "appServer"];
 +
 +export class CodexService {
++  private readonly imageChunks = new WeakMap<WorkspaceState, Map<string, string>>();
++  private readonly imageSources = new WeakMap<RecordValue, string>();
 +  private readonly workspaces = new Map<string, WorkspaceState>();
 +  private readonly sweep: ReturnType<typeof setInterval>;
 +  private disposed = false;
@@ -4851,7 +5215,7 @@ index 0000000000000000000000000000000000000000..a694704afd4552682fa40775db3b3ece
 +
 +  async request(context: ServerPluginPeerRequestContext): Promise<JsonValue> {
 +    if (context.signal.aborted || this.disposed) throw new Error("Codex request cancelled");
-+    const supported = new Set(["status", "activity", "list", "models", "create", "fork", "snapshot", "send", "steer", "removeQueued", "resumeQueue", "stop", "answer", "archive"]);
++    const supported = new Set(["status", "activity", "list", "models", "create", "fork", "snapshot", "image", "send", "steer", "removeQueued", "resumeQueue", "stop", "answer", "archive"]);
 +    if (!supported.has(context.operation)) throw new Error("Unsupported Codex operation");
 +    const input = object(context.input);
 +    const selectedPolicy = policies[permissionMode(input["permissionMode"])];
@@ -4943,11 +5307,36 @@ index 0000000000000000000000000000000000000000..a694704afd4552682fa40775db3b3ece
 +    }
 +    const id = string(input["threadId"], "threadId");
 +    if (context.operation !== "snapshot" && state.archiving.has(id)) throw new Error("Conversation is being archived");
++    const imageKey = JSON.stringify([id, input["itemId"], input["index"], input["source"]]);
++    const cachedImage = context.operation === "image" ? this.imageChunks.get(state)?.get(imageKey) : undefined;
++    if (cachedImage !== undefined) return this.imageChunk(cachedImage, input["offset"] ?? 0);
 +    const localQueueAction = context.operation === "steer" || context.operation === "removeQueued";
-+    const thread = localQueueAction ? state.threads.get(id) : context.operation === "snapshot" ? await this.readSnapshot(state, id) : await this.load(state, id, selectedPolicy);
++    const thread = localQueueAction ? state.threads.get(id) : ["snapshot", "image"].includes(context.operation) ? await this.readSnapshot(state, id) : await this.load(state, id, selectedPolicy);
 +    if (thread === undefined) throw new Error("No queued messages for this conversation in the current workspace");
 +    context.signal.throwIfAborted();
 +    if (context.operation !== "snapshot" && state.archiving.has(id)) throw new Error("Conversation is being archived");
++    if (context.operation === "image") {
++      const item = thread.items.get(string(input["itemId"], "itemId"));
++      const index = input["index"];
++      const offset = input["offset"] ?? 0;
++      if (typeof index !== "number" || !Number.isInteger(index) || index < 0 ||
++          typeof offset !== "number" || !Number.isInteger(offset) || offset < 0) throw new Error("Invalid image position");
++      const image = array(item?.["images"])[index];
++      const metadata = image === undefined ? undefined : object(image);
++      const source = metadata === undefined ? undefined : this.imageSources.get(metadata);
++      if (source === undefined || metadata?.["source"] !== input["source"] || offset >= source.length) throw new Error("History image unavailable");
++      // Avoid rereading the entire external thread for every image chunk. The
++      // cache is workspace-scoped and bounded independently of timeline history.
++      const cache = this.imageChunks.get(state) ?? new Map<string, string>();
++      cache.set(imageKey, source);
++      let size = [...cache.values()].reduce((sum, value) => sum + value.length, 0);
++      for (const [key, value] of cache) {
++        if (size <= 32 * 1024 * 1024) break;
++        cache.delete(key); size -= value.length;
++      }
++      this.imageChunks.set(state, cache);
++      return this.imageChunk(source, offset);
++    }
 +    if (context.operation === "snapshot") {
 +      if (input["version"] === thread.version) return { changed: false };
 +      const offset = typeof input["offset"] === "number" ? Math.max(0, Math.min(512, Math.floor(input["offset"]))) : 0;
@@ -4969,11 +5358,7 @@ index 0000000000000000000000000000000000000000..a694704afd4552682fa40775db3b3ece
 +          const selected: string[] = [];
 +          for (const entry of references) {
 +            const path = string(entry, "workspace path", 4096);
-+            if (isAbsolute(path) || path.split(/[\\/]/u).includes("..")) throw new Error("Attachment must be inside the current workspace");
-+            const target = await realpath(resolve(root, path));
-+            const within = relative(root, target);
-+            if (isAbsolute(within) || within === ".." || within.startsWith(`..${sep}`)) throw new Error("Attachment must be inside the current workspace");
-+            const info = await stat(target);
++            const { info } = await this.workspaceEntry(root, path);
 +            if (!info.isFile() && !info.isDirectory()) throw new Error("Only workspace files and directories can be attached");
 +            selected.push(`${info.isDirectory() ? "Directory" : "File"}: ${JSON.stringify(path)}`);
 +          }
@@ -5087,15 +5472,19 @@ index 0000000000000000000000000000000000000000..a694704afd4552682fa40775db3b3ece
 +    return { accepted: true };
 +  }
 +
-+  private async attachmentFile(root: string, value: unknown): Promise<{ path: string; size: number }> {
++  private async workspaceEntry(root: string, value: unknown) {
 +    const path = string(value, "attachment path", 4096);
 +    if (isAbsolute(path) || path.split(/[\\/]/u).includes("..")) throw new Error("Attachment must be inside the current workspace");
 +    const target = await realpath(resolve(root, path));
 +    const within = relative(root, target);
 +    if (isAbsolute(within) || within === ".." || within.startsWith(`..${sep}`)) throw new Error("Attachment must be inside the current workspace");
-+    const info = await stat(target);
++    return { path: target, info: await stat(target) };
++  }
++
++  private async attachmentFile(root: string, value: unknown): Promise<{ path: string; size: number }> {
++    const { path, info } = await this.workspaceEntry(root, value);
 +    if (!info.isFile() || info.size > MAX_ATTACHMENT_BYTES) throw new Error("Each attachment must be a file of at most 20 MiB");
-+    return { path: target, size: info.size };
++    return { path, size: info.size };
 +  }
 +
 +  private async imageInputs(state: WorkspaceState, value: unknown): Promise<RecordValue[]> {
@@ -5192,6 +5581,12 @@ index 0000000000000000000000000000000000000000..a694704afd4552682fa40775db3b3ece
 +    return undefined;
 +  }
 +
++  private imageChunk(source: string, offset: unknown): RecordValue {
++    if (typeof offset !== "number" || !Number.isInteger(offset) || offset < 0 || offset >= source.length) throw new Error("Invalid image position");
++    // Image bytes travel separately, in bounded chunks, never in timeline snapshots.
++    return { data: source.slice(offset, offset + 512 * 1024), total: source.length };
++  }
++
 +  private boundedSnapshot(snapshot: RecordValue): RecordValue {
 +    // Leave headroom below the host's 8 MiB UTF-8 JSON response limit.
 +    const limit = 7 * 1024 * 1024;
@@ -5209,6 +5604,7 @@ index 0000000000000000000000000000000000000000..a694704afd4552682fa40775db3b3ece
 +      for (const key of ["id", "kind", "status", "turnId", "phase", "turnStartedAt", "turnCompletedAt", "durationMs", "turnDurationMs", "exitCode"]) {
 +        if (item[key] !== undefined) compact[key] = item[key];
 +      }
++      if (item["images"] !== undefined) compact["images"] = item["images"];
 +      compact["text"] = bounded(text(item["text"]), 4096) + "\n[Details omitted to fit response limit; full history is available in Codex CLI]";
 +      const compactBytes = size(compact);
 +      if (compactBytes < entry.bytes) { items[entry.index] = compact; bytes += compactBytes - entry.bytes; }
@@ -5400,18 +5796,17 @@ index 0000000000000000000000000000000000000000..a694704afd4552682fa40775db3b3ece
 +      throw error;
 +    }
 +  }
-+  private restoreTurnItems(thread: ThreadState, turn: RecordValue, replace = true): void {
++  private restoreTurnItems(thread: ThreadState, turn: RecordValue): void {
 +    const metadata = { turnId: turn["id"] ?? "", turnStatus: turn["status"] ?? "",
 +      turnDurationMs: turn["durationMs"] ?? null, turnStartedAt: turn["startedAt"] ?? null, turnCompletedAt: turn["completedAt"] ?? null };
-+    for (const item of array(turn["items"])) this.item(thread, { ...object(item), ...metadata }, replace);
++    for (const item of array(turn["items"])) this.item(thread, { ...object(item), ...metadata });
 +  }
 +  private storeItem(thread: ThreadState, id: string, item: RecordValue): void {
 +    thread.items.set(id, item);
 +    trimOldest(thread.items, 512);
 +  }
-+  private item(thread: ThreadState, raw: RecordValue, replace = true): void {
++  private item(thread: ThreadState, raw: RecordValue): void {
 +    const id = string(raw["id"]);
-+    if (!replace && thread.items.has(id)) return;
 +    const kind = text(raw["type"]);
 +    const previous = thread.items.get(id);
 +    const joined = (value: unknown): string => array(value).map((entry) => typeof entry === "string" ? entry : text(object(entry)["text"])).filter(Boolean).join("\n");
@@ -5419,8 +5814,16 @@ index 0000000000000000000000000000000000000000..a694704afd4552682fa40775db3b3ece
 +    const details: RecordValue = {};
 +    if (kind === "userMessage") {
 +      body = joined(raw["content"]);
-+      details["images"] = array(raw["content"]).map(object).filter((entry) => ["localImage", "image"].includes(text(entry["type"]))).slice(0, MAX_ATTACHMENTS)
-+        .map((entry) => ({ path: bounded(text(entry["path"]), 4096) }));
++      details["images"] = historyImages(array(raw["content"]).map(object).filter((entry) => ["localImage", "image"].includes(text(entry["type"]))).slice(0, MAX_ATTACHMENTS))
++        .map((image) => {
++          const url = text(image["url"]);
++          if (url.startsWith("data:")) {
++            delete image["url"];
++            image["source"] = createHash("sha256").update(url).digest("hex");
++            this.imageSources.set(image, url);
++          }
++          return image;
++        });
 +    }
 +    else if (kind === "reasoning") {
 +      details["summaryText"] = bounded(joined(raw["summary"]));
@@ -5571,10 +5974,10 @@ index 0000000000000000000000000000000000000000..a694704afd4552682fa40775db3b3ece
 +}
 diff --git a/pi-web-plugins/codex/server/protocol.ts b/pi-web-plugins/codex/server/protocol.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..6d559bb4b33c44a5ccce590038f2bee06e51c4d7
+index 0000000000000000000000000000000000000000..94a097083b287123012c9e622e8c2a9292b67e86
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/protocol.ts
-@@ -0,0 +1,38 @@
+@@ -0,0 +1,85 @@
 +import type { JsonValue } from "@jmfederico/pi-web/server-plugin-api";
 +
 +export type RecordValue = Record<string, JsonValue>;
@@ -5613,6 +6016,53 @@ index 0000000000000000000000000000000000000000..6d559bb4b33c44a5ccce590038f2bee0
 +export const MAX_ATTACHMENTS = 10;
 +export const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 +export const IMAGE_MIME_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
++export const MAX_IMAGE_URL_CHARS = Math.ceil(MAX_ATTACHMENT_BYTES / 3) * 4 + 128;
++const DATA_IMAGE_URL = /^data:image\/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/]+={0,2}$/u;
++
++/** Browser-loadable image URL. Data URLs are limited to raster images so SVG cannot run script. */
++export function safeImageUrl(value: string): string {
++  if (value.length === 0 || value.length > MAX_IMAGE_URL_CHARS || hasAsciiControlCharacter(value)) return "";
++  if (DATA_IMAGE_URL.test(value)) return value;
++  if (value.length > 8192) return "";
++  try {
++    const url = new URL(value);
++    if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username !== "" || url.password !== "") return "";
++    return url.href;
++  } catch {
++    return "";
++  }
++}
++
++/** Keep a workspace path and the original image URL. History items often have only `image_url`. */
++export function historyImage(entry: RecordValue): RecordValue | undefined {
++  const path = bounded(text(entry["path"]), 4096);
++  const imageUrl = entry["image_url"];
++  const rawUrl = typeof imageUrl === "string" ? imageUrl : isObject(imageUrl) ? text(imageUrl["url"]) : text(entry["url"]);
++  const url = safeImageUrl(rawUrl);
++  if (path === "" && url === "") return undefined;
++  const image: RecordValue = {};
++  if (path !== "") image["path"] = path;
++  if (url !== "") image["url"] = url;
++  return image;
++}
++
++export function historyImages(entries: RecordValue[]): RecordValue[] {
++  const images: RecordValue[] = [];
++  for (const entry of entries) {
++    const image = historyImage(entry);
++    if (image === undefined) continue;
++    images.push(image);
++  }
++  return images;
++}
++
++function hasAsciiControlCharacter(value: string): boolean {
++  for (let index = 0; index < value.length; index += 1) {
++    const code = value.charCodeAt(index);
++    if (code <= 31 || code === 127) return true;
++  }
++  return false;
++}
 diff --git a/pi-web-plugins/codex/server/server-plugin.ts b/pi-web-plugins/codex/server/server-plugin.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..eba8e32d3745d2f14afbd86fb26bd2493ab8f1f4
@@ -5655,34 +6105,132 @@ index 0000000000000000000000000000000000000000..eba8e32d3745d2f14afbd86fb26bd249
 +  },
 +};
 +export default plugin;
+diff --git a/pi-web-plugins/files/FilesViewer.test.ts b/pi-web-plugins/files/FilesViewer.test.ts
+index 9de1f32dc3360d40748b10fa4b8151351a75d382..17c87d05284cd9cc13689775799cef19e6778a72 100644
+--- a/pi-web-plugins/files/FilesViewer.test.ts
++++ b/pi-web-plugins/files/FilesViewer.test.ts
+@@ -19,6 +19,31 @@ afterEach(() => {
+ });
+ 
+ describe("workspace-file-viewer", () => {
++  it.each([false, true])("renders math in Markdown preview with content rendering %s", async (withCapability) => {
++    const source = String.raw`Inline $x_1^2$ and \(y^2\).
++
++$$\frac{1}{2}$$
++
++\[\sum_{i=1}^n i\]
++
++` + "\n`$literal$`\n\n```tex\n$x$\n```";
++    const viewer = await mountViewer(textFile("math.md", source, { mediaType: "markdown" }), {
++      ...(withCapability ? { contentRendering: createContentRenderingCapability(() => []) } : {}),
++    });
++    modeButton(viewer, "Preview").click();
++    await viewer.updateComplete;
++    const boundary = viewer.renderRoot.querySelector<HTMLElement & { updateComplete: Promise<boolean> }>("pi-web-content-rendering-boundary");
++    if (boundary) await boundary.updateComplete;
++    expect(viewer.renderRoot.querySelectorAll("math")).toHaveLength(4);
++    expect(viewer.renderRoot.querySelectorAll('math[display="block"]')).toHaveLength(2);
++    expect(viewer.renderRoot.querySelector("mfrac")).not.toBeNull();
++    expect(viewer.renderRoot.querySelector("pre code")?.textContent).toContain("$x$");
++    modeButton(viewer, "Raw").click();
++    await viewer.updateComplete;
++    expect(viewer.renderRoot.querySelector("math")).toBeNull();
++    expect(viewer.renderRoot.querySelector<HTMLElement & { content: string }>("pi-web-files-code-viewer")?.content).toBe(source);
++  });
++
+   it.each(["fresh", "saved", "url"] as const)("honors %s Markdown preview intent for manual fences while preserving block controls", async (preference) => {
+     const alpha = vi.fn(() => html`<b>Alpha</b>`);
+     const beta = vi.fn(() => html`<b>Beta</b>`);
 diff --git a/pi-web-plugins/files/workspaceMarkdown.ts b/pi-web-plugins/files/workspaceMarkdown.ts
-index 42e25cf03fb70e5a5384908b3d5e4d83251cb132..c22d6e4c089031aabd9d195a071bdf1e1e2dd9de 100644
+index 42e25cf03fb70e5a5384908b3d5e4d83251cb132..bda3647ffbdd7e129633ba313d1c2a80523172ce 100644
 --- a/pi-web-plugins/files/workspaceMarkdown.ts
 +++ b/pi-web-plugins/files/workspaceMarkdown.ts
-@@ -1,5 +1,7 @@
- import { marked } from "marked";
+@@ -1,12 +1,7 @@
+-import { marked } from "marked";
++import katex from "katex";
++import { Marked, type TokenizerExtension } from "marked";
  
+-const renderer = new marked.Renderer();
+-
+-// Workspace file bytes are untrusted. Raw HTML must remain visible as text,
+-// never become nodes that the application can execute or load resources from.
+-renderer.html = ({ text }) => escapeHtml(text);
+-renderer.image = ({ text }) => escapeHtml(text === "" ? "[Image omitted]" : `[Image omitted: ${text}]`);
+-renderer.checkbox = ({ checked }) => checked ? "[x] " : "[ ] ";
 +type FileLinkResolver = (href: string) => { readonly path: string; readonly line: number | undefined } | undefined;
-+
- const renderer = new marked.Renderer();
  
- // Workspace file bytes are untrusted. Raw HTML must remain visible as text,
-@@ -46,21 +48,21 @@ const SAFE_TABLE_ALIGNMENTS = new Set(["left", "center", "right"]);
+ const NO_ATTRIBUTES = new Set<string>();
+ 
+@@ -45,22 +40,69 @@ const SAFE_LINK_PROTOCOLS = new Set(["http:", "https:", "mailto:"]);
+ const SAFE_TABLE_ALIGNMENTS = new Set(["left", "center", "right"]);
  const TABLE_SCROLL_CLASS = "table-scroll";
  
- /** Render untrusted workspace Markdown through the dedicated allowlist policy. */
+-/** Render untrusted workspace Markdown through the dedicated allowlist policy. */
 -export function renderWorkspaceMarkdownHtml(markdown: string): string {
+-  const generated = marked.parse(markdown, {
+-    async: false,
+-    breaks: true,
+-    gfm: true,
+-    renderer,
++/** Recognize math before Markdown can consume its backslashes or underscores. */
 +export function renderWorkspaceMarkdownHtml(markdown: string, resolveFileLink?: FileLinkResolver): string {
-   const generated = marked.parse(markdown, {
-     async: false,
-     breaks: true,
-     gfm: true,
-     renderer,
++  const formulas = new Map<string, { formula: string; display: boolean }>();
++  // getRandomValues is also available on HTTP origins, unlike randomUUID.
++  const nonce = Array.from(crypto.getRandomValues(new Uint32Array(4)), (part) => part.toString(16).padStart(8, "0")).join("");
++  const prefix = `codex-math-${nonce}-`;
++  const extension = (display: boolean): TokenizerExtension => ({
++    name: display ? "displayMath" : "inlineMath",
++    level: display ? "block" : "inline",
++    start: (source) => {
++      const match = display ? /\$\$|\\\[/u.exec(source) : /\\[([]|(?<!\\)\$/u.exec(source);
++      return match?.index;
++    },
++    tokenizer(source) {
++      const match = display
++        ? /^(?:\$\$([\s\S]+?)\$\$|\\\[([\s\S]+?)\\\])(?:\n|$)?/u.exec(source)
++        : /^(?:\\\(([^\n]+?)\\\)|\$(?!\$)([^\s$](?:[^\n$]*?[^\s$])?)\$(?![\d$])|\$\$([\s\S]+?)\$\$|\\\[([\s\S]+?)\\\])/u.exec(source);
++      if (!match) return undefined;
++      const key = `${prefix}${String(formulas.size)}`;
++      formulas.set(key, { formula: match[1] ?? match[2] ?? match[3] ?? match[4] ?? "", display: display || match[3] !== undefined || match[4] !== undefined });
++      return { type: display ? "displayMath" : "inlineMath", raw: match[0], text: key };
++    },
++  });
++  const parser = new Marked({
++    breaks: true, gfm: true,
++    renderer: {
++      html: ({ text }) => escapeHtml(text),
++      image: ({ text }) => escapeHtml(text === "" ? "[Image omitted]" : `[Image omitted: ${text}]`),
++      checkbox: ({ checked }) => checked ? "[x] " : "[ ] ",
++    },
++    extensions: [true, false].map((display) => ({
++      ...extension(display),
++      renderer: (token) => `<code>${typeof token["text"] === "string" ? token["text"] : ""}</code>`,
++    })),
    });
 -  return sanitizeWorkspaceMarkdownHtml(generated);
-+  return sanitizeWorkspaceMarkdownHtml(generated, resolveFileLink);
++  const template = document.createElement("template");
++  template.innerHTML = sanitizeWorkspaceMarkdownHtml(parser.parse(markdown, { async: false }), resolveFileLink);
++  // Only renderer-generated placeholders can introduce KaTeX output. Untrusted
++  // Markdown is sanitized first; raw HTML cannot bypass the workspace policy.
++  for (const code of template.content.querySelectorAll("code")) {
++    const formula = formulas.get(code.textContent);
++    if (!formula) continue;
++    try {
++      const rendered = document.createElement("template");
++      rendered.innerHTML = katex.renderToString(formula.formula, {
++        displayMode: formula.display, output: "mathml", trust: false,
++        throwOnError: true, maxExpand: 1000, maxSize: 20,
++      });
++      code.replaceWith(rendered.content);
++    } catch {
++      // Incomplete streaming formulas and unsupported commands stay readable.
++      code.textContent = formula.formula;
++    }
++  }
++  return template.innerHTML;
  }
  
++
  /**
   * Sanitize HTML generated from workspace Markdown. This seam is exported so
   * the element, attribute, and URL policy can be contract-tested directly.
@@ -5692,7 +6240,7 @@ index 42e25cf03fb70e5a5384908b3d5e4d83251cb132..c22d6e4c089031aabd9d195a071bdf1e
    const template = document.createElement("template");
    template.innerHTML = generatedHtml;
  
-@@ -72,6 +74,7 @@ export function sanitizeWorkspaceMarkdownHtml(generatedHtml: string): string {
+@@ -72,6 +114,7 @@ export function sanitizeWorkspaceMarkdownHtml(generatedHtml: string): string {
        continue;
      }
  
@@ -5700,7 +6248,7 @@ index 42e25cf03fb70e5a5384908b3d5e4d83251cb132..c22d6e4c089031aabd9d195a071bdf1e
      for (const attribute of [...element.attributes]) {
        const name = attribute.name.toLowerCase();
        if (!allowedAttributes.has(name) || !isAllowedAttributeValue(tag, name, attribute.value)) {
-@@ -79,7 +82,17 @@ export function sanitizeWorkspaceMarkdownHtml(generatedHtml: string): string {
+@@ -79,7 +122,17 @@ export function sanitizeWorkspaceMarkdownHtml(generatedHtml: string): string {
        }
      }
  

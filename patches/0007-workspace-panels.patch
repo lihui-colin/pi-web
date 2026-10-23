@@ -1,5 +1,5 @@
 diff --git a/pi-web-plugins/files/FilesPanel.ts b/pi-web-plugins/files/FilesPanel.ts
-index 66184062b11effbd6cd6606b98134f342c2c9526..62516121ce5cf86bf73da2ffaec4e9df6eeace60 100644
+index 66184062b11effbd6cd6606b98134f342c2c9526..41d1f3f18abcc745a3ca314fddadd7246a1e8153 100644
 --- a/pi-web-plugins/files/FilesPanel.ts
 +++ b/pi-web-plugins/files/FilesPanel.ts
 @@ -1,5 +1,6 @@
@@ -30,17 +30,17 @@ index 66184062b11effbd6cd6606b98134f342c2c9526..62516121ce5cf86bf73da2ffaec4e9df
 -    .split { flex: 1 1 auto; min-height: 0; display: grid; grid-template-rows: minmax(160px, 34%) minmax(0, 1fr); }
 -    .list { border-bottom: 1px solid var(--pi-border); }
 +    ${unsafeCSS(verticalSplitStyles())}
-+    .split { flex: 1 1 auto; min-height: 0; display: grid; grid-template-rows: minmax(0, 34fr) 4px minmax(0, 66fr); }
-+    .list { min-height: 0; overflow: auto; border-bottom: 1px solid var(--pi-border); }
++    .split { flex: 1 1 auto; min-height: 0; display: grid; }
++    .list { min-height: 0; overflow: auto; }
      .viewer { min-height: 0; overflow: auto; display: flex; flex-direction: column; }
      pi-web-files-viewer { flex: 1 1 auto; min-height: 0; }
      p { margin: 10px; }
 diff --git a/pi-web-plugins/files/verticalSplit.test.ts b/pi-web-plugins/files/verticalSplit.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..485db7596dc062c7f857c051b35163a0a60a4beb
+index 0000000000000000000000000000000000000000..b349afa63a2a8b5ebea728b4c54928c0a06784b0
 --- /dev/null
 +++ b/pi-web-plugins/files/verticalSplit.test.ts
-@@ -0,0 +1,59 @@
+@@ -0,0 +1,64 @@
 +// @vitest-environment happy-dom
 +import { html, render } from "lit";
 +import { afterEach, expect, it, vi } from "vitest";
@@ -75,15 +75,15 @@ index 0000000000000000000000000000000000000000..485db7596dc062c7f857c051b35163a0
 +
 +it("resizes only the captured pointer and releases it on cancellation", () => {
 +  const { container, handle } = mount();
-+  vi.spyOn(container, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 100, 400, 404));
++  vi.spyOn(container, "getBoundingClientRect").mockReturnValue(new DOMRect(0, 100, 400, 402));
 +  let captured: number | undefined;
 +  handle.setPointerCapture = (id) => { captured = id; };
 +  handle.hasPointerCapture = (id) => captured === id;
 +  handle.releasePointerCapture = () => { captured = undefined; };
 +  handle.dispatchEvent(new PointerEvent("pointerdown", { pointerId: 1, button: 0, isPrimary: true }));
-+  handle.dispatchEvent(new PointerEvent("pointermove", { pointerId: 2, clientY: 302 }));
++  handle.dispatchEvent(new PointerEvent("pointermove", { pointerId: 2, clientY: 301 }));
 +  expect(verticalSplitRatio("files")).toBe(34);
-+  handle.dispatchEvent(new PointerEvent("pointermove", { pointerId: 1, clientY: 302 }));
++  handle.dispatchEvent(new PointerEvent("pointermove", { pointerId: 1, clientY: 301 }));
 +  expect(handle.getAttribute("aria-valuenow")).toBe("50");
 +  handle.dispatchEvent(new PointerEvent("pointercancel", { pointerId: 1 }));
 +  handle.dispatchEvent(new PointerEvent("pointermove", { pointerId: 1, clientY: 500 }));
@@ -100,37 +100,44 @@ index 0000000000000000000000000000000000000000..485db7596dc062c7f857c051b35163a0
 +  handle.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp" }));
 +  expect(handle.getAttribute("aria-valuenow")).toBe("32");
 +});
++
++it.each(["", " ", "NaN", "Infinity"])("ignores invalid saved ratio %j", (value) => {
++  localStorage.setItem("files", value);
++  expect(verticalSplitRatio("files")).toBe(34);
++});
 diff --git a/pi-web-plugins/files/verticalSplit.ts b/pi-web-plugins/files/verticalSplit.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..41721c3d1596e165e9aaa868f6239dc220fcf288
+index 0000000000000000000000000000000000000000..e9e1f252ad578db5e491d1674dcabba5a97c6b29
 --- /dev/null
 +++ b/pi-web-plugins/files/verticalSplit.ts
-@@ -0,0 +1,67 @@
+@@ -0,0 +1,71 @@
 +import type { HtmlTemplateTag } from "@jmfederico/pi-web/plugin-api";
 +
 +const minimum = 10;
 +const maximum = 90;
++const defaultRatio = 34;
++const handleSize = 8;
++const splitRows = (ratio: number): string => `minmax(0, ${String(ratio)}fr) ${String(handleSize)}px minmax(0, ${String(100 - ratio)}fr)`;
 +
-+export function verticalSplitRatio(key: string, fallback = 34): number {
++export function verticalSplitRatio(key: string): number {
 +  try {
 +    const value = localStorage.getItem(key);
-+    const ratio = value === null ? NaN : Number(value);
++    const ratio = value === null || value.trim() === "" ? NaN : Number(value);
 +    if (Number.isFinite(ratio)) return Math.max(minimum, Math.min(maximum, ratio));
 +  } catch { /* Storage is optional in restricted browsers. */ }
-+  return fallback;
++  return defaultRatio;
 +}
 +
-+export function verticalSplitStyle(key: string, fallback = 34): string {
-+  const ratio = verticalSplitRatio(key, fallback);
-+  return `grid-template-rows:minmax(0, ${String(ratio)}fr) 4px minmax(0, ${String(100 - ratio)}fr)`;
++export function verticalSplitStyle(key: string): string {
++  return `grid-template-rows:${splitRows(verticalSplitRatio(key))}`;
 +}
 +
-+export function renderVerticalSplit(html: HtmlTemplateTag, key: string, label: string, fallback = 34) {
++export function renderVerticalSplit(html: HtmlTemplateTag, key: string, label: string) {
 +  const update = (handle: HTMLElement, value: number): void => {
 +    const ratio = Math.max(minimum, Math.min(maximum, value));
 +    const split = handle.parentElement;
 +    if (split === null) return;
-+    split.style.gridTemplateRows = `minmax(0, ${String(ratio)}fr) 4px minmax(0, ${String(100 - ratio)}fr)`;
++    split.style.gridTemplateRows = splitRows(ratio);
 +    handle.setAttribute("aria-valuenow", String(Math.round(ratio)));
 +    try { localStorage.setItem(key, String(ratio)); } catch { /* Resizing still works without storage. */ }
 +  };
@@ -138,8 +145,8 @@ index 0000000000000000000000000000000000000000..41721c3d1596e165e9aaa868f6239dc2
 +    const handle = event.currentTarget;
 +    if (!(handle instanceof HTMLElement) || !handle.hasPointerCapture(event.pointerId)) return;
 +    const bounds = handle.parentElement?.getBoundingClientRect();
-+    if (bounds === undefined || bounds.height <= 4) return;
-+    update(handle, (event.clientY - bounds.top - 2) / (bounds.height - 4) * 100);
++    if (bounds === undefined || bounds.height <= handleSize) return;
++    update(handle, (event.clientY - bounds.top - handleSize / 2) / (bounds.height - handleSize) * 100);
 +  };
 +  const release = (event: PointerEvent): void => {
 +    const handle = event.currentTarget;
@@ -147,7 +154,7 @@ index 0000000000000000000000000000000000000000..41721c3d1596e165e9aaa868f6239dc2
 +  };
 +  return html`<div class="vertical-split-handle" role="separator" tabindex="0"
 +    aria-label=${label} aria-orientation="horizontal" aria-valuemin=${minimum} aria-valuemax=${maximum}
-+    aria-valuenow=${Math.round(verticalSplitRatio(key, fallback))}
++    aria-valuenow=${Math.round(verticalSplitRatio(key))}
 +    title="Drag to resize. Double-click to reset."
 +    @pointerdown=${(event: PointerEvent) => {
 +      if (event.button !== 0 || !event.isPrimary || !(event.currentTarget instanceof HTMLElement)) return;
@@ -155,7 +162,7 @@ index 0000000000000000000000000000000000000000..41721c3d1596e165e9aaa868f6239dc2
 +      event.currentTarget.focus();
 +      event.currentTarget.setPointerCapture(event.pointerId);
 +    }} @pointermove=${move} @pointerup=${release} @pointercancel=${release}
-+    @dblclick=${(event: MouseEvent) => { if (event.currentTarget instanceof HTMLElement) update(event.currentTarget, fallback); }}
++    @dblclick=${(event: MouseEvent) => { if (event.currentTarget instanceof HTMLElement) update(event.currentTarget, defaultRatio); }}
 +    @keydown=${(event: KeyboardEvent) => {
 +      const handle = event.currentTarget;
 +      if (!(handle instanceof HTMLElement)) return;
@@ -170,11 +177,13 @@ index 0000000000000000000000000000000000000000..41721c3d1596e165e9aaa868f6239dc2
 +}
 +
 +export const verticalSplitStyles = (scope = "") => `
-+  ${scope}.vertical-split-handle { min-height: 0; cursor: row-resize; touch-action: none; user-select: none; background: var(--pi-border-muted); }
-+  ${scope}.vertical-split-handle:hover, ${scope}.vertical-split-handle:focus-visible { background: var(--pi-accent); outline: none; }
++  ${scope}.vertical-split-handle { position: relative; box-sizing: border-box; height: ${String(handleSize)}px; min-height: 0; cursor: row-resize; touch-action: none; user-select: none; background: var(--pi-bg); border-block: 1px solid var(--pi-border-muted); }
++  ${scope}.vertical-split-handle::after { content: ""; position: absolute; top: 50%; left: 50%; width: 2px; height: 2px; border-radius: 50%; background: var(--pi-muted); box-shadow: -4px 0 0 var(--pi-muted), 4px 0 0 var(--pi-muted); transform: translate(-50%, -50%); opacity: .55; pointer-events: none; }
++  ${scope}.vertical-split-handle:hover, ${scope}.vertical-split-handle:focus-visible { background: var(--pi-surface-hover); outline: none; }
++  ${scope}.vertical-split-handle:hover::after, ${scope}.vertical-split-handle:focus-visible::after { background: var(--pi-accent); box-shadow: -4px 0 0 var(--pi-accent), 4px 0 0 var(--pi-accent); opacity: 1; }
 +`;
 diff --git a/pi-web-plugins/git/browser/git-panel.ts b/pi-web-plugins/git/browser/git-panel.ts
-index 3afbc0500fe5c17e24390458a436392cd2db94d7..bdb65462fb334e03c144048a0488673560ab29eb 100644
+index 3afbc0500fe5c17e24390458a436392cd2db94d7..7a96cebcfd2cb9440754d6fe6f02acb32ff570d7 100644
 --- a/pi-web-plugins/git/browser/git-panel.ts
 +++ b/pi-web-plugins/git/browser/git-panel.ts
 @@ -1,3 +1,4 @@
@@ -201,15 +210,17 @@ index 3afbc0500fe5c17e24390458a436392cd2db94d7..bdb65462fb334e03c144048a04886735
    .git-panel { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; overflow: hidden; color: var(--pi-text); background: var(--pi-bg); font: 13px system-ui, sans-serif; }
    .git-panel ${activityElementTag} { display: none; }
    .git-panel small, .git-panel .git-muted { color: var(--pi-muted); }
-@@ -734,7 +737,7 @@ const gitPanelStyles = `
+@@ -734,8 +737,8 @@ const gitPanelStyles = `
    .git-panel .git-toolbar .ui-button[aria-pressed="true"] { background: var(--pi-surface-hover); color: var(--pi-text); }
    .git-panel .git-stale { border: 1px solid var(--pi-warning-border); border-radius: 999px; color: var(--pi-warning); padding: 1px 6px; font-size: 12px; align-self: center; }
    .git-panel .git-error { flex: 0 0 auto; margin: 8px; border: 1px solid var(--pi-danger); border-radius: 7px; color: var(--pi-danger); padding: 8px; }
 -  .git-panel .git-split { flex: 1 1 auto; min-height: 0; display: grid; grid-template-rows: minmax(160px, 34%) minmax(0, 1fr); }
-+  .git-panel .git-split { flex: 1 1 auto; min-height: 0; display: grid; grid-template-rows: minmax(0, 34fr) 4px minmax(0, 66fr); }
-   .git-panel .git-file-list { border-bottom: 1px solid var(--pi-border); }
+-  .git-panel .git-file-list { border-bottom: 1px solid var(--pi-border); }
++  .git-panel .git-split { flex: 1 1 auto; min-height: 0; display: grid; }
++  .git-panel .git-file-list { border-bottom: 0; }
    .git-panel .git-summary { margin: 10px 12px 8px; color: var(--pi-muted); }
    .git-panel .submodule-badge { display: inline-block; margin-left: 6px; border: 1px solid var(--pi-border); border-radius: 999px; color: var(--pi-muted); padding: 0 5px; font-size: 11px; font-weight: 400; vertical-align: baseline; }
+   .git-panel .git-viewer { min-height: 0; overflow: auto; display: flex; flex-direction: column; }
 diff --git a/pi-web-plugins/git/browser/verticalSplit.ts b/pi-web-plugins/git/browser/verticalSplit.ts
 new file mode 120000
 index 0000000000000000000000000000000000000000..d0734f8b99dd4f8b28178b355fe6b6f3d8c21d56
@@ -218,3 +229,29 @@ index 0000000000000000000000000000000000000000..d0734f8b99dd4f8b28178b355fe6b6f3
 @@ -0,0 +1 @@
 +../../files/verticalSplit.ts
 \ No newline at end of file
+diff --git a/src/client/src/components/ProjectDialog.ts b/src/client/src/components/ProjectDialog.ts
+index 5b6a1e37511b458cef2c755e0706b6737c9414ba..01e32f09598b9216f941066c2991f110d36b1235 100644
+--- a/src/client/src/components/ProjectDialog.ts
++++ b/src/client/src/components/ProjectDialog.ts
+@@ -183,6 +183,7 @@ export class ProjectDialog extends LitElement {
+             Project folder
+             <input class="ui-input" aria-describedby=${this.suggestionError ? "project-machine-help project-folder-error" : "project-machine-help project-folder-status"} .value=${this.path} @input=${(event: InputEvent) => { this.onPathInput(event); }} placeholder="/path/to/project or ~/code/project" />
+           </label>
++          ${this.path ? html`<small class="path-preview">${this.path}</small>` : null}
+           ${this.suggestionError ? html`
+             <div id="project-folder-error" class="trust-error ui-form-error" role="alert">Could not load folders on this machine. Check the connection and retry, or enter a folder path.</div>
+             <button class="ui-button" type="button" @click=${() => { void this.loadSuggestions(); }}>Retry folder lookup</button>
+@@ -213,8 +214,11 @@ export class ProjectDialog extends LitElement {
+ 
+   static override styles = [uiDialogStyles, uiFormStyles, uiSelectionStyles, css`
+     :host { --ui-dialog-max-height: 700px; --ui-input-font-family: var(--pi-control-monospace-font-family, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace); }
+-    .suggestions { min-height: 90px; max-height: 320px; }
+-    .suggestions button { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
++    .suggestions { flex: 0 1 auto; min-height: 72px; max-height: 280px; }
++    .suggestions button, .path-preview { white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
++    .suggestions button { min-height: 36px; padding: 7px 12px; text-align: left; line-height: 1.4; }
++    @media (pointer: coarse) { .suggestions button { min-height: 44px; } }
++    .path-preview { display: block; min-width: 0; color: var(--pi-muted); }
+     .hint { padding: 12px; color: var(--pi-muted); }
+     .trust-error { color: var(--pi-danger, #c0392b); }
+     .trust-hint, .machine-hint { color: var(--pi-muted); line-height: 1.3; }

@@ -1,0 +1,1396 @@
+diff --git a/pi-web-plugins/terminal/TerminalPanel.clipboard.test.ts b/pi-web-plugins/terminal/TerminalPanel.clipboard.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..c9834f3364bee9c20165f529dd03f6f9b1403891
+--- /dev/null
++++ b/pi-web-plugins/terminal/TerminalPanel.clipboard.test.ts
+@@ -0,0 +1,161 @@
++// @vitest-environment happy-dom
++
++import { Terminal } from "@xterm/xterm";
++import { afterEach, describe, expect, it, vi } from "vitest";
++import * as clipboard from "./clipboard";
++import { TerminalPanel } from "./TerminalPanel";
++import { TerminalClipboardRequests } from "./terminalClipboard";
++
++if (!customElements.get("terminal-clipboard-test")) customElements.define("terminal-clipboard-test", TerminalPanel);
++
++afterEach(() => {
++  document.body.replaceChildren();
++  localStorage.clear();
++  vi.useRealTimers();
++  vi.restoreAllMocks();
++});
++
++async function fixture() {
++  const panel = document.createElement("terminal-clipboard-test");
++  if (!(panel instanceof TerminalPanel)) throw new Error("Expected terminal panel");
++  document.body.append(panel);
++  await panel.updateComplete;
++  const terminal = new Terminal({ cols: 80, rows: 24 });
++  Reflect.set(panel, "visible", true);
++  Reflect.set(panel, "terminal", terminal);
++  Reflect.set(panel, "terminalClipboard", new TerminalClipboardRequests(terminal.parser));
++  Reflect.set(panel, "selectedId", "terminal-1");
++  Reflect.set(panel, "channelGeneration", 1);
++  const write = (data: string, replay = false) => {
++    const handle: unknown = Reflect.get(panel, "handleChannelFrame");
++    if (typeof handle !== "function") throw new Error("Expected terminal frame handler");
++    Reflect.apply(handle, panel, [ 1, { type: "output", data, replay, ...(replay ? { replayComplete: true } : {}) }, "terminal-1", terminal]);
++  };
++  const parsed = async () => {
++    const finished = new Promise<void>((resolve) => { terminal.write("", resolve); });
++    if (vi.isFakeTimers()) await vi.advanceTimersByTimeAsync(0);
++    await finished;
++  };
++  return { panel, terminal, write, parsed };
++}
++
++function osc52(text: string, ending = "\u0007"): string {
++  return `\u001b]52;c;${Buffer.from(text).toString("base64")}${ending}`;
++}
++
++describe("Terminal OSC 52 clipboard", () => {
++  it.each(["\u0007", "\u001b\\"])("copies split UTF-8 output using the browser clipboard (terminator=%j)", async (ending) => {
++    const copy = vi.spyOn(clipboard, "writeClipboardText").mockResolvedValue(true);
++    const { panel, write, parsed } = await fixture();
++    const text = "选中的文本 😀\nsecond line";
++    for (const character of osc52(text, ending)) write(character);
++    await parsed();
++    await panel.updateComplete;
++    expect(copy).toHaveBeenCalledExactlyOnceWith(text);
++    expect(panel.shadowRoot?.querySelector('[role="status"]')?.textContent).toBe("Copied");
++  });
++
++  it("ignores replayed copies even with a live copy already queued for parsing", async () => {
++    const copy = vi.spyOn(clipboard, "writeClipboardText").mockResolvedValue(true);
++    const { write, parsed } = await fixture();
++    write(osc52("old clipboard"), true);
++    write("ordinary live output");
++    write(osc52("new clipboard"));
++    await parsed();
++    expect(copy).toHaveBeenCalledExactlyOnceWith("new clipboard");
++  });
++
++  it("ignores clipboard reads, unsupported targets, empty, invalid and oversized writes", async () => {
++    const copy = vi.spyOn(clipboard, "writeClipboardText").mockResolvedValue(true);
++    const { terminal, write, parsed } = await fixture();
++    const input = vi.fn();
++    terminal.onData(input);
++    for (const data of ["c;?", "p;aGVsbG8=", "c;", "c;!!!", "c;/w==", "c;" + "YQ==".repeat(262_145)]) {
++      write(`\u001b]52;${data}\u0007`);
++    }
++    await parsed();
++    expect(copy).not.toHaveBeenCalled();
++    expect(input).not.toHaveBeenCalled();
++  });
++
++  it.each([false, true])("offers a working explicit copy button after browser failure (throws=%s)", async (throws) => {
++    vi.useFakeTimers();
++    const copy = vi.spyOn(clipboard, "writeClipboardText");
++    if (throws) copy.mockRejectedValueOnce(new Error("NotAllowedError"));
++    else copy.mockResolvedValueOnce(false);
++    copy.mockResolvedValueOnce(true);
++    const { panel, write, parsed } = await fixture();
++    write(osc52("retain for retry"));
++    await parsed();
++    await vi.advanceTimersByTimeAsync(5000);
++    await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelector('[role="status"]')?.textContent).toBe("Automatic copy was blocked.");
++    const retry = [...(panel.shadowRoot?.querySelectorAll("button") ?? [])].find((button) => button.textContent === "Copy to clipboard");
++    expect(retry).toBeDefined();
++    if (retry === undefined) throw new Error("Expected copy retry button");
++    retry.click();
++    await panel.updateComplete;
++    await panel.updateComplete;
++    expect(copy).toHaveBeenNthCalledWith(2, "retain for retry");
++    expect(panel.shadowRoot?.querySelector('[role="status"]')?.textContent).toBe("Copied");
++  });
++
++  it("shows Copied only after success and gives each new copy a full two seconds", async () => {
++    vi.useFakeTimers();
++    let finishFirst!: (value: boolean) => void;
++    let finishSecond!: (value: boolean) => void;
++    vi.spyOn(clipboard, "writeClipboardText")
++      .mockReturnValueOnce(new Promise<boolean>((resolve) => { finishFirst = resolve; }))
++      .mockReturnValueOnce(new Promise<boolean>((resolve) => { finishSecond = resolve; }));
++    const { panel, write, parsed } = await fixture();
++    const status = () => panel.shadowRoot?.querySelector('[role="status"]')?.textContent;
++    write(osc52("first selection"));
++    await parsed();
++    await panel.updateComplete;
++    expect(status()).toBeUndefined();
++
++    finishFirst(true);
++    await vi.advanceTimersByTimeAsync(0);
++    await panel.updateComplete;
++    expect(status()).toBe("Copied");
++    await vi.advanceTimersByTimeAsync(1000);
++
++    write(osc52("second selection"));
++    await parsed();
++    await panel.updateComplete;
++    expect(status()).toBeUndefined();
++    // The previous toast's deadline must not discard a pending copy's result.
++    await vi.advanceTimersByTimeAsync(2000);
++    finishSecond(true);
++    await vi.advanceTimersByTimeAsync(0);
++    await panel.updateComplete;
++    expect(status()).toBe("Copied");
++    await vi.advanceTimersByTimeAsync(1999);
++    await panel.updateComplete;
++    expect(status()).toBe("Copied");
++    await vi.advanceTimersByTimeAsync(1);
++    await panel.updateComplete;
++    expect(status()).toBeUndefined();
++  });
++
++  it("does not copy queued output belonging to a replaced channel", async () => {
++    const copy = vi.spyOn(clipboard, "writeClipboardText").mockResolvedValue(true);
++    const { panel, write, parsed } = await fixture();
++    write(osc52("stale"));
++    Reflect.set(panel, "channelGeneration", 2);
++    await parsed();
++    expect(copy).not.toHaveBeenCalled();
++  });
++
++  it("does not restore a copy notice after its terminal is disposed", async () => {
++    let finish!: (value: boolean) => void;
++    vi.spyOn(clipboard, "writeClipboardText").mockReturnValue(new Promise<boolean>((resolve) => { finish = resolve; }));
++    const { panel, write, parsed } = await fixture();
++    write(osc52("late completion"));
++    await parsed();
++    panel.remove();
++    finish(true);
++    await Promise.resolve();
++    expect(Reflect.get(panel, "clipboardRequest")).toBeUndefined();
++  });
++});
+diff --git a/pi-web-plugins/terminal/TerminalPanel.test.ts b/pi-web-plugins/terminal/TerminalPanel.test.ts
+index 96757345ffe2ac714d2fab6b2bb415ae75415b6e..8245596738a201cc22797e9316f7f8d28d5570e2 100644
+--- a/pi-web-plugins/terminal/TerminalPanel.test.ts
++++ b/pi-web-plugins/terminal/TerminalPanel.test.ts
+@@ -800,6 +800,91 @@ describe("Terminal panel lifecycle", () => {
+     panel.disconnectedCallback();
+   });
+ 
++  it.each([false, true])("requests a TUI redraw and restores size without input (disconnect early=%s)", async (disconnectEarly) => {
++    vi.useFakeTimers();
++    const panel = createTerminalPanel();
++    const channel = { closed: new Promise<never>(() => undefined), send: vi.fn(), close: vi.fn() };
++    const openChannel = vi.fn(() => Promise.resolve(channel));
++    const context = terminalContext({ peer: terminalPeer(vi.fn(() => Promise.resolve([])), openChannel) });
++    const terminal = { dispose: vi.fn(), resize: vi.fn() };
++    const fit = vi.fn();
++    Reflect.set(panel, "selectedId", "terminal-1");
++    Reflect.set(panel, "terminal", terminal);
++    Reflect.set(panel, "fitAddon", { proposeDimensions: () => ({ cols: 80, rows: 24 }), fit });
++
++    callPanelMethod(panel, "connectChannel", context, "terminal-1", terminal, { cols: 80, rows: 24 });
++    await vi.waitFor(() => { expect(channel.send).toHaveBeenCalledOnce(); });
++    expect(openChannel).toHaveBeenCalledWith("terminal.attach", {
++      terminalId: "terminal-1", cols: 80, rows: 24,
++    }, expect.any(Object));
++    expect(channel.send).toHaveBeenNthCalledWith(1, { type: "resize", cols: 81, rows: 24 });
++    expect(terminal.resize).toHaveBeenCalledWith(81, 24);
++    fit.mockClear();
++    // ResizeObserver and the initial animation frame must not undo the pulse early.
++    callPanelMethod(panel, "fitAndNotify");
++    expect(channel.send).toHaveBeenCalledTimes(1);
++    expect(fit).not.toHaveBeenCalled();
++    if (disconnectEarly) panel.disconnectedCallback();
++    await vi.advanceTimersByTimeAsync(100);
++    expect(channel.send).toHaveBeenNthCalledWith(2, { type: "resize", cols: 80, rows: 24 });
++    expect(channel.send).toHaveBeenCalledTimes(2);
++    panel.disconnectedCallback();
++  });
++
++  it("waits for asynchronous replay parsing before resizing both ends, then fits the latest layout", async () => {
++    vi.useFakeTimers();
++    const panel = createTerminalPanel();
++    const channel = { closed: new Promise<never>(() => undefined), send: vi.fn(), close: vi.fn() };
++    const completions: (() => void)[] = [];
++    const terminal = {
++      dispose: vi.fn(), resize: vi.fn(),
++      write: vi.fn((_data: string, complete?: () => void) => { if (complete) completions.push(complete); }),
++    };
++    const openChannel = vi.fn((_operation: string, _params: JsonValue, options: PluginPeerChannelOptions) => {
++      options.onData({ type: "output", data: "history", replay: true, replayComplete: true });
++      return Promise.resolve(channel);
++    });
++    const context = terminalContext({ peer: terminalPeer(vi.fn(() => Promise.resolve([])), openChannel) });
++    let dimensions = { cols: 80, rows: 24 };
++    Reflect.set(panel, "selectedId", "terminal-1");
++    Reflect.set(panel, "terminal", terminal);
++    Reflect.set(panel, "fitAddon", { proposeDimensions: () => dimensions, fit: vi.fn() });
++
++    callPanelMethod(panel, "connectChannel", context, "terminal-1", terminal, dimensions);
++    await vi.advanceTimersByTimeAsync(500);
++    expect(channel.send).not.toHaveBeenCalled();
++    completions[0]?.();
++    expect(terminal.resize).toHaveBeenCalledWith(81, 24);
++    expect(channel.send).toHaveBeenCalledWith({ type: "resize", cols: 81, rows: 24 });
++    dimensions = { cols: 95, rows: 30 };
++    callPanelMethod(panel, "fitAndNotify");
++    await vi.advanceTimersByTimeAsync(100);
++    expect(channel.send).toHaveBeenLastCalledWith({ type: "resize", cols: 95, rows: 30 });
++    expect(channel.send).toHaveBeenCalledTimes(2);
++    panel.disconnectedCallback();
++  });
++
++  it("does not restore an obsolete size through a channel opened after switching workspace", async () => {
++    const panel = createTerminalPanel();
++    const channel = { closed: new Promise<never>(() => undefined), send: vi.fn(), close: vi.fn() };
++    const opening = deferred<typeof channel>();
++    const openChannel = vi.fn(() => opening.promise);
++    const context = terminalContext({ peer: terminalPeer(vi.fn(() => Promise.resolve([])), openChannel) });
++    const terminal = { dispose: vi.fn() };
++    Reflect.set(panel, "selectedId", "terminal-1");
++    Reflect.set(panel, "terminal", terminal);
++    Reflect.set(panel, "fitAddon", { proposeDimensions: () => ({ cols: 80, rows: 24 }), fit: vi.fn() });
++    callPanelMethod(panel, "connectChannel", context, "terminal-1", terminal, { cols: 80, rows: 24 });
++
++    panel.context = terminalContext();
++    panel.runtime = new TerminalBrowserRuntime(new InMemoryTerminalSelectionMemory());
++    callPanelMethod(panel, "willUpdate");
++    opening.resolve(channel);
++    await vi.waitFor(() => { expect(channel.close).toHaveBeenCalledWith("Terminal view changed"); });
++    expect(channel.send).not.toHaveBeenCalled();
++    panel.disconnectedCallback();
++  });
++
+   it("clears a stale connection error after a successful reattach", async () => {
+     const panel = createTerminalPanel();
+     const channel = { closed: new Promise<never>(() => undefined), send: vi.fn(), close: vi.fn() };
+@@ -917,7 +1002,7 @@ describe("Terminal panel lifecycle", () => {
+     callPanelMethod(panel, "handleChannelFrame", 0, { type: "error", message: "pty failed" }, "terminal-1", terminal);
+     callPanelMethod(panel, "handleChannelFrame", 0, { type: "exit", exitCode: 7 }, "terminal-1", terminal);
+ 
+-    expect(terminal.write).toHaveBeenCalledWith("hello");
++    expect(terminal.write).toHaveBeenCalledWith("hello", expect.any(Function));
+     expect(terminal.writeln).toHaveBeenCalledWith(expect.stringContaining("pty failed"));
+     expect(terminal.writeln).toHaveBeenCalledWith(expect.stringContaining("code 7"));
+     expect(Reflect.get(panel, "terminals")).toEqual([expect.objectContaining({ id: "terminal-1", exited: true, exitCode: 7 })]);
+diff --git a/pi-web-plugins/terminal/TerminalPanel.ts b/pi-web-plugins/terminal/TerminalPanel.ts
+index c318dd233ea43e3a2e0b2d7457dfe08de6e42ff6..75bfacd133587e1a650dc217a6db103b0e8f14fe 100644
+--- a/pi-web-plugins/terminal/TerminalPanel.ts
++++ b/pi-web-plugins/terminal/TerminalPanel.ts
+@@ -7,6 +7,9 @@ import { FitAddon, type ITerminalDimensions } from "@xterm/addon-fit";
+ import xtermStyles from "@xterm/xterm/css/xterm.css?inline";
+ import type { PluginPeerChannel, PluginPeerChannelClose, TerminalCommandRun, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
+ import { writeClipboardText } from "./clipboard";
++import { attachTerminalIosInput } from "./terminalIosInput";
++import { attachTerminalTouchScroll } from "./terminalTouchScroll";
++import { TerminalClipboardRequests } from "./terminalClipboard";
+ import { selectFallbackTerminal, selectPreferredTerminal } from "./terminalSelection";
+ import { TerminalPeerClient, terminalChannelFailureMessage, terminalInputFrames, type TerminalClientFrame, type TerminalInfo, type TerminalServerFrame, type TerminalSize } from "./terminalProtocol";
+ import { createTerminalCopySnapshot, DEFAULT_TERMINAL_ANSI_THEME, type TerminalCopyRunStyle, type TerminalCopySnapshot } from "./terminalCopySnapshot";
+@@ -23,6 +26,8 @@ const TERMINAL_OPTIONS_BASE: ITerminalOptions = {
+ 
+ const DEFAULT_TERMINAL_SIZE: TerminalSize = { cols: 100, rows: 30 };
+ const COMMAND_RUN_POLL_INTERVAL_MS = 1000;
++// Allow debounced TUI renderers to observe the temporary width before restoring it.
++const TERMINAL_REDRAW_DELAY_MS = 100;
+ const CHANNEL_RECONNECT_DELAYS_MS = [250, 500, 1_000, 2_000, 5_000] as const;
+ const WORKSPACE_LOAD_RETRY_DELAYS_MS = [1_000, 2_000, 5_000] as const;
+ 
+@@ -62,7 +67,12 @@ export class TerminalPanel extends LitElement {
+   @state() private copySnapshot: TerminalCopySnapshot | undefined;
+   @state() private copyStatus: string | undefined;
+ 
++  @state() private clipboardRequest: { text: string; status: "copying" | "copied" | "blocked" } | undefined;
++  private clipboardNoticeTimer: ReturnType<typeof setTimeout> | undefined;
++  private terminalClipboard: TerminalClipboardRequests | undefined;
+   private terminal: Terminal | undefined;
++  private disposeIosInput: (() => void) | undefined;
++  private disposeTouchScroll: (() => void) | undefined;
+   private fitAddon: FitAddon | undefined;
+   private channel: PluginPeerChannel | undefined;
+   private channelAbort: AbortController | undefined;
+@@ -78,6 +88,7 @@ export class TerminalPanel extends LitElement {
+   private readonly operationAborts = new Set<AbortController>();
+   private workspaceGeneration = 0;
+   private terminalNavigationGeneration = 0;
++  private terminalRedrawTimer: number | undefined;
+   private resizeObserver: ResizeObserver | undefined;
+   private intersectionObserver: IntersectionObserver | undefined;
+   private themeObserver: MutationObserver | undefined;
+@@ -589,6 +600,9 @@ export class TerminalPanel extends LitElement {
+     terminal.loadAddon(fitAddon);
+     terminal.open(terminalHost);
+     this.terminal = terminal;
++    this.disposeIosInput = attachTerminalIosInput(terminal, navigator);
++    this.disposeTouchScroll = attachTerminalTouchScroll(terminalHost, () => terminal.modes.mouseTrackingMode !== "none");
++    this.terminalClipboard = new TerminalClipboardRequests(terminal.parser);
+     this.fitAddon = fitAddon;
+     if (typeof ResizeObserver !== "undefined") {
+       this.resizeObserver = new ResizeObserver(() => { this.fitAndNotify(); });
+@@ -636,7 +650,7 @@ export class TerminalPanel extends LitElement {
+       for (const frame of bufferedFrames) this.handleChannelFrame(generation, frame, terminalId, terminal);
+       this.channelReconnectAttempt = 0;
+       this.connectionError = undefined;
+-      this.fitAndNotify();
++      this.requestTerminalRedraw();
+       void channel.closed.then((close) => { this.handleChannelClosed(generation, terminalId, terminal, close); });
+     }).catch((error: unknown) => {
+       if (controller.signal.aborted || !this.channelIsCurrent(generation, terminalId, terminal)) return;
+@@ -715,7 +729,7 @@ export class TerminalPanel extends LitElement {
+     frame: Extract<TerminalServerFrame, { type: "output" }>,
+   ): void {
+     if (!frame.replay) {
+-      terminal.write(frame.data);
++      this.writeTerminalClipboardOutput(generation, terminalId, terminal, frame);
+       return;
+     }
+     let suppression = this.replayInputSuppression;
+@@ -725,15 +739,93 @@ export class TerminalPanel extends LitElement {
+       suppression = { generation, terminalId, terminal };
+       this.replayInputSuppression = suppression;
+     }
+-    terminal.write(frame.data, frame.replayComplete ? () => {
++    this.writeTerminalClipboardOutput(generation, terminalId, terminal, frame, frame.replayComplete ? () => {
+       if (this.replayInputSuppression === suppression
+         && this.channelIsCurrent(generation, terminalId, terminal)) {
+         this.replayInputSuppression = undefined;
++        this.requestTerminalRedraw();
+       }
+     } : undefined);
+   }
+ 
++  private writeTerminalClipboardOutput(
++    generation: number,
++    terminalId: string,
++    terminal: Terminal,
++    frame: Extract<TerminalServerFrame, { type: "output" }>,
++    complete?: () => void,
++  ): void {
++    const clipboard = this.terminalClipboard;
++    terminal.write(frame.data, () => {
++      // Xterm parses asynchronously. Drain at each write boundary so replayed
++      // OSC 52 requests cannot be mistaken for a later live copy request.
++      const text = clipboard?.takeText();
++      if (!frame.replay && text !== undefined && this.channelIsCurrent(generation, terminalId, terminal)) {
++        void this.copyTerminalText(text);
++      }
++      complete?.();
++    });
++  }
++
++  private async copyTerminalText(text: string): Promise<void> {
++    this.dismissClipboardNotice();
++    const request = { text, status: "copying" as const };
++    this.clipboardRequest = request;
++    let copied = false;
++    try {
++      copied = await writeClipboardText(text);
++    } catch {
++      // Browser permissions and activation rules vary. Keep the text for an
++      // explicit click, which can also use the existing HTTP clipboard fallback.
++    }
++    if (this.clipboardRequest !== request) return;
++    this.clipboardRequest = { text, status: copied ? "copied" : "blocked" };
++    if (copied) {
++      this.clipboardNoticeTimer = setTimeout(() => { this.dismissClipboardNotice(); }, 2000);
++    }
++  }
++
++  private dismissClipboardNotice(): void {
++    if (this.clipboardNoticeTimer !== undefined) clearTimeout(this.clipboardNoticeTimer);
++    this.clipboardNoticeTimer = undefined;
++    this.clipboardRequest = undefined;
++  }
++
++  private renderClipboardNotice() {
++    const request = this.clipboardRequest;
++    if (request === undefined || request.status === "copying") return null;
++    return html`<div class=${`terminal-clipboard-notice ${request.status}`}>
++      <span role="status">${request.status === "copied" ? "Copied" : "Automatic copy was blocked."}</span>
++      ${request.status === "blocked" ? html`
++        <button @click=${() => { void this.copyTerminalText(request.text); }}>Copy to clipboard</button>
++        <button aria-label="Dismiss clipboard status" @click=${() => { this.dismissClipboardNotice(); }}>×</button>
++      ` : null}
++    </div>`;
++  }
++
++  private requestTerminalRedraw(): void {
++    // Xterm parses replay asynchronously; redraw only after its final write.
++    if (this.replayInputSuppression !== undefined) return;
++    const size = this.fitTerminal();
++    if (size === undefined) return;
++    // Bounded history is not a full screen snapshot for incremental TUIs. A
++    // same-size resize does not notify the PTY, so briefly change its width.
++    if (this.terminalRedrawTimer !== undefined) window.clearTimeout(this.terminalRedrawTimer);
++    this.terminalRedrawTimer = undefined;
++    if (!this.send({ type: "resize", cols: size.cols + 1, rows: size.rows })) return;
++    // Keep Xterm and the PTY at the same width while receiving the redraw.
++    this.terminal?.resize(size.cols + 1, size.rows);
++    const terminal = this.terminal;
++    const generation = this.channelGeneration;
++    this.terminalRedrawTimer = window.setTimeout(() => {
++      this.terminalRedrawTimer = undefined;
++      if (terminal !== this.terminal || generation !== this.channelGeneration) return;
++      this.fitAndNotify();
++    }, TERMINAL_REDRAW_DELAY_MS);
++  }
++
+   private fitAndNotify(): void {
++    if (this.terminalRedrawTimer !== undefined) return;
+     const size = this.fitTerminal();
+     if (size === undefined) return;
+     this.send({ type: "resize", ...size });
+@@ -805,6 +897,12 @@ export class TerminalPanel extends LitElement {
+   }
+ 
+   private disposeTerminalView(): void {
++    if (this.terminalRedrawTimer !== undefined) {
++      window.clearTimeout(this.terminalRedrawTimer);
++      this.terminalRedrawTimer = undefined;
++      // Do not leave the old workspace at the temporary width on a fast switch.
++      this.fitAndNotify();
++    }
+     this.channelGeneration += 1;
+     if (this.channelReconnectTimer !== undefined) window.clearTimeout(this.channelReconnectTimer);
+     this.channelReconnectTimer = undefined;
+@@ -816,6 +914,13 @@ export class TerminalPanel extends LitElement {
+     this.resizeObserver?.disconnect();
+     this.resizeObserver = undefined;
+     this.replayInputSuppression = undefined;
++    this.terminalClipboard?.dispose();
++    this.terminalClipboard = undefined;
++    this.dismissClipboardNotice();
++    this.disposeIosInput?.();
++    this.disposeIosInput = undefined;
++    this.disposeTouchScroll?.();
++    this.disposeTouchScroll = undefined;
+     this.terminal?.dispose();
+     this.terminal = undefined;
+     this.fitAddon = undefined;
+@@ -1063,6 +1168,7 @@ export class TerminalPanel extends LitElement {
+         <div class="terminal-stage">
+           <div class=${this.copySnapshot === undefined ? "terminal-host" : "terminal-host copying"} ?inert=${this.copySnapshot !== undefined}></div>
+           ${this.renderCopyMode()}
++          ${this.renderClipboardNotice()}
+         </div>
+       </section>
+     `;
+@@ -1108,6 +1214,9 @@ export class TerminalPanel extends LitElement {
+     .command-run-notice code { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--pi-text-secondary); font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+     .command-run-notice kbd { border: 1px solid var(--pi-border); border-radius: 4px; background: var(--pi-bg); padding: 0 4px; font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+     .command-run-notice button { justify-self: end; max-width: none; }
++    .terminal-clipboard-notice { position: absolute; bottom: 12px; left: 50%; transform: translateX(-50%); z-index: 20; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; box-sizing: border-box; width: max-content; max-width: calc(100% - 24px); padding: 8px 12px; border: 1px solid var(--pi-border); border-radius: 8px; background: var(--pi-surface); color: var(--pi-text); box-shadow: 0 4px 16px #0003; font: 12px system-ui, sans-serif; }
++    .terminal-clipboard-notice.copied { pointer-events: none; border-color: var(--pi-success-border); }
++    .terminal-clipboard-notice > span { min-width: 0; overflow-wrap: anywhere; }
+     .terminal-stage { position: relative; flex: 1 1 auto; min-height: 0; overflow: hidden; background: var(--pi-terminal-bg); }
+     .terminal-host { position: absolute; inset: 0; padding: 6px; box-sizing: border-box; overflow: hidden; }
+     .terminal-host.copying { visibility: hidden; pointer-events: none; }
+diff --git a/pi-web-plugins/terminal/clipboard.ts b/pi-web-plugins/terminal/clipboard.ts
+index 1feccb2619ea487d438384ed8411ae6755c7b8d7..ec16a725c9c628128d5415a1c6a77825e292cd29 100644
+--- a/pi-web-plugins/terminal/clipboard.ts
++++ b/pi-web-plugins/terminal/clipboard.ts
+@@ -32,14 +32,17 @@ function browserIsSecureContext(): boolean {
+ }
+ 
+ function browserClipboardWriteText(): ((text: string) => Promise<void>) | undefined {
+-  if (typeof navigator === "undefined" || !("clipboard" in navigator)) return undefined;
+-  return navigator.clipboard.writeText.bind(navigator.clipboard);
++  const clipboard = typeof navigator === "undefined" ? undefined : navigator.clipboard;
++  if (typeof clipboard?.writeText !== "function") return undefined;
++  return clipboard.writeText.bind(clipboard);
+ }
+ 
+ function writeClipboardTextWithSelectionFallback(text: string): boolean {
+   if (typeof document === "undefined") return false;
+ 
+-  const activeElement = document.activeElement;
++  // document.activeElement is only the outer host for editors in shadow DOM.
++  let activeElement = document.activeElement;
++  while (activeElement?.shadowRoot?.activeElement) activeElement = activeElement.shadowRoot.activeElement;
+   const selection = document.getSelection();
+   const selectedRanges = selection === null ? [] : selectionRanges(selection);
+   const textarea = document.createElement("textarea");
+@@ -57,7 +60,7 @@ function writeClipboardTextWithSelectionFallback(text: string): boolean {
+   textarea.style.pointerEvents = "none";
+ 
+   document.body.append(textarea);
+-  textarea.focus();
++  textarea.focus({ preventScroll: true });
+   textarea.select();
+   textarea.setSelectionRange(0, textarea.value.length);
+ 
+diff --git a/pi-web-plugins/terminal/package.test.ts b/pi-web-plugins/terminal/package.test.ts
+index d898c46d91678daeee2fc9b07be41814aa9972d3..4a8962b7a5d87c81bc0f7b630cd7b4046b62c329 100644
+--- a/pi-web-plugins/terminal/package.test.ts
++++ b/pi-web-plugins/terminal/package.test.ts
+@@ -79,6 +79,7 @@ describe("bundled Terminal package", () => {
+       "browser/pi-web-plugin.js",
+       "package.json",
+       "server-plugin.js",
++      "terminalReplayBuffer.js",
+       "terminalService.js",
+     ]);
+     const browserSource = await readFile(join(packageRoot, "browser", "pi-web-plugin.js"), "utf8");
+diff --git a/pi-web-plugins/terminal/server/terminalReplayBuffer.test.ts b/pi-web-plugins/terminal/server/terminalReplayBuffer.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..ce6225727eb93f9b93a5104e4f38de592b63045e
+--- /dev/null
++++ b/pi-web-plugins/terminal/server/terminalReplayBuffer.test.ts
+@@ -0,0 +1,121 @@
++import { Terminal } from "@xterm/xterm";
++import { afterEach, describe, expect, it } from "vitest";
++import { TerminalReplayBuffer } from "./terminalReplayBuffer";
++
++const ESC = "\u001b";
++const codexModes = `${ESC}[?1049h${ESC}[?1003h${ESC}[?1006h${ESC}[?1004h${ESC}[?2004h`;
++const terminals: Terminal[] = [];
++afterEach(() => { for (const terminal of terminals.splice(0)) terminal.dispose(); });
++
++async function terminalFor(data: string): Promise<Terminal> {
++  const terminal = new Terminal({ allowProposedApi: true, cols: 80, rows: 24 });
++  terminals.push(terminal);
++  await new Promise<void>((resolve) => { terminal.write(data, resolve); });
++  return terminal;
++}
++
++async function expectSameModes(source: string, replay: string): Promise<void> {
++  const [live, restored] = await Promise.all([terminalFor(source), terminalFor(replay)]);
++  expect(restored.modes).toEqual(live.modes);
++  expect(restored.buffer.active.type).toBe(live.buffer.active.type);
++}
++
++describe("terminal replay modes", () => {
++  it("leaves complete, untrimmed output unchanged", () => {
++    const replay = new TerminalReplayBuffer();
++    const source = `${codexModes}hello\r\n`;
++    for (const character of source) replay.append(character);
++    expect(replay.value).toBe(source);
++  });
++
++  it("preserves Codex mouse input and alternate screen after the 200k history limit", async () => {
++    const replay = new TerminalReplayBuffer();
++    const source = codexModes + "x".repeat(210_000);
++    replay.append(source);
++    expect(replay.value.length).toBeLessThan(201_000);
++    expect(replay.value).toContain(`${ESC}[?1006h`);
++    const restored = await terminalFor(replay.value);
++    expect(restored.buffer.active.type).toBe("alternate");
++    expect(restored.modes).toMatchObject({ mouseTrackingMode: "any", bracketedPasteMode: true, sendFocusMode: true });
++    await expectSameModes(source, replay.value);
++  });
++
++  it.each([
++    `${ESC}[?1003;1006;1049;2004h`,
++    `${ESC}[?1003h${ESC}[?1000h`,
++    `${ESC}[?1003h${ESC}[?1000l`,
++    `${ESC}[?1049h${ESC}[?47l`,
++    `${codexModes}${ESC}[?1003;1006;1049;2004l`,
++    `${codexModes}${ESC}c`,
++    `${codexModes}${ESC}[!p`,
++    `${ESC}[?1;6;45h${ESC}[?7l${ESC}[4h${ESC}=`,
++    `${ESC}=${ESC}>${ESC}[?1002h`,
++    `${ESC}[04h`,
++    `${ESC}[;4h`,
++    `${ESC}[4h${ESC}[;4;l`,
++    `${ESC}[?;1003;;2004h`,
++    `${ESC}[4h${ESC}[004l`,
++    `\u009b?1003h\u009b?2004h`,
++  ])("matches Xterm mode transitions after eviction: %j", async (setup) => {
++    const replay = new TerminalReplayBuffer(64);
++    const source = setup + "x".repeat(100);
++    for (const character of source) replay.append(character);
++    await expectSameModes(source, replay.value);
++  });
++
++  it("restores the state at the retained boundary, then replays later mode changes", async () => {
++    const source = codexModes + "x".repeat(100) + `${ESC}[?1003;2004l`;
++    const replay = new TerminalReplayBuffer(64);
++    replay.append(source);
++    expect(replay.value).toContain(`${ESC}[?1003h`);
++    expect(replay.value.endsWith(`${ESC}[?1003;2004l`)).toBe(true);
++    await expectSameModes(source, replay.value);
++  });
++
++  it.each([1, 2, 3, 4, 5, 6, 7, 8])("does not start midway through a mode sequence (cut=%i)", async (cut) => {
++    const source = `${ESC}[?1003h` + "x".repeat(64);
++    const replay = new TerminalReplayBuffer(source.length - cut);
++    replay.append(source);
++    expect(replay.value).not.toMatch(/^(?:\[|\?|1003|003|03|3|h)/u);
++    await expectSameModes(source, replay.value);
++  });
++
++  it("handles discarded sequences completed in a later output chunk", async () => {
++    const replay = new TerminalReplayBuffer(16);
++    replay.append("x".repeat(16) + `${ESC}[?1003`);
++    replay.append("h" + "y".repeat(32));
++    await expectSameModes(`${ESC}[?1003h`, replay.value);
++  });
++
++  it.each([`${ESC}]0;`, `${ESC}Pq`, `${ESC}_`, "\u009d0;"])("skips discarded control-string payloads: %j", async (start) => {
++    const replay = new TerminalReplayBuffer(64);
++    replay.append(codexModes + start + "?1003l".repeat(1000));
++    expect(replay.value.length).toBeLessThan(256);
++    replay.append(`${ESC}\\visible`);
++    expect(replay.value).not.toContain("?1003l");
++    expect(replay.value.endsWith("visible")).toBe(true);
++    await expectSameModes(codexModes, replay.value);
++  });
++
++  it("accepts BEL-terminated OSC and cancelled control strings", async () => {
++    const replay = new TerminalReplayBuffer(32);
++    replay.append(codexModes + `${ESC}]0;` + "x".repeat(100));
++    replay.append(`\u0007${ESC}Pq` + "x".repeat(100));
++    replay.append(`\u0018${ESC}[?1003l`);
++    await expectSameModes(codexModes + `${ESC}[?1003l`, replay.value);
++  });
++
++  it("keeps state storage bounded for unsupported modes and oversized CSI", async () => {
++    const replay = new TerminalReplayBuffer(32);
++    replay.append(codexModes + `${ESC}[?` + "1;".repeat(1000) + "1000h" + "x".repeat(64));
++    for (let mode = 3000; mode < 4000; mode += 1) replay.append(`${ESC}[?${String(mode)}h`);
++    expect(replay.value.length).toBeLessThan(256);
++    await expectSameModes(codexModes, replay.value);
++  });
++
++  it("does not leave half of a Unicode character at the replay boundary", () => {
++    const replay = new TerminalReplayBuffer(5);
++    replay.append("x😀abcd");
++    expect(replay.value).toBe("abcd");
++  });
++});
+diff --git a/pi-web-plugins/terminal/server/terminalReplayBuffer.ts b/pi-web-plugins/terminal/server/terminalReplayBuffer.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..7f43083c774b1e40c1ff41a052eeacd06daa131a
+--- /dev/null
++++ b/pi-web-plugins/terminal/server/terminalReplayBuffer.ts
+@@ -0,0 +1,133 @@
++const MAX_REPLAY_BUFFER = 200_000;
++const MAX_CSI_LENGTH = 128;
++const ESC = "\u001b";
++const MOUSE_PROTOCOLS = [9, 1000, 1002, 1003];
++const MOUSE_ENCODINGS = [1006, 1016];
++const ALTERNATE_BUFFERS = [47, 1047, 1049];
++const INDEPENDENT_MODES = new Set([1, 6, 7, 12, 25, 45, 66, 1004, 2004, 2026]);
++
++/** Bounded output plus the input/buffer modes at the start of retained output.
++ * TUIs enable mouse reporting once; dropping that setup makes reconnects lose
++ * wheel input even when a resize successfully redraws the screen.
++ */
++export class TerminalReplayBuffer {
++  private buffer = "";
++  private readonly modes = new ReplayModes();
++
++  constructor(private readonly limit = MAX_REPLAY_BUFFER) {
++    if (!Number.isSafeInteger(limit) || limit <= 0) throw new Error("Invalid terminal replay limit");
++  }
++
++  append(data: string): void {
++    this.buffer += data;
++    let cut = Math.max(0, this.buffer.length - this.limit);
++    for (let index = 0; index < cut; index += 1) this.modes.consume(this.buffer.charAt(index));
++    // Never begin a replay halfway through CSI/OSC/DCS or a surrogate pair.
++    // An unfinished discarded control string is completed by later appends.
++    while (cut < this.buffer.length && (!this.modes.atBoundary
++      || (cut > 0 && isHighSurrogate(this.buffer.charCodeAt(cut - 1)) && isLowSurrogate(this.buffer.charCodeAt(cut))))) {
++      this.modes.consume(this.buffer.charAt(cut));
++      cut += 1;
++    }
++    this.buffer = this.buffer.slice(cut);
++  }
++
++  get value(): string {
++    return this.modes.snapshot() + this.buffer;
++  }
++}
++
++/** Only tracks persistent modes, not screen cells or terminal query replies. */
++class ReplayModes {
++  private state: "text" | "escape" | "intermediate" | "csi" | "string" = "text";
++  private osc = false;
++  private csi = "";
++  private csiOverflow = false;
++  private readonly privateModes = new Map<number, boolean>();
++  private insert = false;
++
++  get atBoundary(): boolean { return this.state === "text"; }
++
++  snapshot(): string {
++    return [...this.privateModes].map(([mode, enabled]) => `${ESC}[?${String(mode)}${enabled ? "h" : "l"}`).join("")
++      + (this.insert ? `${ESC}[4h` : "");
++  }
++
++  consume(character: string): void {
++    if (character === "\u0018" || character === "\u001a" || character === "\u009c") {
++      this.state = "text";
++      return;
++    }
++    if (character === ESC) { this.state = "escape"; return; }
++    if (character === "\u009b") { this.startCsi(); return; }
++    if (["\u0090", "\u0098", "\u009d", "\u009e", "\u009f"].includes(character)) {
++      this.state = "string";
++      this.osc = character === "\u009d";
++      return;
++    }
++    if (this.state === "string") {
++      if (this.osc && character === "\u0007") this.state = "text";
++      return;
++    }
++    if (character < " ") return;
++    if (this.state === "escape") {
++      if (character === "[") { this.startCsi(); return; }
++      if (["]", "P", "X", "^", "_"].includes(character)) {
++        this.state = "string";
++        this.osc = character === "]";
++        return;
++      }
++      if (character === "c") { this.privateModes.clear(); this.insert = false; }
++      if (character === "=" || character === ">") this.privateModes.set(66, character === "=");
++      this.state = character >= " " && character <= "/" ? "intermediate" : "text";
++    } else if (this.state === "intermediate") {
++      if (character >= "0" && character <= "~") this.state = "text";
++    } else if (this.state === "csi") {
++      if (character >= "@" && character <= "~") {
++        if (!this.csiOverflow) this.applyCsi(character);
++        this.state = "text";
++      } else if (this.csi.length < MAX_CSI_LENGTH) {
++        this.csi += character;
++      } else {
++        this.csiOverflow = true;
++      }
++    }
++  }
++
++  private startCsi(): void {
++    this.state = "csi";
++    this.csi = "";
++    this.csiOverflow = false;
++  }
++
++  private applyCsi(final: string): void {
++    if (this.csi === "!" && final === "p") {
++      // DECSTR resets core modes but preserves the active buffer and mouse service.
++      for (const mode of INDEPENDENT_MODES) if (mode !== 12) this.privateModes.delete(mode);
++      this.insert = false;
++      return;
++    }
++    if (final !== "h" && final !== "l") return;
++    if (/^\d*(;\d*)*$/u.test(this.csi)) {
++      if (this.csi.split(";").some((parameter) => Number(parameter) === 4)) this.insert = final === "h";
++      return;
++    }
++    if (!/^\?\d*(;\d*)*$/u.test(this.csi)) return;
++    for (const parameter of this.csi.slice(1).split(";")) {
++      const mode = Number(parameter);
++      const enabled = final === "h";
++      const group = [MOUSE_PROTOCOLS, MOUSE_ENCODINGS, ALTERNATE_BUFFERS].find((modes) => modes.includes(mode));
++      if (group !== undefined) {
++        // These modes share one state in Xterm: enabling replaces the previous
++        // mode, and disabling any member resets the entire group.
++        for (const member of group) this.privateModes.delete(member);
++        if (enabled) this.privateModes.set(mode, true);
++      } else if (INDEPENDENT_MODES.has(mode)) {
++        this.privateModes.set(mode, enabled);
++      }
++    }
++  }
++}
++
++function isHighSurrogate(value: number): boolean { return value >= 0xd800 && value <= 0xdbff; }
++function isLowSurrogate(value: number): boolean { return value >= 0xdc00 && value <= 0xdfff; }
+diff --git a/pi-web-plugins/terminal/server/terminalService.ts b/pi-web-plugins/terminal/server/terminalService.ts
+index 28017ea7ef9a504573f89547bef53c3464264ee2..54da0c799312cb009536e6ed6ffaae7d7bb9ccd0 100644
+--- a/pi-web-plugins/terminal/server/terminalService.ts
++++ b/pi-web-plugins/terminal/server/terminalService.ts
+@@ -2,8 +2,7 @@ import { randomUUID } from "node:crypto";
+ import { EventEmitter } from "node:events";
+ import * as pty from "node-pty";
+ import type { ServerPluginNoticeInput } from "@jmfederico/pi-web/server-plugin-api";
+-
+-const MAX_REPLAY_BUFFER = 200_000;
++import { TerminalReplayBuffer } from "./terminalReplayBuffer.js";
+ 
+ export type TerminalCommandRunStatus = "queued" | "running" | "succeeded" | "failed";
+ 
+@@ -76,7 +75,7 @@ export interface TerminalActivitySink {
+ 
+ interface TerminalRecord extends TerminalInfo, TerminalWorkspaceScope {
+   pty: pty.IPty;
+-  buffer: string;
++  buffer: TerminalReplayBuffer;
+   events: EventEmitter;
+   commandRunId?: string;
+   failureNotice?: TerminalCommandFailureNotice;
+@@ -207,7 +206,8 @@ export class TerminalService {
+     handlers: { output(data: string, replay: boolean): void; exit(exitCode: number | undefined): void; closed?(): void },
+   ): () => void {
+     const terminal = this.requireScoped(scope, id);
+-    if (terminal.buffer !== "") handlers.output(terminal.buffer, true);
++    const replay = terminal.buffer.value;
++    if (replay !== "") handlers.output(replay, true);
+     if (terminal.exited) handlers.exit(terminal.exitCode);
+     const onOutput = (data: string): void => { handlers.output(data, false); };
+     const onExit = (exitCode: number | undefined): void => { handlers.exit(exitCode); };
+@@ -244,7 +244,7 @@ export class TerminalService {
+     delete record.commandRunId;
+     record.exited = false;
+     const marker = "\r\n[continued in interactive shell]\r\n";
+-    record.buffer = trimReplayBuffer(record.buffer + marker);
++    record.buffer.append(marker);
+     record.events.emit("output", marker);
+     const shell = process.env["SHELL"] ?? "/bin/bash";
+     record.pty = pty.spawn(shell, interactiveShellArgs(shell), {
+@@ -304,7 +304,7 @@ export class TerminalService {
+       createdAt,
+       exited: false,
+       pty: terminal,
+-      buffer: "",
++      buffer: new TerminalReplayBuffer(),
+       events: new EventEmitter(),
+       ...(options.commandRunId === undefined ? {} : { commandRunId: options.commandRunId }),
+       ...(options.failureNotice === undefined ? {} : { failureNotice: options.failureNotice }),
+@@ -318,7 +318,7 @@ export class TerminalService {
+ 
+   private attachPtyEvents(record: TerminalRecord): void {
+     record.pty.onData((data) => {
+-      record.buffer = trimReplayBuffer(record.buffer + data);
++      record.buffer.append(data);
+       record.events.emit("output", data);
+     });
+     record.pty.onExit(({ exitCode }) => {
+@@ -404,11 +404,6 @@ function toInfo(record: TerminalRecord): TerminalInfo {
+   };
+ }
+ 
+-function trimReplayBuffer(buffer: string): string {
+-  if (buffer.length <= MAX_REPLAY_BUFFER) return buffer;
+-  return buffer.slice(buffer.length - MAX_REPLAY_BUFFER);
+-}
+-
+ export function interactiveShellArgs(shell: string): string[] {
+   const executable = shell.split(/[\\/]/).at(-1)?.toLowerCase().replace(/^-/, "").replace(/\.exe$/, "");
+   // Preserve the existing invocation for arbitrary SHELL values rather than guessing at an unsupported login flag.
+diff --git a/pi-web-plugins/terminal/terminalClipboard.ts b/pi-web-plugins/terminal/terminalClipboard.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..839cbd4e9d7542a1de627d3e1a334b13e2940573
+--- /dev/null
++++ b/pi-web-plugins/terminal/terminalClipboard.ts
+@@ -0,0 +1,41 @@
++import type { IDisposable, IParser } from "@xterm/xterm";
++
++/** Collect requests during parsing; the output callback decides whether they are live or replayed. */
++export class TerminalClipboardRequests {
++  private text: string | undefined;
++  private readonly handler: IDisposable;
++
++  constructor(parser: IParser) {
++    this.handler = parser.registerOscHandler(52, (data) => {
++      const text = decodeClipboardRequest(data);
++      if (text !== undefined) this.text = text;
++      return true;
++    });
++  }
++
++  takeText(): string | undefined {
++    const text = this.text;
++    this.text = undefined;
++    return text;
++  }
++
++  dispose(): void {
++    this.handler.dispose();
++    this.text = undefined;
++  }
++}
++
++function decodeClipboardRequest(data: string): string | undefined {
++  const separator = data.indexOf(";");
++  if (separator < 0 || !/^[cs]*$/u.test(data.slice(0, separator))) return undefined;
++  const payload = data.slice(separator + 1);
++  // Only clipboard writes: never answer queries with the user's clipboard contents.
++  // Bound allocation before decoding, and ignore empty requests rather than clearing the clipboard.
++  if (payload === "" || payload === "?" || payload.length > 1_048_576) return undefined;
++  try {
++    const bytes = Uint8Array.from(atob(payload), (character) => character.charCodeAt(0));
++    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
++  } catch {
++    return undefined;
++  }
++}
+diff --git a/pi-web-plugins/terminal/terminalIosInput.test.ts b/pi-web-plugins/terminal/terminalIosInput.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..ddbf8809ed6f566a67c381b57651383870eb4837
+--- /dev/null
++++ b/pi-web-plugins/terminal/terminalIosInput.test.ts
+@@ -0,0 +1,140 @@
++// @vitest-environment happy-dom
++import { Terminal } from "@xterm/xterm";
++import { afterEach, describe, expect, it } from "vitest";
++import { attachTerminalIosInput } from "./terminalIosInput";
++
++const cleanups: (() => void)[] = [];
++afterEach(() => {
++  for (const cleanup of cleanups.splice(0)) cleanup();
++  document.body.replaceChildren();
++});
++
++function setup(platform = { userAgent: "iPhone", platform: "iPhone", maxTouchPoints: 5 }, patched = true) {
++  const host = document.createElement("div");
++  document.body.append(host);
++  const terminal = new Terminal();
++  terminal.open(host);
++  const textarea = terminal.textarea;
++  if (!textarea) throw new Error("Missing xterm textarea");
++  const dispose = patched ? attachTerminalIosInput(terminal, platform) : () => undefined;
++  cleanups.push(() => { dispose(); terminal.dispose(); });
++  const data: string[] = [];
++  terminal.onData((value) => { data.push(value); });
++  const key = (type: string, keyCode: number, value = "Unidentified") => {
++    textarea.dispatchEvent(new KeyboardEvent(type, { key: value, keyCode, bubbles: true, cancelable: true, composed: true }));
++  };
++  const edit = (inputType: string, value: string | null, cancelable = true) => {
++    const event = new InputEvent("beforeinput", { inputType, data: value, bubbles: true, composed: true, cancelable });
++    textarea.dispatchEvent(event);
++    if (!event.defaultPrevented) {
++      textarea.value += value ?? "";
++      textarea.dispatchEvent(new InputEvent("input", { inputType, data: value, bubbles: true, composed: true }));
++    }
++  };
++  return { terminal, textarea, data, key, edit, dispose };
++}
++
++const tick = () => new Promise<void>((resolve) => { setTimeout(resolve, 10); });
++
++describe("iOS terminal native input", () => {
++  it("reproduces the xterm 6 delayed native edit loss", async () => {
++    const { data, key, edit } = setup(undefined, false);
++    key("keydown", 229);
++    await tick();
++    edit("insertText", "a");
++    key("keyup", 0);
++    await tick();
++    expect(data).toEqual([]);
++  });
++
++  it.each([true, false])("sends delayed native edits once (cancelable=%s)", async (cancelable) => {
++    const { data, key, edit } = setup();
++    for (const text of ["a", " ", "，", "🙂"]) {
++      key("keydown", 229);
++      await tick();
++      edit("insertText", text, cancelable);
++      key("keyup", 0);
++    }
++    await tick();
++    expect(data).toEqual(["a", " ", "，", "🙂"]);
++  });
++
++  it("sends fast consecutive edits once and respects disabled input", async () => {
++    const { terminal, data, key, edit } = setup();
++    key("keydown", 229);
++    edit("insertText", "a");
++    key("keyup", 0);
++    key("keydown", 229);
++    edit("insertText", "b");
++    key("keyup", 0);
++    await tick();
++    expect(data).toEqual(["a", "b"]);
++    terminal.options.disableStdin = true;
++    edit("insertText", "blocked");
++    expect(data).toEqual(["a", "b"]);
++  });
++
++  it("handles keyCode zero and input-only return and delete", () => {
++    const { data, key, edit } = setup();
++    key("keydown", 0);
++    edit("insertText", "x");
++    key("keyup", 0);
++    edit("deleteContentBackward", null);
++    edit("insertLineBreak", null);
++    expect(data).toEqual(["x", "\x7f", "\r"]);
++  });
++
++  it("does not duplicate hardware enter or keypress text", () => {
++    const { data, key, edit } = setup();
++    key("keydown", 13, "Enter");
++    edit("insertLineBreak", null);
++    key("keyup", 13, "Enter");
++    key("keydown", 65, "A");
++    key("keypress", 65, "A");
++    edit("insertText", "A");
++    key("keyup", 65, "A");
++    expect(data).toEqual(["\r", "A"]);
++  });
++
++  it("leaves Chinese composition to xterm and sends its commit once", async () => {
++    const { textarea, data, edit, key } = setup();
++    textarea.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
++    key("keydown", 229);
++    textarea.value = "你";
++    textarea.dispatchEvent(new CompositionEvent("compositionupdate", { data: "你", bubbles: true }));
++    textarea.dispatchEvent(new InputEvent("input", { inputType: "insertCompositionText", data: "你", isComposing: true, bubbles: true }));
++    expect(data).toEqual([]);
++    await tick();
++    textarea.dispatchEvent(new CompositionEvent("compositionend", { data: "你", bubbles: true }));
++    textarea.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "你", bubbles: true, composed: true }));
++    key("keyup", 229);
++    await tick();
++    edit("insertText", "。");
++    expect(data).toEqual(["你", "。"]);
++  });
++
++  it("does not attach on Android, desktop, or after disposal", async () => {
++    for (const platform of [
++      { userAgent: "Android", platform: "Linux", maxTouchPoints: 5 },
++      { userAgent: "Macintosh", platform: "MacIntel", maxTouchPoints: 0 },
++    ]) {
++      const { data, key, edit } = setup(platform);
++      key("keydown", 229);
++      await tick();
++      edit("insertText", "x");
++      expect(data).toEqual([]);
++    }
++    const { data, key, edit, dispose } = setup();
++    dispose();
++    key("keydown", 229);
++    await tick();
++    edit("insertText", "x");
++    expect(data).toEqual([]);
++  });
++
++  it("supports iPad desktop user agents", () => {
++    const { data, edit } = setup({ userAgent: "Macintosh", platform: "MacIntel", maxTouchPoints: 5 });
++    edit("deleteContentBackward", null);
++    expect(data).toEqual(["\x7f"]);
++  });
++});
+diff --git a/pi-web-plugins/terminal/terminalIosInput.ts b/pi-web-plugins/terminal/terminalIosInput.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..596464ca4bbd79355dc2a36207ab31b02f6f4b64
+--- /dev/null
++++ b/pi-web-plugins/terminal/terminalIosInput.ts
+@@ -0,0 +1,86 @@
++import type { Terminal } from "@xterm/xterm";
++
++/** xterm 6 relies on keypress and a keydown-229 timer for text. iOS can
++ * deliver the textarea edit after that timer has run. Use native editing
++ * events for non-composition input; keep xterm's IME and hardware-key handling.
++ */
++export function attachTerminalIosInput(terminal: Terminal, navigator: Pick<Navigator, "userAgent" | "platform" | "maxTouchPoints">): () => void {
++  const ios = /iPad|iPhone|iPod/u.test(navigator.userAgent)
++    || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
++  const textarea = terminal.textarea;
++  const host = textarea?.parentElement;
++  if (!ios || !textarea || !host || terminal.options.screenReaderMode === true) return () => undefined;
++
++  let composing = false;
++  let finishing = false;
++  let keyboardHandled = false;
++  let finishTimer: ReturnType<typeof setTimeout> | undefined;
++  const keySubscription = terminal.onKey(() => { keyboardHandled = true; });
++  const keydown = (event: KeyboardEvent): void => {
++    if (event.target !== textarea) return;
++    keyboardHandled = false;
++    // Do not schedule xterm's textarea-diff timer: it races the native edit
++    // and would duplicate input handled below. Composition still belongs to xterm.
++    // eslint-disable-next-line @typescript-eslint/no-deprecated -- Match xterm 6's legacy IME dispatch boundary.
++    if (!composing && !finishing && event.keyCode === 229) event.stopPropagation();
++  };
++  const keyup = (): void => { keyboardHandled = false; };
++  const compositionStart = (): void => {
++    composing = true;
++    finishing = false;
++    keyboardHandled = false;
++    clearTimeout(finishTimer);
++  };
++  const compositionEnd = (): void => {
++    composing = false;
++    finishing = true;
++    // xterm reads the committed textarea in a timer. Leave the trailing input
++    // event and textarea intact until its composition handler has finished.
++    clearTimeout(finishTimer);
++    finishTimer = setTimeout(() => { finishing = false; }, 0);
++  };
++  const dataFor = (event: InputEvent): string | undefined => {
++    if (event.target !== textarea || composing || finishing || event.isComposing) return undefined;
++    switch (event.inputType) {
++      case "insertText": return event.data ?? undefined;
++      case "insertLineBreak":
++      case "insertParagraph": return "\r";
++      case "deleteContentBackward": return "\x7f";
++      default: return undefined;
++    }
++  };
++  const beforeInput = (event: InputEvent): void => {
++    const data = dataFor(event);
++    if (data === undefined || !event.cancelable) return;
++    // Keeping the helper unchanged also prevents stale text being resent.
++    event.preventDefault();
++    event.stopPropagation();
++    if (!keyboardHandled) terminal.input(data, true);
++    keyboardHandled = false;
++  };
++  const input = (event: InputEvent): void => {
++    const data = dataFor(event);
++    if (data === undefined) return;
++    // Non-cancelable beforeinput (or no beforeinput) still needs a fallback.
++    event.stopPropagation();
++    if (!keyboardHandled) terminal.input(data, true);
++    keyboardHandled = false;
++    textarea.value = "";
++  };
++  host.addEventListener("keydown", keydown, true);
++  host.addEventListener("keyup", keyup, true);
++  host.addEventListener("compositionstart", compositionStart, true);
++  host.addEventListener("compositionend", compositionEnd, true);
++  host.addEventListener("beforeinput", beforeInput, true);
++  host.addEventListener("input", input, true);
++  return () => {
++    clearTimeout(finishTimer);
++    keySubscription.dispose();
++    host.removeEventListener("keydown", keydown, true);
++    host.removeEventListener("keyup", keyup, true);
++    host.removeEventListener("compositionstart", compositionStart, true);
++    host.removeEventListener("compositionend", compositionEnd, true);
++    host.removeEventListener("beforeinput", beforeInput, true);
++    host.removeEventListener("input", input, true);
++  };
++}
+diff --git a/pi-web-plugins/terminal/terminalKeys.ts b/pi-web-plugins/terminal/terminalKeys.ts
+index 2bdbf6e379f39367df5e5ecab966303b72a82ee6..74bb9b47b227d529f30fc07d0c64e84316d7192d 100644
+--- a/pi-web-plugins/terminal/terminalKeys.ts
++++ b/pi-web-plugins/terminal/terminalKeys.ts
+@@ -8,6 +8,7 @@ export type TerminalSoftKeyId =
+   | "ctrl-r"
+   | "ctrl-u"
+   | "ctrl-w"
++  | "shift-arrow-left"
+   | "arrow-left"
+   | "arrow-up"
+   | "arrow-down"
+@@ -42,6 +43,7 @@ export const TERMINAL_SOFT_KEYS: readonly TerminalSoftKeyDefinition[] = [
+   { id: "ctrl-r", label: "Ctrl+R", ariaLabel: "Control R", title: "Reverse search history" },
+   { id: "ctrl-u", label: "Ctrl+U", ariaLabel: "Control U", title: "Delete to the start of the line" },
+   { id: "ctrl-w", label: "Ctrl+W", ariaLabel: "Control W", title: "Delete the previous word" },
++  { id: "shift-arrow-left", label: "Shift+←", ariaLabel: "Shift Left arrow", title: "Send Shift + Left arrow" },
+   { id: "arrow-left", label: "←", ariaLabel: "Left arrow", title: "Move left" },
+   { id: "arrow-up", label: "↑", ariaLabel: "Up arrow", title: "Move up / previous command" },
+   { id: "arrow-down", label: "↓", ariaLabel: "Down arrow", title: "Move down / next command" },
+@@ -70,6 +72,7 @@ export function terminalSoftKeySequence(key: TerminalSoftKeyId, modes?: Terminal
+     case "ctrl-r": return controlSequence("r");
+     case "ctrl-u": return controlSequence("u");
+     case "ctrl-w": return controlSequence("w");
++    case "shift-arrow-left": return `${ESC}[1;2D`;
+     case "arrow-left": return cursorSequence("D", modes);
+     case "arrow-up": return cursorSequence("A", modes);
+     case "arrow-down": return cursorSequence("B", modes);
+diff --git a/pi-web-plugins/terminal/terminalTouchScroll.test.ts b/pi-web-plugins/terminal/terminalTouchScroll.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..64abf6789e1ed054ce5fde6495a2499ce5bbd78c
+--- /dev/null
++++ b/pi-web-plugins/terminal/terminalTouchScroll.test.ts
+@@ -0,0 +1,62 @@
++// @vitest-environment happy-dom
++import { afterEach, describe, expect, it } from "vitest";
++import { attachTerminalTouchScroll } from "./terminalTouchScroll";
++
++afterEach(() => { document.body.replaceChildren(); });
++
++function setup() {
++  const host = document.createElement("div");
++  host.innerHTML = '<div class="xterm-screen"><canvas></canvas></div>';
++  document.body.append(host);
++  const target = host.querySelector("canvas");
++  if (target === null) throw new Error("Missing terminal canvas");
++  let tracking = true;
++  const dispose = attachTerminalTouchScroll(host, () => tracking);
++  const wheels: WheelEvent[] = [];
++  host.addEventListener("wheel", (event) => { wheels.push(event); });
++  const touch = (type: string, y: number, count = 1): Event => {
++    const event = new Event(type, { bubbles: true, cancelable: true });
++    Object.defineProperty(event, "touches", { value: Array.from({ length: count }, (_, identifier) => ({ identifier, clientX: 40, clientY: y })) });
++    target.dispatchEvent(event);
++    return event;
++  };
++  return { touch, wheels, dispose, shell: () => { tracking = false; } };
++}
++
++describe("terminal touch scrolling", () => {
++  it("accumulates small drags and sends wheel input in both directions", () => {
++    const { touch, wheels, dispose } = setup();
++    touch("touchstart", 100);
++    touch("touchmove", 91);
++    expect(wheels).toHaveLength(0);
++    expect(touch("touchmove", 60).defaultPrevented).toBe(true);
++    expect(wheels.map((event) => event.deltaY)).toEqual([1, 1]);
++    touch("touchmove", 80);
++    expect(wheels.map((event) => event.deltaY)).toEqual([1, 1, -1]);
++    expect(wheels[0]?.deltaMode).toBe(1);
++    dispose();
++  });
++
++  it("leaves ordinary shell scrollback and taps alone", () => {
++    const { touch, wheels, shell, dispose } = setup();
++    touch("touchstart", 100);
++    touch("touchend", 100, 0);
++    shell();
++    touch("touchstart", 100);
++    expect(touch("touchmove", 40).defaultPrevented).toBe(false);
++    expect(wheels).toHaveLength(0);
++    dispose();
++  });
++
++  it.each(["touchend", "touchcancel", "multitouch", "mode change", "dispose"])("stops translating after %s", (reason) => {
++    const { touch, wheels, shell, dispose } = setup();
++    touch("touchstart", 100);
++    if (reason === "multitouch") touch("touchstart", 100, 2);
++    else if (reason === "mode change") shell();
++    else if (reason === "dispose") dispose();
++    else touch(reason, 100, 0);
++    expect(touch("touchmove", 40).defaultPrevented).toBe(false);
++    expect(wheels).toHaveLength(0);
++    dispose();
++  });
++});
+diff --git a/pi-web-plugins/terminal/terminalTouchScroll.ts b/pi-web-plugins/terminal/terminalTouchScroll.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..8ea17d4b3e52da1c6b4ce461ca65b7cb6fadab4e
+--- /dev/null
++++ b/pi-web-plugins/terminal/terminalTouchScroll.ts
+@@ -0,0 +1,49 @@
++/** Translate single-finger drags for mouse-reporting TUIs through xterm's own
++ * wheel handler, so encoding, coordinates and input suppression stay shared.
++ * Ordinary shell scrollback and copy-mode gestures keep their native behavior.
++ */
++export function attachTerminalTouchScroll(host: HTMLElement, mouseTracking: () => boolean): () => void {
++  let gesture: { id: number; y: number; remainder: number; target: Element; x: number; startY: number } | undefined;
++  const reset = (): void => { gesture = undefined; };
++  const start = (event: TouchEvent): void => {
++    reset();
++    const touch = event.touches[0];
++    const target = event.target instanceof Element ? event.target.closest(".xterm-screen") : null;
++    if (event.touches.length !== 1 || touch === undefined || target === null || !mouseTracking()) return;
++    gesture = { id: touch.identifier, y: touch.clientY, remainder: 0, target, x: touch.clientX, startY: touch.clientY };
++  };
++  const move = (event: TouchEvent): void => {
++    const touch = event.touches[0];
++    if (gesture === undefined) return;
++    if (event.touches.length !== 1 || touch?.identifier !== gesture.id || !mouseTracking()) {
++      reset();
++      return;
++    }
++    // A non-passive capture listener prevents native viewport scrolling from
++    // consuming the same drag before xterm receives the translated wheel input.
++    event.preventDefault();
++    event.stopImmediatePropagation();
++    gesture.remainder += gesture.y - touch.clientY;
++    gesture.y = touch.clientY;
++    const threshold = 20;
++    const steps = Math.trunc(gesture.remainder / threshold);
++    gesture.remainder -= steps * threshold;
++    for (let step = 0; step < Math.abs(steps); step += 1) {
++      gesture.target.dispatchEvent(new WheelEvent("wheel", {
++        bubbles: true, cancelable: true, deltaMode: WheelEvent.DOM_DELTA_LINE,
++        deltaY: Math.sign(steps), clientX: gesture.x, clientY: gesture.startY,
++      }));
++    }
++  };
++  host.addEventListener("touchstart", start, { capture: true, passive: true });
++  host.addEventListener("touchmove", move, { capture: true, passive: false });
++  host.addEventListener("touchend", reset, true);
++  host.addEventListener("touchcancel", reset, true);
++  return () => {
++    reset();
++    host.removeEventListener("touchstart", start, true);
++    host.removeEventListener("touchmove", move, true);
++    host.removeEventListener("touchend", reset, true);
++    host.removeEventListener("touchcancel", reset, true);
++  };
++}
+diff --git a/src/client/src/clipboard.focus.test.ts b/src/client/src/clipboard.focus.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..f531bc991f0ad76a2e6a247be79ec482facc0eee
+--- /dev/null
++++ b/src/client/src/clipboard.focus.test.ts
+@@ -0,0 +1,52 @@
++// @vitest-environment happy-dom
++
++import { afterEach, describe, expect, it, vi } from "vitest";
++import { writeClipboardText } from "./clipboard";
++import { writeClipboardText as writeTerminalClipboardText } from "../../../pi-web-plugins/terminal/clipboard";
++
++const originalExecCommand = Object.getOwnPropertyDescriptor(document, "execCommand");
++afterEach(() => {
++  document.body.replaceChildren();
++  if (originalExecCommand) Object.defineProperty(document, "execCommand", originalExecCommand);
++  else Reflect.deleteProperty(document, "execCommand");
++  vi.restoreAllMocks();
++  vi.unstubAllGlobals();
++});
++
++describe.each([["host", writeClipboardText], ["terminal", writeTerminalClipboardText]] as const)("%s clipboard DOM boundary", (_name, writeText) => {
++  it.each([true, false, "throws"])("restores the focused editor through nested shadow roots after fallback copy (%s)", async (result) => {
++    const app = document.createElement("div");
++    const panel = document.createElement("div");
++    const editor = document.createElement("textarea");
++    app.attachShadow({ mode: "open" }).append(panel);
++    const shadow = panel.attachShadow({ mode: "open" });
++    shadow.append(editor);
++    document.body.append(app);
++    editor.value = "unfinished draft";
++    editor.focus();
++    editor.setSelectionRange(3, 8, "backward");
++    vi.stubGlobal("isSecureContext", false);
++    const copy = vi.fn(() => {
++      expect(document.activeElement).toBeInstanceOf(HTMLTextAreaElement);
++      if (result === "throws") throw new Error("Copy denied");
++      return result;
++    });
++    Object.defineProperty(document, "execCommand", { configurable: true, value: copy });
++
++    expect(await writeText("copied output")).toBe(result === true);
++    expect(copy).toHaveBeenCalledExactlyOnceWith("copy");
++    expect(shadow.activeElement).toBe(editor);
++    expect(editor.value).toBe("unfinished draft");
++    expect([editor.selectionStart, editor.selectionEnd, editor.selectionDirection]).toEqual([3, 8, "backward"]);
++    expect(document.body.children).toHaveLength(1);
++  });
++
++  it.each([undefined, null, {}])("uses fallback when the browser exposes an unusable clipboard API (%s)", async (clipboard) => {
++    vi.stubGlobal("isSecureContext", true);
++    vi.stubGlobal("navigator", { clipboard });
++    const copy = vi.fn(() => true);
++    Object.defineProperty(document, "execCommand", { configurable: true, value: copy });
++    expect(await writeText("copied output")).toBe(true);
++    expect(copy).toHaveBeenCalledExactlyOnceWith("copy");
++  });
++});
+diff --git a/src/client/src/clipboard.ts b/src/client/src/clipboard.ts
+index 1feccb2619ea487d438384ed8411ae6755c7b8d7..ec16a725c9c628128d5415a1c6a77825e292cd29 100644
+--- a/src/client/src/clipboard.ts
++++ b/src/client/src/clipboard.ts
+@@ -32,14 +32,17 @@ function browserIsSecureContext(): boolean {
+ }
+ 
+ function browserClipboardWriteText(): ((text: string) => Promise<void>) | undefined {
+-  if (typeof navigator === "undefined" || !("clipboard" in navigator)) return undefined;
+-  return navigator.clipboard.writeText.bind(navigator.clipboard);
++  const clipboard = typeof navigator === "undefined" ? undefined : navigator.clipboard;
++  if (typeof clipboard?.writeText !== "function") return undefined;
++  return clipboard.writeText.bind(clipboard);
+ }
+ 
+ function writeClipboardTextWithSelectionFallback(text: string): boolean {
+   if (typeof document === "undefined") return false;
+ 
+-  const activeElement = document.activeElement;
++  // document.activeElement is only the outer host for editors in shadow DOM.
++  let activeElement = document.activeElement;
++  while (activeElement?.shadowRoot?.activeElement) activeElement = activeElement.shadowRoot.activeElement;
+   const selection = document.getSelection();
+   const selectedRanges = selection === null ? [] : selectionRanges(selection);
+   const textarea = document.createElement("textarea");
+@@ -57,7 +60,7 @@ function writeClipboardTextWithSelectionFallback(text: string): boolean {
+   textarea.style.pointerEvents = "none";
+ 
+   document.body.append(textarea);
+-  textarea.focus();
++  textarea.focus({ preventScroll: true });
+   textarea.select();
+   textarea.setSelectionRange(0, textarea.value.length);
+ 
