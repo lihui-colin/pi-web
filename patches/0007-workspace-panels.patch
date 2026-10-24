@@ -282,3 +282,12 @@ index 6cfbca50acb74f6008d869be3a03dfabe54a649f..22ed7d431dd9dd63d3576be0209ba211
      .hint { padding: 12px; color: var(--pi-muted); }
      .trust-error { color: var(--pi-danger, #c0392b); }
      .trust-hint, .machine-hint { color: var(--pi-muted); line-height: 1.3; }
+diff --git a/src/client/src/main.ts b/src/client/src/main.ts
+index 262c3fab..0182da17 100644
+--- a/src/client/src/main.ts
++++ b/src/client/src/main.ts
+@@ -1 +1,4 @@
+ import "./components/PiWebApp";
++
++const port = window.location.port || (window.location.protocol === "https:" ? "443" : "80");
++document.title = `PI WEB :${port}`;
