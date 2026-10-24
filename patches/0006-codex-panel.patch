@@ -51,10 +51,10 @@ index 868bc3372d0058823bfa65d23ba74f1e39a6fc94..c6c336bca5b5478ed4f9487f2e0de54e
      "node-pty": "^1.1.0",
 diff --git a/pi-web-plugins/codex/CodexBrowserRuntime.ts b/pi-web-plugins/codex/CodexBrowserRuntime.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..cb4ffa6a2dcd3baa5d3317e13f436eaf17cb0f22
+index 0000000000000000000000000000000000000000..8e48f4261c9962f291089b2f79be1d0355d1f296
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexBrowserRuntime.ts
-@@ -0,0 +1,481 @@
+@@ -0,0 +1,512 @@
 +import type { PluginPeerChannel, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
 +import { MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, IMAGE_MIME_TYPES, array, errorText, object, string, text, permissionMode, type PermissionMode, chatMode, type ChatMode, type RecordValue } from "./server/protocol.js";
 +
@@ -70,12 +70,15 @@ index 0000000000000000000000000000000000000000..cb4ffa6a2dcd3baa5d3317e13f436eaf
 +  error: string;
 +}
 +
++export interface CodexSkill { name: string; path: string; }
++
 +export interface CodexView {
 +  context: WorkspacePanelContext;
 +  key: string;
 +  threadId: string;
 +  draft: string;
 +  references: string[];
++  skills: CodexSkill[];
 +  attachments: CodexAttachment[];
 +  model: string;
 +  effort: string;
@@ -118,8 +121,7 @@ index 0000000000000000000000000000000000000000..cb4ffa6a2dcd3baa5d3317e13f436eaf
 +    let view = this.views.get(key);
 +    if (view === undefined) {
 +      const threadId = "";
-+      view = { context, key, threadId, draft: this.read(`${key}:${threadId}:draft`), references: this.readReferences(key, threadId), attachments: [], model: this.read(`${key}:${threadId}:model`), effort: this.read(`${key}:${threadId}:effort`), models: [], defaultModel: "", defaultEffort: "", threads: [], loadingStages: [], cursor: "", snapshot: {}, error: "", notice: "", commandReplies: [], voiceInputEnabled: false, connected: false, pending: false, permissionMode: this.readPermissionMode(key), mode: this.readMode(key, threadId), modeDirty: this.read(`${key}:${threadId}:mode`) !== "", sending: false, offset: 0, listeners: new Set(), timer: undefined, polling: false, generation: 0 };
-+      view.attachments = this.readAttachments(view, threadId);
++      view = { context, key, threadId, ...this.readDraft({ context, key }, threadId), models: [], defaultModel: "", defaultEffort: "", threads: [], loadingStages: [], cursor: "", snapshot: {}, error: "", notice: "", commandReplies: [], voiceInputEnabled: false, connected: false, pending: false, permissionMode: this.readPermissionMode(key), sending: false, offset: 0, listeners: new Set(), timer: undefined, polling: false, generation: 0 };
 +      this.views.set(key, view);
 +    }
 +    view.context = context;
@@ -195,13 +197,7 @@ index 0000000000000000000000000000000000000000..cb4ffa6a2dcd3baa5d3317e13f436eaf
 +    this.disconnect(view);
 +    view.generation++;
 +    view.threadId = id;
-+    view.model = this.read(`${view.key}:${id}:model`);
-+    view.effort = this.read(`${view.key}:${id}:effort`);
-+    view.draft = this.read(`${view.key}:${id}:draft`);
-+    view.references = this.readReferences(view.key, id);
-+    view.attachments = this.readAttachments(view, id);
-+    view.mode = this.readMode(view.key, id);
-+    view.modeDirty = this.read(`${view.key}:${id}:mode`) !== "";
++    Object.assign(view, this.readDraft(view, id));
 +    view.snapshot = {};
 +    view.offset = 0;
 +    view.error = "";
@@ -215,6 +211,32 @@ index 0000000000000000000000000000000000000000..cb4ffa6a2dcd3baa5d3317e13f436eaf
 +    view.model = model; view.effort = effort;
 +    this.write(`${view.key}:${view.threadId}:model`, model);
 +    this.write(`${view.key}:${view.threadId}:effort`, effort);
++    this.changed(view);
++  }
++  private readDraft(view: Pick<CodexView, "context" | "key">, threadId: string) {
++    const key = `${view.key}:${threadId}`;
++    return {
++      skills: this.readSkills(key),
++      model: this.read(`${key}:model`), effort: this.read(`${key}:effort`), draft: this.read(`${key}:draft`),
++      references: this.readReferences(view.key, threadId), attachments: this.readAttachments(view, threadId),
++      mode: this.readMode(view.key, threadId), modeDirty: this.read(`${key}:mode`) !== "",
++    };
++  }
++  private readSkills(key: string): CodexSkill[] {
++    try {
++      return array(JSON.parse(this.read(`${key}:skills`) || "[]")).map(object)
++        .map((skill) => ({ name: string(skill["name"], "skill name"), path: string(skill["path"], "skill path", 4096) }))
++        .filter((skill) => mentionsSkill(this.read(`${key}:draft`), skill.name));
++    } catch { return []; }
++  }
++  private saveSkills(view: CodexView, skills: CodexSkill[]): void {
++    view.skills = skills;
++    this.write(`${view.key}:${view.threadId}:skills`, JSON.stringify(skills));
++  }
++  addSkill(view: CodexView, skill: CodexSkill): void {
++    if (view.pending || view.sending) return;
++    this.saveDraft(view, `${view.draft}${view.draft && !/\s$/u.test(view.draft) ? " " : ""}$${skill.name} `);
++    this.saveSkills(view, [...view.skills.filter((entry) => entry.path !== skill.path), skill]);
 +    this.changed(view);
 +  }
 +  private readMode(key: string, threadId: string): ChatMode {
@@ -243,6 +265,7 @@ index 0000000000000000000000000000000000000000..cb4ffa6a2dcd3baa5d3317e13f436eaf
 +  }
 +  saveDraft(view: CodexView, draft: string): void {
 +    view.draft = draft;
++    this.saveSkills(view, view.skills.filter((skill) => mentionsSkill(draft, skill.name)));
 +    this.write(`${view.key}:${view.threadId}:draft`, draft);
 +  }
 +  inputHistory(view: CodexView, threadId = view.threadId): string[] {
@@ -286,7 +309,7 @@ index 0000000000000000000000000000000000000000..cb4ffa6a2dcd3baa5d3317e13f436eaf
 +    await this.refresh(view);
 +    await this.list(view);
 +  }
-+  private readAttachments(view: CodexView, threadId: string): CodexAttachment[] {
++  private readAttachments(view: Pick<CodexView, "context" | "key">, threadId: string): CodexAttachment[] {
 +    const key = `${view.key}:${threadId}:attachments`;
 +    const cached = this.attachmentDrafts.get(key);
 +    if (cached) return cached;
@@ -362,6 +385,7 @@ index 0000000000000000000000000000000000000000..cb4ffa6a2dcd3baa5d3317e13f436eaf
 +    const files = attachments.filter((attachment) => attachment.kind === "file").map((attachment) => attachment.path);
 +    const draft = view.draft;
 +    const references = [...view.references];
++    const skills = view.skills.filter((skill) => mentionsSkill(draft, skill.name));
 +    let threadId = view.threadId;
 +    const model = view.model;
 +    const effort = view.effort || (model === "" ? "" : text(view.models.find((entry) => text(entry["model"]) === model)?.["defaultReasoningEffort"]));
@@ -382,6 +406,7 @@ index 0000000000000000000000000000000000000000..cb4ffa6a2dcd3baa5d3317e13f436eaf
 +        view.snapshot = { model: text(result["model"]), effort: text(result["effort"]) };
 +        this.saveDraft(view, currentDraft);
 +        this.saveReferences(view, references);
++        this.saveSkills(view, skills.filter((skill) => mentionsSkill(currentDraft, skill.name)));
 +        this.saveAttachments(view, attachments);
 +        this.saveAttachments(view, [], "");
 +        this.saveMode(view, mode, true);
@@ -390,9 +415,10 @@ index 0000000000000000000000000000000000000000..cb4ffa6a2dcd3baa5d3317e13f436eaf
 +        this.write(`${view.key}::effort`, "");
 +        this.write(`${view.key}::draft`, "");
 +        this.write(`${view.key}::references`, "[]");
++        this.write(`${view.key}::skills`, "[]");
 +        this.write(`${view.key}::mode`, "default");
 +      }
-+      const result = await this.request(view, "send", { threadId, text: draft, mode, ...this.permissionInput(view), ...(images.length > 0 ? { images } : {}), ...(files.length > 0 ? { files } : {}), ...(references.length > 0 ? { references } : {}), ...(model === "" ? {} : { model }), ...(effort === "" ? {} : { effort }) });
++      const result = await this.request(view, "send", { threadId, text: draft, mode, ...(skills.length > 0 ? { skills: skills.map(({ name, path }) => ({ name, path })) } : {}), ...this.permissionInput(view), ...(images.length > 0 ? { images } : {}), ...(files.length > 0 ? { files } : {}), ...(references.length > 0 ? { references } : {}), ...(model === "" ? {} : { model }), ...(effort === "" ? {} : { effort }) });
 +      if (draft.trim() !== "") {
 +        const history = this.inputHistory(view, threadId);
 +        if (history.at(-1) !== draft) history.push(draft);
@@ -536,12 +562,17 @@ index 0000000000000000000000000000000000000000..cb4ffa6a2dcd3baa5d3317e13f436eaf
 +  return IMAGE_MIME_TYPES.includes(file.type)
 +    || ((file.type === "" || file.type === "application/octet-stream") && /\.(?:png|jpe?g|webp|gif)$/iu.test(file.name));
 +}
++
++function mentionsSkill(draft: string, name: string): boolean {
++  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
++  return new RegExp(`(?:^|\\s)\\$${escaped}(?![\\p{L}\\p{N}_-])`, "u").test(draft);
++}
 diff --git a/pi-web-plugins/codex/CodexPanel.test.ts b/pi-web-plugins/codex/CodexPanel.test.ts
 new file mode 100644
-index 00000000..b0d50591
+index 0000000000000000000000000000000000000000..5de9622b187aaa9977e6da3d6d3f121ff14ee459
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.test.ts
-@@ -0,0 +1,2066 @@
+@@ -0,0 +1,2187 @@
 +// @vitest-environment happy-dom
 +import { afterEach, describe, expect, it, vi } from "vitest";
 +import type { WorkspaceFileUploadOptions, WorkspaceFileUploadTask, PluginPeerChannelOptions, FileContentResponse, FileTreeResponse, JsonValue, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
@@ -2608,12 +2639,133 @@ index 00000000..b0d50591
 +    await vi.waitFor(() => { expect(view.commandReplies.at(-1)?.item["text"]).toContain("Compact failed"); });
 +  });
 +});
++
++
++describe("Skills picker", () => {
++  it("loads, filters and inserts a skill into the existing draft without sending", async () => {
++    const { panel, request, view, runtime, textarea } = await fixture();
++    request.mockImplementation((operation) => Promise.resolve(operation === "skills" ? { data: [
++      { name: "writer", path: "/skills/writer/SKILL.md", description: "Write documentation", enabled: true },
++      { name: "review", description: "Review code", enabled: false },
++    ], errors: [] } : { changed: false }));
++    runtime.saveDraft(view, "Please use");
++    const picker = required(panel.shadowRoot?.querySelector<HTMLDetailsElement>(".context-picker"));
++    picker.open = true;
++    required(panel.shadowRoot?.querySelector<HTMLButtonElement>(".add-skills")).click();
++    await vi.waitFor(() => { expect(panel.shadowRoot?.querySelectorAll(".skill-option")).toHaveLength(2); });
++    expect(panel.shadowRoot?.querySelector<HTMLButtonElement>(".skill-option")?.disabled).toBe(true);
++    const search = required(panel.shadowRoot?.querySelector<HTMLInputElement>('[aria-label="Search skills"]'));
++    search.value = "documentation"; search.dispatchEvent(new Event("input", { bubbles: true }));
++    await panel.updateComplete;
++    expect(panel.shadowRoot?.querySelectorAll(".skill-option")).toHaveLength(1);
++    required(panel.shadowRoot?.querySelector<HTMLButtonElement>(".skill-option")).click();
++    await panel.updateComplete;
++    expect(view.draft).toBe("Please use $writer ");
++    expect(textarea.value).toBe(view.draft);
++    expect(picker.open).toBe(false);
++    expect(panel.shadowRoot?.activeElement).toBe(textarea);
++    expect(request.mock.calls.some(([operation]) => operation === "send")).toBe(false);
++  });
++
++  it("shows errors, retries and reports an empty skill list", async () => {
++    const { panel, request } = await fixture();
++    let fail = true;
++    request.mockImplementation(async (operation) => {
++      await Promise.resolve();
++      if (operation !== "skills") return { changed: false };
++      if (fail) throw new Error("Skills unavailable");
++      return { data: [], errors: [] };
++    });
++    required(panel.shadowRoot?.querySelector<HTMLDetailsElement>(".context-picker")).open = true;
++    required(panel.shadowRoot?.querySelector<HTMLButtonElement>(".add-skills")).click();
++    await vi.waitFor(() => { expect(panel.shadowRoot?.querySelector('.context-menu [role="alert"]')?.textContent).toBe("Skills unavailable"); });
++    fail = false;
++    required([...required(panel.shadowRoot).querySelectorAll<HTMLButtonElement>(".context-menu button")].find((button) => button.textContent === "Retry")).click();
++    await vi.waitFor(() => { expect(panel.shadowRoot?.querySelector(".context-menu")?.textContent).toContain("No skills available in this workspace."); });
++  });
++
++  it("discards a late skills response after changing workspaces", async () => {
++    const { panel, request } = await fixture();
++    let resolve: (value: JsonValue) => void = () => undefined;
++    request.mockImplementation(async (operation) => operation === "skills" ? await new Promise<JsonValue>((done) => { resolve = done; }) : { changed: false });
++    required(panel.shadowRoot?.querySelector<HTMLDetailsElement>(".context-picker")).open = true;
++    required(panel.shadowRoot?.querySelector<HTMLButtonElement>(".add-skills")).click();
++    await panel.updateComplete;
++    panel.context = context(() => Promise.resolve({}), "other", "/other");
++    await panel.updateComplete;
++    resolve({ data: [{ name: "old-workspace-skill" }] });
++    await new Promise((done) => setTimeout(done, 0));
++    await panel.updateComplete;
++    expect(panel.shadowRoot?.textContent).not.toContain("old-workspace-skill");
++  });
++});
++
++it("preserves same-name skill identity through picker selection and sending", async () => {
++  const { panel, request, runtime, view } = await fixture();
++  const skills = [
++    { name: "review", path: "/personal/review/SKILL.md", description: "Personal review", enabled: true },
++    { name: "review", path: "/team/review/SKILL.md", description: "Team review", enabled: true },
++  ];
++  request.mockImplementation((operation) => Promise.resolve(operation === "skills" ? { data: skills } : operation === "send" ? { accepted: true } : { changed: false }));
++  for (const skill of skills) {
++    view.snapshot = {}; runtime.saveDraft(view, "");
++    required(panel.shadowRoot?.querySelector<HTMLDetailsElement>(".context-picker")).open = true;
++    required(panel.shadowRoot?.querySelector<HTMLButtonElement>(".add-skills")).click();
++    await vi.waitFor(() => { expect(panel.shadowRoot?.querySelectorAll(".skill-option")).toHaveLength(2); });
++    required([...required(panel.shadowRoot).querySelectorAll<HTMLButtonElement>(".skill-option")].find((button) => button.title === skill.path)).click();
++    await panel.updateComplete;
++    await runtime.send(view);
++    expect(request).toHaveBeenCalledWith("send", expect.objectContaining({ skills: [{ name: skill.name, path: skill.path }] }));
++    expect(view.skills).toEqual([]);
++    await panel.updateComplete;
++  }
++});
++
++it("keeps selected skills after failed creation/send and restores them per conversation", async () => {
++  const { runtime, view, request, scope } = await fixture();
++  runtime.select(view, "");
++  const skill = { name: "review", path: "/team/review/SKILL.md" };
++  runtime.addSkill(view, skill);
++  request.mockRejectedValue(new Error("Create failed"));
++  await expect(runtime.send(view)).rejects.toThrow("Create failed");
++  expect(view.skills).toEqual([skill]);
++  request.mockImplementation((operation) => {
++    if (operation === "create") return Promise.resolve({ id: "created" });
++    if (operation === "send") return Promise.reject(new Error("Send failed"));
++    return Promise.resolve({ changed: false });
++  });
++  await expect(runtime.send(view)).rejects.toThrow("Send failed");
++  expect(view.skills).toEqual([skill]);
++  runtime.select(view, ""); expect(view.skills).toEqual([]);
++  runtime.select(view, "created"); expect(view.skills).toEqual([skill]);
++  const fresh = new CodexBrowserRuntime(); runtimes.push(fresh);
++  const restored = fresh.view(scope); fresh.select(restored, "created");
++  expect(restored.skills).toEqual([skill]);
++  expect(fresh.view(context(request, "other-machine")).skills).toEqual([]);
++  runtime.saveDraft(view, "$review-other");
++  expect(view.skills).toEqual([]);
++  request.mockResolvedValue({ accepted: true });
++  await runtime.send(view);
++  expect(object(request.mock.calls.filter(([operation]) => operation === "send").at(-1)?.[1])["skills"]).toBeUndefined();
++});
++
++it("restores a home skill draft and drops its identity when the marker is deleted", async () => {
++  const { runtime, view, scope } = await fixture(); runtime.select(view, "");
++  runtime.addSkill(view, { name: "plugin:review", path: "/plugin/review/SKILL.md" });
++  const fresh = new CodexBrowserRuntime(); runtimes.push(fresh);
++  const restored = fresh.view(scope);
++  expect(restored.skills).toEqual(view.skills);
++  fresh.saveDraft(restored, "ordinary message");
++  expect(restored.skills).toEqual([]);
++  fresh.select(restored, "thread"); fresh.select(restored, "");
++  expect(restored.skills).toEqual([]);
++});
 diff --git a/pi-web-plugins/codex/CodexPanel.ts b/pi-web-plugins/codex/CodexPanel.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..ffeb19f9c890a4e33bf897b74a52753e918bac0a
+index 0000000000000000000000000000000000000000..193d2a0e928f575e015c3165ea7d8c8fba54dd04
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.ts
-@@ -0,0 +1,1150 @@
+@@ -0,0 +1,1203 @@
 +import { statusReply } from "./statusReply.js";
 +import { LitElement, css, html, svg, nothing } from "lit";
 +import { property } from "lit/decorators.js";
@@ -2627,6 +2779,12 @@ index 0000000000000000000000000000000000000000..ffeb19f9c890a4e33bf897b74a52753e
 +import { renderWorkspaceMarkdownHtml as renderCodexMarkdownHtml } from "../files/workspaceMarkdown.js";
 +import { workspaceFileLink, type WorkspaceFileLink } from "./fileLinks.js";
 +
++const reasoningEfforts = new Map([
++  ["none", "None"], ["minimal", "Minimal"], ["low", "Low"], ["medium", "Medium"],
++  ["high", "High"], ["xhigh", "Extra high"], ["max", "Max"],
++]);
++const effortRanks = new Map([...reasoningEfforts.keys()].map((value, rank) => [value, rank]));
++
 +export class CodexPanel extends LitElement {
 +  @property({ attribute: false }) context: WorkspacePanelContext | undefined;
 +  @property({ attribute: false }) runtime: CodexBrowserRuntime | undefined;
@@ -2638,7 +2796,13 @@ index 0000000000000000000000000000000000000000..ffeb19f9c890a4e33bf897b74a52753e
 +  private follow = true;
 +  private composing = false;
 +  private browsePath = "";
-+  private addPage: "menu" | "files" = "menu";
++  private addPage: "menu" | "files" | "skills" = "menu";
++  private skills: RecordValue[] = [];
++  private skillsLoading = false;
++  private skillsError = "";
++  private skillsWarnings: string[] = [];
++  private skillsFilter = "";
++  private skillsRequest = 0;
 +  private browseEntries: FileTreeEntry[] = [];
 +  private browseLoading = false;
 +  private browseError = "";
@@ -2758,6 +2922,7 @@ index 0000000000000000000000000000000000000000..ffeb19f9c890a4e33bf897b74a52753e
 +    this.unsubscribe?.();
 +    this.closeMenus();
 +    this.addPage = "menu";
++    this.skillsRequest++; this.skills = []; this.skillsLoading = false; this.skillsError = ""; this.skillsWarnings = [];
 +    this.browseRequest++; this.browsePath = ""; this.browseEntries = [];
 +    this.view = view;
 +    this.historyExpanded = false;
@@ -2983,6 +3148,45 @@ index 0000000000000000000000000000000000000000..ffeb19f9c890a4e33bf897b74a52753e
 +        <pre class="file-source" tabindex="0" aria-label=${`Contents of ${file.path}`}>${lines.slice(start, end).map((value, index) => html`<span class=${start + index + 1 === file.line ? "selected-line" : ""} data-line=${start + index + 1}>${value || " "}</span>`)}</pre>`}
 +    </section>`;
 +  }
++  private async loadSkills(): Promise<void> {
++    const view = this.view;
++    const runtime = this.runtime;
++    if (!view || !runtime) return;
++    const request = ++this.skillsRequest;
++    this.skillsLoading = true; this.skillsError = ""; this.skillsWarnings = []; this.skills = []; this.requestUpdate();
++    try {
++      const result = await runtime.request(view, "skills");
++      if (request !== this.skillsRequest || view !== this.view) return;
++      this.skills = array(result["data"]).map(object).sort((a, b) => text(a["name"]).localeCompare(text(b["name"])));
++      this.skillsWarnings = array(result["errors"]).map(text);
++    } catch (error) {
++      if (request === this.skillsRequest && view === this.view) this.skillsError = errorText(error);
++    } finally {
++      if (request === this.skillsRequest) { this.skillsLoading = false; this.requestUpdate(); }
++    }
++  }
++  private async insertSkill(view: CodexView, skill: RecordValue): Promise<void> {
++    if (view.pending || view.sending || skill["enabled"] === false || !text(skill["name"])) return;
++    this.runtime?.addSkill(view, { name: text(skill["name"]), path: text(skill["path"]) });
++    this.historyNavigation = undefined;
++    this.closeMenus(false, ".context-picker");
++    this.requestUpdate();
++    await this.updateComplete;
++    const editor = this.renderRoot.querySelector<HTMLTextAreaElement>("textarea");
++    editor?.focus(); editor?.setSelectionRange(editor.value.length, editor.value.length);
++  }
++  private renderSkills(view: CodexView) {
++    const filter = this.skillsFilter.toLowerCase().trim();
++    const skills = this.skills.filter((skill) => `${text(skill["name"])} ${text(skill["description"])}`.toLowerCase().includes(filter));
++    return html`<div class="context-menu" aria-label="Skills">
++      <div class="context-heading"><button aria-label="Back to Add" @click=${() => { this.addPage = "menu"; this.requestUpdate(); }}>←</button><strong>Skills</strong><button aria-label="Refresh skills" ?disabled=${this.skillsLoading} @click=${() => { void this.loadSkills(); }}>↻</button><button aria-label="Close skills picker" @click=${() => { this.closeMenus(true, ".context-picker"); }}>×</button></div>
++      <input class="context-filter" aria-label="Search skills" placeholder="Search skills" .value=${this.skillsFilter} @input=${(event: Event) => { if (event.target instanceof HTMLInputElement) { this.skillsFilter = event.target.value; this.requestUpdate(); } }}>
++      ${this.skillsLoading ? html`<p role="status">Loading skills…</p>` : this.skillsError ? html`<p class="error" role="alert">${this.skillsError}</p><button @click=${() => { void this.loadSkills(); }}>Retry</button>` : html`
++        ${this.skillsWarnings.map((warning) => html`<p class="error" role="alert">${warning}</p>`)}
++        <div class="context-entries">${skills.map((skill) => html`<button class="skill-option" title=${text(skill["path"])} ?disabled=${view.pending || view.sending || skill["enabled"] === false} @click=${() => { void this.insertSkill(view, skill); }}><strong>${text(skill["name"])}</strong><small>${text(skill["description"])}</small>${skill["enabled"] === false ? html`<small>Disabled</small>` : nothing}</button>`)}</div>
++        ${skills.length === 0 ? html`<p>${filter ? "No matching skills." : "No skills available in this workspace."}</p>` : nothing}`}
++    </div>`;
++  }
 +  private async browse(path: string): Promise<void> {
 +    const view = this.view;
 +    if (view === undefined) return;
@@ -3036,21 +3240,22 @@ index 0000000000000000000000000000000000000000..ffeb19f9c890a4e33bf897b74a52753e
 +    return html`${view.mode === "plan" ? html`<button class="plan-toggle" aria-label="Turn plan mode off" aria-pressed="true" title="Turn plan mode off" ?disabled=${view.pending || view.sending || view.snapshot["busy"] === true} @click=${() => { this.togglePlan(view); }}>${this.planIcon()}<svg class="plan-close-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m9 9 6 6m0-6-6 6"/></svg><span>Plan</span></button>` : nothing}`;
 +  }
 +  private effortLabel(effort: string): string {
-+    const labels: Record<string, string> = { none: "None", minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high", max: "Max" };
-+    return labels[effort] ?? (effort ? effort.charAt(0).toUpperCase() + effort.slice(1) : "Select effort");
++    return reasoningEfforts.get(effort) ?? (effort ? effort.charAt(0).toUpperCase() + effort.slice(1) : "Select effort");
 +  }
 +  private async selectModel(view: CodexView, model: string, effort = ""): Promise<void> {
 +    if (view.pending || view.sending || view.snapshot["busy"] === true || !model) return;
 +    this.runtime?.saveModelSettings(view, model, effort);
-+    this.modelListOpen = false; this.requestUpdate(); await this.updateComplete;
++    await this.closeModelList();
++  }
++  private async closeModelList(): Promise<void> {
++    this.modelListOpen = false;
++    this.requestUpdate();
++    await this.updateComplete;
 +    this.renderRoot.querySelector<HTMLButtonElement>(".effort-selection")?.focus();
 +  }
 +  private renderModelOptions(view: CodexView, selected: string, disabled: boolean) {
 +    const defaultModel = view.models.find((model) => text(model["model"]) === view.defaultModel);
-+    return html`<div class="model-list-heading"><span>Select model</span><button aria-label="Back to reasoning effort" title="Back to reasoning effort" @click=${async () => {
-+      this.modelListOpen = false; this.requestUpdate(); await this.updateComplete;
-+      this.renderRoot.querySelector<HTMLButtonElement>(".effort-selection")?.focus();
-+    }}>‹</button></div>
++    return html`<div class="model-list-heading"><span>Select model</span><button aria-label="Back to reasoning effort" title="Back to reasoning effort" @click=${() => this.closeModelList()}>‹</button></div>
 +      <div class="model-options" role="menu" aria-label="Select model" @keydown=${(event: KeyboardEvent) => { this.menuKeydown(event, ".model-option"); }}>
 +        <button class="model-option model-default" role="menuitem" ?disabled=${disabled || !view.defaultModel} @click=${() => { void this.selectModel(view, view.defaultModel, view.defaultEffort); }}><span>Default<small>${view.defaultModel ? `Workspace default · ${text(defaultModel?.["displayName"]) || view.defaultModel}` : "Workspace default unavailable"}</small></span></button>
 +        ${view.models.map((model) => {
@@ -3066,13 +3271,11 @@ index 0000000000000000000000000000000000000000..ffeb19f9c890a4e33bf897b74a52753e
 +    const modelName = view.model || currentModel;
 +    const selectedModel = view.models.find((model) => text(model["model"]) === modelName);
 +    const effectiveEffort = view.effort || (view.model ? text(selectedModel?.["defaultReasoningEffort"]) : currentEffort);
-+    const effortOrder = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
-+    const effortRanks = new Map(effortOrder.map((value, rank) => [value, rank]));
 +    const efforts = [...new Set(array(selectedModel?.["supportedReasoningEfforts"]).map((entry) => text(object(entry)["reasoningEffort"])).filter(Boolean))]
-+      .sort((a, b) => (effortRanks.get(a) ?? effortOrder.length) - (effortRanks.get(b) ?? effortOrder.length));
++      .sort((a, b) => (effortRanks.get(a) ?? effortRanks.size) - (effortRanks.get(b) ?? effortRanks.size));
 +    const selectedIndex = efforts.indexOf(effectiveEffort);
 +    const index = Math.max(0, selectedIndex);
-+    const progress = efforts.length > 1 ? index / (efforts.length - 1) * 100 : 0;
++    const progress = efforts.length > 1 ? index / (efforts.length - 1) : 0;
 +    const modelLabel = text(selectedModel?.["displayName"]) || modelName || "Model unavailable";
 +    return html`<details class="model-picker" @toggle=${(event: Event) => {
 +      if (event.currentTarget instanceof HTMLDetailsElement && !event.currentTarget.open && this.modelListOpen) { this.modelListOpen = false; this.requestUpdate(); }
@@ -3092,7 +3295,7 @@ index 0000000000000000000000000000000000000000..ffeb19f9c890a4e33bf897b74a52753e
 +            if (!disabled) { this.runtime?.saveModelSettings(view, "", ""); this.requestUpdate(); }
 +          }}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10a9 9 0 1 1 1 8M3 4v6h6"/></svg></button>
 +        </div>
-+        <div class="effort-slider" style=${`--effort-progress:${String(progress / 100)}`} ?data-unset=${selectedIndex < 0} ?data-disabled=${disabled || efforts.length < 2}>
++        <div class="effort-slider" style=${`--effort-progress:${String(progress)}`} ?data-unset=${selectedIndex < 0} ?data-disabled=${disabled || efforts.length < 2}>
 +          <div class="effort-track" aria-hidden="true"><span class="effort-fill"></span><div class="effort-stops">${efforts.map(() => html`<span></span>`)}</div></div>
 +          <input type="range" min="0" max=${Math.max(0, efforts.length - 1)} step="1" .value=${String(index)} aria-label="Reasoning effort" aria-valuetext=${efforts.length === 0 ? "No reasoning levels available" : this.effortLabel(effectiveEffort)} ?disabled=${disabled || efforts.length < 2} @input=${(event: Event) => {
 +            if (disabled || efforts.length < 2 || !(event.target instanceof HTMLInputElement)) return;
@@ -3191,9 +3394,9 @@ index 0000000000000000000000000000000000000000..ffeb19f9c890a4e33bf897b74a52753e
 +  private renderContextPicker(view: CodexView) {
 +    const entries = this.browseEntries.filter((entry) => entry.name.toLowerCase().includes(this.browseFilter.toLowerCase()));
 +    return html`<details class="context-picker" @keydown=${(event: KeyboardEvent) => { this.addKeydown(event); }} @toggle=${(event: Event) => { if (event.currentTarget instanceof HTMLDetailsElement && !event.currentTarget.open) { this.addPage = "menu"; this.requestUpdate(); } }}>
-+      <summary aria-label="Add" title="Add files or change settings" aria-disabled=${view.pending} @click=${(event: Event) => { if (view.pending) event.preventDefault(); }}>+</summary>
++      <summary aria-label="Add" title="Add files, skills or change settings" aria-disabled=${view.pending} @click=${(event: Event) => { if (view.pending) event.preventDefault(); }}>+</summary>
 +      <div class="add-menu" aria-label="Add">
-+        ${this.addPage === "files" ? html`<div class="context-menu" aria-label="Workspace files and directories">
++        ${this.addPage === "skills" ? this.renderSkills(view) : this.addPage === "files" ? html`<div class="context-menu" aria-label="Workspace files and directories">
 +        <div class="context-heading"><button aria-label="Back to Add" @click=${() => { this.addPage = "menu"; this.requestUpdate(); }}>←</button><strong>Files and folders</strong><button aria-label="Close workspace picker" @click=${() => { this.closeMenus(true, ".context-picker"); }}>×</button></div>
 +        <div class="context-navigation"><button aria-label="Parent directory" ?disabled=${this.browseLoading || this.browsePath === ""} @click=${() => { void this.browse(this.browsePath.split("/").slice(0, -1).join("/")); }}>↑</button><span title=${view.context.workspace.path}>${this.browsePath || view.context.workspace.label}</span><button ?disabled=${view.pending || this.browseLoading || this.browseError !== "" || view.references.length >= 20 || view.references.includes(this.browsePath || ".")} @click=${() => { this.addReference(view, this.browsePath); }}>Add directory</button></div>
 +        <input class="context-filter" aria-label="Filter workspace items" placeholder="Filter files and directories" .value=${this.browseFilter} @input=${(event: Event) => { if (event.target instanceof HTMLInputElement) { this.browseFilter = event.target.value; this.requestUpdate(); } }}>
@@ -3204,6 +3407,7 @@ index 0000000000000000000000000000000000000000..ffeb19f9c890a4e33bf897b74a52753e
 +          <button class="add-item add-files" ?disabled=${view.pending} @click=${() => { this.addPage = "files"; void this.browse(this.browsePath); }}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 15V6a4 4 0 0 1 8 0v10a6 6 0 0 1-12 0V7m8-1v10a2 2 0 0 1-4 0"/></svg><span>Files and folders</span></button>
 +          <button class="add-item add-files-upload" ?disabled=${view.pending || view.sending || view.context.files.capabilityVersion !== 1 || view.attachments.length >= MAX_ATTACHMENTS} @click=${() => { this.closeMenus(false, ".context-picker"); this.renderRoot.querySelector<HTMLInputElement>(".file-input")?.click(); }}><span aria-hidden="true">▧</span><span>Upload files</span><span class="add-description">From this device</span></button>
 +          <button class="add-item add-plan" aria-pressed=${view.mode === "plan"} ?disabled=${view.pending || view.sending || view.snapshot["busy"] === true} @click=${() => { this.togglePlan(view); }}>${this.planIcon()}<span>Plan mode</span><span class="add-description">${view.mode === "plan" ? "Turn plan mode off" : "Turn plan mode on"}</span>${view.mode === "plan" ? html`<span class="add-check" aria-hidden="true">✓</span>` : nothing}</button>
++          <button class="add-item add-skills" ?disabled=${view.pending || view.sending || !view.connected} @click=${() => { this.addPage = "skills"; this.skillsFilter = ""; void this.loadSkills(); }}><span aria-hidden="true">◇</span><span>Skills</span><span class="add-description">Use a skill</span></button>
 +          <button class="add-item add-status" ?disabled=${view.pending || view.sending || !view.connected} @click=${() => { this.runSessionAction(view, "status"); }}><span>Status</span><span class="add-description">Session status and account limits</span></button>
 +          <button class="add-item add-compact" ?disabled=${view.pending || view.sending || !view.connected || !view.threadId || view.snapshot["busy"] === true || array(view.snapshot["queue"]).length > 0} @click=${() => { this.runSessionAction(view, "compact"); }}><span>Compact</span><span class="add-description">Compact conversation context</span></button>
 +          ${this.isMobileComposer() ? this.renderComposerSettings(view) : nothing}
@@ -3659,6 +3863,7 @@ index 0000000000000000000000000000000000000000..ffeb19f9c890a4e33bf897b74a52753e
 +    }
 +    .asking-question { padding:6px 16px; color:var(--pi-muted,#888); }
 +    .context-picker>summary[aria-disabled="true"] { opacity:.45; cursor:default; }
++    .skill-option { display:flex; flex-direction:column; align-items:flex-start; gap:4px; width:100%; text-align:left; padding:8px; overflow-wrap:anywhere; } .skill-option small { color:var(--pi-muted,#707070); white-space:normal; }
 +    .context-menu { padding:0; } .context-heading,.context-navigation,.context-bottom,.context-entry { display:flex; align-items:center; gap:6px; } .context-heading strong,.context-navigation>span,.context-bottom small { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .context-navigation { margin:6px 0; font-size:11px; } .context-filter { width:100%; border-color:var(--pi-border-muted,#ddd); margin-bottom:8px; } .context-entries { max-height:230px; overflow:auto; } .context-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-align:left; } .context-entry>button:last-child { font-size:11px; } .context-menu p { font-size:12px; margin:10px 0; } .context-bottom { margin-top:8px; border-top:1px solid var(--pi-border-muted,#ddd); padding-top:6px; }
 +    .context-tray { display:flex; flex-wrap:wrap; gap:6px; padding:0 6px 8px; max-height:100px; overflow:auto; } .context-tray>span { display:flex; align-items:center; gap:4px; border:1px solid var(--pi-border-muted,#ddd); border-radius:8px; padding-left:8px; max-width:100%; overflow-wrap:anywhere; font-size:11px; } .context-tray button { flex:none; }
 +    .settings-menu { display:contents; }
@@ -4260,10 +4465,10 @@ index 0000000000000000000000000000000000000000..c6d45f6f2f76fc6a88b06245b82f9eab
 +export const createCodexConnection: ConnectionFactory = (cwd, event, exited) => new CodexProcess(cwd, event, exited);
 diff --git a/pi-web-plugins/codex/server/codexService.test.ts b/pi-web-plugins/codex/server/codexService.test.ts
 new file mode 100644
-index 00000000..c8be22a5
+index 0000000000000000000000000000000000000000..4aa7fe381b7378a0ef17ebe71de1f3da127ba435
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/codexService.test.ts
-@@ -0,0 +1,1126 @@
+@@ -0,0 +1,1185 @@
 +import { mkdtemp, mkdir, writeFile, symlink, truncate, rm } from "node:fs/promises";
 +import { join } from "node:path";
 +import { tmpdir } from "node:os";
@@ -5390,12 +5595,71 @@ index 00000000..c8be22a5
 +    expect(f.request).not.toHaveBeenCalledWith("account/rateLimits/read", expect.anything());
 +  });
 +});
++
++
++describe("Codex skills list", () => {
++  it("uses the authoritative workspace and returns skill metadata and load warnings", async () => {
++    const f = fixture();
++    f.request.mockResolvedValue({ data: [
++      { cwd: "/work/one", skills: [
++        { name: "writer", path: "/skills/writer/SKILL.md", description: "Long description", interface: { shortDescription: "Write docs" }, enabled: true },
++        { name: "disabled", description: "Unavailable", enabled: false },
++      ], errors: [{ message: "Invalid skill file" }] },
++      { cwd: "/other", skills: [{ name: "other-workspace" }] },
++    ] });
++    const result = await f.call("skills", { cwd: "/other", cwds: ["/other"] });
++    expect(f.request).toHaveBeenCalledWith("skills/list", { cwds: ["/work/one"], forceReload: true });
++    expect(result).toEqual({ data: [
++      { name: "writer", path: "/skills/writer/SKILL.md", description: "Write docs", enabled: true },
++      { name: "disabled", path: "", description: "Unavailable", enabled: false },
++    ], errors: ["Invalid skill file"] });
++    expect(f.request).not.toHaveBeenCalledWith("thread/start", expect.anything());
++  });
++});
++
++describe("explicit skill inputs", () => {
++  const skill = { name: "review", path: "/team/review/SKILL.md" };
++  function withSkills() {
++    const f = fixture();
++    const original = f.request.getMockImplementation();
++    f.request.mockImplementation(async (method, params) => method === "skills/list"
++      ? { data: [{ cwd: "/work/one", skills: [skill, { ...skill, path: "/personal/review/SKILL.md" }] }] }
++      : await original?.(method, params) ?? {});
++    return f;
++  }
++  it.each(["start", "queue", "steer"])("sends the selected path as native skill input on %s", async (action) => {
++    const f = withSkills(); await f.call("create");
++    if (action !== "start") await f.call("send", { threadId: "new", text: "first" });
++    await f.call("send", { threadId: "new", text: "$review", skills: [skill] });
++    if (action !== "start") {
++      const snapshot = await f.call("snapshot", { threadId: "new" });
++      const queued = object(array(snapshot["queue"])[0]);
++      if (action === "steer") await f.call("steer", { threadId: "new", messageId: queued["id"] ?? "", expectedTurnId: "turn" });
++      else f.emit({ method: "turn/completed", params: { threadId: "new", turn: { id: "turn", status: "completed" } } });
++    }
++    await vi.waitFor(() => {
++      const params = f.request.mock.calls.filter(([method]) => method === (action === "steer" ? "turn/steer" : "turn/start")).at(-1)?.[1];
++      expect(array(params?.["input"])).toContainEqual({ type: "skill", ...skill });
++    });
++  });
++  it.each(["missing", "disabled", "other-workspace"])("rejects %s skills before starting a turn", async (reason) => {
++    const f = withSkills(); await f.call("create");
++    f.request.mockResolvedValue({ data: [{ cwd: reason === "other-workspace" ? "/other" : "/work/one", skills: reason === "missing" ? [] : [{ ...skill, enabled: reason !== "disabled" }] }] });
++    await expect(f.call("send", { threadId: "new", text: "$review", skills: [skill] })).rejects.toThrow("unavailable or disabled");
++    expect(f.request).not.toHaveBeenCalledWith("turn/start", expect.anything());
++  });
++  it.each(["invalid", [null], [{ name: "review" }], Array.from({ length: 21 }, () => skill)])("rejects malformed skill selections %j", async (skills) => {
++    const f = withSkills(); await f.call("create");
++    await expect(f.call("send", { threadId: "new", text: "$review", skills })).rejects.toThrow();
++    expect(f.request).not.toHaveBeenCalledWith("turn/start", expect.anything());
++  });
++});
 diff --git a/pi-web-plugins/codex/server/codexService.ts b/pi-web-plugins/codex/server/codexService.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..a511951d5866ef90c98a3ec390df7b1b40fcb649
+index 0000000000000000000000000000000000000000..aa521ac01149dad1f37b381d85c4ca125893932e
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/codexService.ts
-@@ -0,0 +1,991 @@
+@@ -0,0 +1,1021 @@
 +import { createHash, randomUUID } from "node:crypto";
 +import { imageSize } from "image-size";
 +import { isAbsolute, relative, resolve, sep } from "node:path";
@@ -5458,7 +5722,7 @@ index 0000000000000000000000000000000000000000..a511951d5866ef90c98a3ec390df7b1b
 +// Include conversations created by the native app-server, not just CLI/IDE history.
 +const conversationSources = ["cli", "vscode", "appServer"];
 +
-+const supportedOperations = new Set(["status", "session-status", "activity", "list", "models", "create", "fork", "snapshot", "image", "send", "steer", "remove-queued", "resume-queue", "stop", "answer", "archive", "compact", "review"]);
++const supportedOperations = new Set(["status", "session-status", "activity", "list", "models", "skills", "create", "fork", "snapshot", "image", "send", "steer", "remove-queued", "resume-queue", "stop", "answer", "archive", "compact", "review"]);
 +
 +export class CodexService {
 +  private readonly imageChunks = new WeakMap<WorkspaceState, Map<string, string>>();
@@ -5571,6 +5835,17 @@ index 0000000000000000000000000000000000000000..a511951d5866ef90c98a3ec390df7b1b
 +          status: saved["status"] ?? local?.status ?? null, tokenUsage: tokenUsage ?? null, rateLimits, rateLimitsError };
 +      }
 +      case "activity": return { busyThreadIds: [...state.threads.values()].filter((thread) => thread.busy).map((thread) => thread.id) };
++      case "skills": {
++        const result = await rpc("skills/list", { cwds: [state.cwd], forceReload: true });
++        const entries = array(result["data"]).map(object).filter((entry) => text(entry["cwd"]) === state.cwd);
++        return {
++          data: entries.flatMap((entry) => array(entry["skills"]).map(object)).map((skill) => ({
++            name: text(skill["name"]), path: text(skill["path"]), enabled: skill["enabled"] !== false,
++            description: text(object(skill["interface"] ?? {})["shortDescription"]) || text(skill["description"]),
++          })).filter((skill) => skill.name !== ""),
++          errors: entries.flatMap((entry) => array(entry["errors"]).map((error) => text(object(error)["message"]))).filter(Boolean),
++        };
++      }
 +      case "models": {
 +        const [result, configuration] = await Promise.all([
 +          rpc("model/list", { limit: 100 }), rpc("config/read", { cwd: state.cwd, includeLayers: false }),
@@ -5745,6 +6020,7 @@ index 0000000000000000000000000000000000000000..a511951d5866ef90c98a3ec390df7b1b
 +          }
 +          prompt = [prompt, "Uploaded files (paths relative to the working directory; read as needed):", ...selected].filter(Boolean).join("\n");
 +        }
++        const skills = await this.skillInputs(state, input["skills"]);
 +        const images = await this.imageInputs(state, input["images"]);
 +        if (prompt.trim() === "" && images.length === 0) throw new Error("Enter a message, attach files or select workspace context");
 +        const options: RecordValue = {
@@ -5765,7 +6041,7 @@ index 0000000000000000000000000000000000000000..a511951d5866ef90c98a3ec390df7b1b
 +            developer_instructions: null,
 +          } };
 +        }
-+        const message: QueuedMessage = { id: randomUUID(), prompt, input: [...(prompt.trim() ? [{ type: "text", text: prompt, text_elements: [] }] : []), ...images], options, policy: selectedPolicy, mode };
++        const message: QueuedMessage = { id: randomUUID(), prompt, input: [...(prompt.trim() ? [{ type: "text", text: prompt, text_elements: [] }] : []), ...images, ...skills], options, policy: selectedPolicy, mode };
 +        if (thread.busy || thread.queue.length > 0) {
 +          if (thread.queue.length >= 20) throw new Error("At most 20 messages can be queued per conversation");
 +          thread.queue.push(message);
@@ -5842,6 +6118,24 @@ index 0000000000000000000000000000000000000000..a511951d5866ef90c98a3ec390df7b1b
 +    return { accepted: true };
 +  }
 +
++  private async skillInputs(state: WorkspaceState, value: unknown): Promise<RecordValue[]> {
++    if (value === undefined) return [];
++    if (!Array.isArray(value) || value.length > 20) throw new Error("Select at most 20 skills");
++    const selected = array(value).map((entry) => {
++      const skill = object(entry);
++      return { type: "skill", name: string(skill["name"], "skill name"), path: string(skill["path"], "skill path", 4096) };
++    });
++    if (selected.length === 0) return [];
++    const result = await state.connection.request("skills/list", { cwds: [state.cwd], forceReload: true });
++    const available = array(result["data"]).map(object).filter((entry) => text(entry["cwd"]) === state.cwd)
++      .flatMap((entry) => array(entry["skills"]).map(object));
++    for (const skill of selected) {
++      if (!available.some((entry) => entry["enabled"] !== false && entry["name"] === skill.name && entry["path"] === skill.path)) {
++        throw new Error(`Skill is unavailable or disabled: ${skill.name}. Reopen Skills and select it again.`);
++      }
++    }
++    return selected;
++  }
 +  private async workspaceEntry(root: string, value: unknown) {
 +    const path = string(value, "attachment path", 4096);
 +    if (isAbsolute(path) || path.split(/[\\/]/u).includes("..")) throw new Error("Attachment must be inside the current workspace");

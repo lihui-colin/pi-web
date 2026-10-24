@@ -63,9 +63,17 @@ NO_PROXY=localhost,127.0.0.1,::1 bash scripts/pi-web-run-jmfederico.sh start
 
 ## 添加工作区上下文
 
-输入框左下角的 **+** 在输入区上方展开 **Add** 菜单，提供 **Files and folders**、**Upload files** 和 **Plan mode**。选择 Files and folders 打开当前 pi-web 工作区的文件浏览器；通过 **Back to Add** 返回添加菜单。菜单支持方向键、Home / End 导航、Enter 操作、Esc 或点击外部关闭，并适配窄屏。点击目录名进入目录，↑ 返回上级；点击文件名或 **Add** 添加文件，**Add directory** 添加当前目录，也可通过目录行的 Add 选择子目录。支持筛选当前目录；选定后点击 Done、外部区域或 Esc 收起。
+输入框左下角的 **+** 在输入区上方展开 **Add** 菜单，提供 **Files and folders**、**Upload files**、**Plan mode** 和 **Skills**。选择 Files and folders 打开当前 pi-web 工作区的文件浏览器；通过 **Back to Add** 返回添加菜单。菜单支持方向键、Home / End 导航、Enter 操作、Esc 或点击外部关闭，并适配窄屏。点击目录名进入目录，↑ 返回上级；点击文件名或 **Add** 添加文件，**Add directory** 添加当前目录，也可通过目录行的 Add 选择子目录。支持筛选当前目录；选定后点击 Done、外部区域或 Esc 收起。
 
 已选项在输入框上方显示，可逐项移除。最多选择 20 项，按机器／工作区／会话保存；发送失败时保留，发送成功后清空。Files and folders 仅发送工作区相对路径，Codex 根据任务按需读取。链接条目暂不支持在选择器内添加；服务端拒绝不存在或越出工作区的路径。
+
+## 选择 Skills
+
+点击 **+ → Skills** 查看当前工作区可用的 Codex 技能，可按名称或描述搜索。每次打开或点击刷新都会重新加载；禁用的技能可查看但不可选择，加载失败时可重试。点击技能会在草稿末尾添加 `$技能名` 并回到输入框，保留原有文字，不会自动发送。
+
+所选技能的名称和路径随会话草稿保存；发送时同时传递原生 `skill` 输入项，确保同名技能使用所选路径。删除草稿中的对应 `$技能名` 会移除该选择；发送失败时保留。服务端发送前重新核对技能是否仍可用，已删除或禁用的技能会提示重新选择。
+
+列表复用 Codex 的 `skills/list`，调用格式遵循 [Codex App Server 官方说明](https://learn.chatgpt.com/docs/app-server#skills)。
 
 ## 从本机上传文件和图片
 
