@@ -291,3 +291,154 @@ index 262c3fab..0182da17 100644
 +
 +const port = window.location.port || (window.location.protocol === "https:" ? "443" : "80");
 +document.title = `PI WEB :${port}`;
+diff --git a/pi-web-plugins/files/FilesViewer.test.ts b/pi-web-plugins/files/FilesViewer.test.ts
+index 02c629dbe292d90054bea9b99d4c5ab5f177adc5..7d7dac35e400c5096a7724bfcc3fa2bb511002f0 100644
+--- a/pi-web-plugins/files/FilesViewer.test.ts
++++ b/pi-web-plugins/files/FilesViewer.test.ts
+@@ -22,6 +22,41 @@ afterEach(() => {
+ });
+ 
+ describe("workspace-file-viewer", () => {
++  it("opens a modal preview, preserves mode, and restores focus after Escape", async () => {
++    const viewer = await mountViewer(textFile("readme.md", "# Preview", { mediaType: "markdown" }));
++    modeButton(viewer, "Preview").click();
++    await viewer.updateComplete;
++    buttonWithText(viewer, "Fullscreen").click();
++    await viewer.updateComplete;
++    const dialog = requiredElement(viewer.renderRoot.querySelector("dialog"), "fullscreen dialog");
++    expect(dialog.open).toBe(true);
++    expect(dialog.querySelector(".markdown-preview")).not.toBeNull();
++    modeButton(viewer, "Raw").click();
++    await viewer.updateComplete;
++    expect(dialog.querySelector("pi-web-files-code-viewer")).not.toBeNull();
++    dialog.dispatchEvent(new Event("cancel", { cancelable: true }));
++    await viewer.updateComplete;
++    expect(viewer.renderRoot.querySelector("dialog")).toBeNull();
++    expect(modeButton(viewer, "Raw").getAttribute("aria-pressed")).toBe("true");
++    expect(viewer.shadowRoot?.activeElement).toBe(buttonWithText(viewer, "Fullscreen"));
++  });
++
++  it("exits fullscreen using the button and when the selected file changes", async () => {
++    const viewer = await mountViewer(textFile("readme.md", "# Preview", { mediaType: "markdown" }));
++    buttonWithText(viewer, "Fullscreen").click();
++    await viewer.updateComplete;
++    buttonWithText(viewer, "Exit fullscreen").click();
++    await viewer.updateComplete;
++    expect(viewer.renderRoot.querySelector("dialog")).toBeNull();
++    buttonWithText(viewer, "Fullscreen").click();
++    await viewer.updateComplete;
++    viewer.selectedPath = "next.md";
++    viewer.file = undefined;
++    await viewer.updateComplete;
++    expect(viewer.renderRoot.querySelector("dialog")).toBeNull();
++    expect(statusMessage(viewer)).toBe("Loading next.md…");
++  });
++
+   it.each(["automatic", "manual"] as const)("uses a plugin's title for its %s view button", async (renderMode) => {
+     const draw = vi.fn(() => html`<b>Named view</b>`);
+     const contentRendering = createContentRenderingCapability(() => [{ id: "highlighted", label: "Highlighted", renderer: {
+@@ -179,7 +214,7 @@ $$\frac{1}{2}$$
+     await settleDeferredContent(host);
+     expect(host.shadowRoot?.querySelector("button")).toBeNull();
+     expect(host.shadowRoot?.textContent).toContain("Diagram preview");
+-    expect(viewer.shadowRoot?.querySelectorAll(".viewer-header button")).toHaveLength(2);
++    expect(viewer.shadowRoot?.querySelectorAll(".viewer-header .viewer-mode button")).toHaveLength(2);
+     expect(viewer.shadowRoot?.querySelector(".viewer-header a[download]")).not.toBeNull();
+     modeButton(viewer, "Raw").click();
+     await settleDeferredContent(viewer);
+diff --git a/pi-web-plugins/files/FilesViewer.ts b/pi-web-plugins/files/FilesViewer.ts
+index d4345be016d0d8c012d6eda47d55fff2fa9b52e2..6bfb97da1c15fc297efd64a4b3797b9ee5c315cb 100644
+--- a/pi-web-plugins/files/FilesViewer.ts
++++ b/pi-web-plugins/files/FilesViewer.ts
+@@ -1,6 +1,6 @@
+ import type { StylesheetIntegrationCapabilityV1, ContentRendererOption, ContentRenderingCapability, FileContentResponse } from "@jmfederico/pi-web/plugin-api";
+ import { css, html, LitElement, type PropertyValues, type TemplateResult } from "lit";
+-import { property } from "lit/decorators.js";
++import { property, state } from "lit/decorators.js";
+ import { keyed } from "lit/directives/keyed.js";
+ import { ifDefined } from "lit/directives/if-defined.js";
+ import { unsafeHTML } from "lit/directives/unsafe-html.js";
+@@ -33,6 +33,9 @@ export interface WorkspaceFileViewerIdentity {
+ }
+ 
+ export class WorkspaceFileViewer extends LitElement {
++  @state() private fullscreen = false;
++  private restoreFullscreenFocus = false;
++
+   private integration: StylesheetIntegrationCapabilityV1 | undefined;
+   private releaseStyles: (() => void) | undefined;
+ 
+@@ -52,6 +55,8 @@ export class WorkspaceFileViewer extends LitElement {
+   }
+ 
+   override disconnectedCallback(): void {
++    this.fullscreen = false;
++    this.restoreFullscreenFocus = false;
+     this.releaseStyles?.();
+     this.releaseStyles = undefined;
+     super.disconnectedCallback();
+@@ -95,6 +100,7 @@ export class WorkspaceFileViewer extends LitElement {
+     }
+     const nextKey = this.currentFileKey();
+     if (nextKey === this.activeFileKey) return;
++    this.fullscreen = false;
+     this.activeFileKey = nextKey;
+     this.rendererId = undefined;
+     this.rendererChosen = false;
+@@ -109,6 +115,12 @@ export class WorkspaceFileViewer extends LitElement {
+    * plugin's initial default into a saved user choice.
+    */
+   protected override updated(): void {
++    const dialog = this.renderRoot.querySelector<HTMLDialogElement>(".fullscreen-viewer");
++    if (this.fullscreen && dialog !== null && !dialog.open) dialog.showModal();
++    if (!this.fullscreen && this.restoreFullscreenFocus) {
++      this.restoreFullscreenFocus = false;
++      this.renderRoot.querySelector<HTMLButtonElement>(".fullscreen-toggle")?.focus();
++    }
+     const mode = this.mode;
+     if (this.preference === undefined || mode === undefined || mode === this.publishedMode) return;
+     if (!this.selectionHasRawAndPreviewModes()) return;
+@@ -141,10 +153,21 @@ export class WorkspaceFileViewer extends LitElement {
+       ? this.contentRendering?.renderText({ ...request, controls: "external", allowManualPreview: this.preference === "preview", ...(this.rendererId === undefined ? {} : { rendererId: this.rendererId }) })
+       : undefined;
+     const canOpen = isBrowserPreviewKind(kind) && file.size > 0 && file.size <= this.maxInlinePreviewBytes;
+-    return html`
++    const content = html`
+       ${this.renderViewerHeader(file, metadataForFile(file, kind), canOpen)}
+       ${keyed(this.activeFileKey, this.renderLoadedFile(file, kind, token))}
+     `;
++    return this.fullscreen ? html`
++      <dialog class="fullscreen-viewer" aria-label=${`File preview: ${file.path}`}
++        @cancel=${(event: Event) => { event.preventDefault(); this.closeFullscreen(); }}
++        @close=${() => { this.closeFullscreen(); }}>${content}</dialog>
++    ` : content;
++  }
++
++  private closeFullscreen(): void {
++    if (!this.fullscreen) return;
++    this.restoreFullscreenFocus = true;
++    this.fullscreen = false;
+   }
+ 
+   private renderLoadedFile(file: FileContentResponse, kind: WorkspaceFilePreviewKind, token: number): TemplateResult {
+@@ -172,6 +195,10 @@ export class WorkspaceFileViewer extends LitElement {
+         <div class="viewer-actions">
+           <small>${metadata}</small>
+           ${this.selectionHasRawAndPreviewModes() ? this.renderModeControls(file, this.selectionToken) : null}
++          <button type="button" class="viewer-action fullscreen-toggle"
++            aria-label=${this.fullscreen ? "Exit fullscreen" : "Fullscreen"}
++            @click=${() => { if (this.fullscreen) this.closeFullscreen(); else this.fullscreen = true; }}
++          >${this.fullscreen ? "Exit fullscreen" : "Fullscreen"}</button>
+           ${canOpen ? html`
+             <a
+               class="viewer-action"
+@@ -355,6 +382,9 @@ export class WorkspaceFileViewer extends LitElement {
+     formattedTextStyles(),
+     css`
+       :host { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; overflow: auto; color: var(--pi-text); font: 14px var(--pi-font, system-ui, sans-serif); }
++      .fullscreen-viewer { position: fixed; inset: 0; box-sizing: border-box; width: 100%; height: 100%; height: 100dvh; max-width: none; max-height: none; margin: 0; padding: 0; border: 0; background: var(--pi-bg); color: var(--pi-text); font: inherit; overflow: auto; }
++      .fullscreen-viewer[open] { display: flex; flex-direction: column; }
++      .fullscreen-toggle { cursor: pointer; }
+       .viewer-header { position: sticky; top: 0; z-index: 1; flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 32px; padding: 0 0 0 10px; border-bottom: 1px solid var(--pi-border-muted); background: var(--pi-bg); }
+       .viewer-header strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 500; }
+       .viewer-actions { align-self: stretch; display: flex; align-items: center; gap: 0; flex: 0 1 auto; min-width: 0; max-width: 100%; }
