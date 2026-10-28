@@ -63,7 +63,7 @@ NO_PROXY=localhost,127.0.0.1,::1 bash scripts/pi-web-run-jmfederico.sh start
 
 ## 添加工作区上下文
 
-输入框左下角的 **+** 在输入区上方展开 **Add** 菜单，提供 **Files and folders**、**Upload files**、**Plan mode** 和 **Skills**。选择 Files and folders 打开当前 pi-web 工作区的文件浏览器；通过 **Back to Add** 返回添加菜单。菜单支持方向键、Home / End 导航、Enter 操作、Esc 或点击外部关闭，并适配窄屏。点击目录名进入目录，↑ 返回上级；点击文件名或 **Add** 添加文件，**Add directory** 添加当前目录，也可通过目录行的 Add 选择子目录。支持筛选当前目录；选定后点击 Done、外部区域或 Esc 收起。
+输入框左下角的 **+** 在输入区上方展开 **Add** 菜单，提供 **Files and folders**、**Upload files**、**Plan mode** 和 **Skills**。在输入框开头或空白之后键入 `@`，也会直接打开文件浏览器并聚焦筛选框；`@` 作为快捷键被移除，原有正文保留。粘贴、邮箱地址和输入法组合输入不会触发。选择 Files and folders 打开当前 pi-web 工作区的文件浏览器；通过 **Back to Add** 返回添加菜单。菜单支持方向键、Home / End 导航、Enter 操作、Esc 或点击外部关闭，并适配窄屏。点击目录名进入目录，↑ 返回上级；点击文件名或 **Add** 添加文件，**Add directory** 添加当前目录，也可通过目录行的 Add 选择子目录。支持筛选当前目录；选定后点击 Done、外部区域或 Esc 收起。
 
 已选项在输入框上方显示，可逐项移除。最多选择 20 项，按机器／工作区／会话保存；发送失败时保留，发送成功后清空。Files and folders 仅发送工作区相对路径，Codex 根据任务按需读取。链接条目暂不支持在选择器内添加；服务端拒绝不存在或越出工作区的路径。
 

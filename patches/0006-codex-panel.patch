@@ -51,10 +51,10 @@ index 868bc3372d0058823bfa65d23ba74f1e39a6fc94..c6c336bca5b5478ed4f9487f2e0de54e
      "node-pty": "^1.1.0",
 diff --git a/pi-web-plugins/codex/CodexBrowserRuntime.ts b/pi-web-plugins/codex/CodexBrowserRuntime.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..8e48f4261c9962f291089b2f79be1d0355d1f296
+index 0000000000000000000000000000000000000000..10a64e7df6e71ff16a1e17aa5dc4e0f5725d3f1b
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexBrowserRuntime.ts
-@@ -0,0 +1,512 @@
+@@ -0,0 +1,510 @@
 +import type { PluginPeerChannel, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
 +import { MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, IMAGE_MIME_TYPES, array, errorText, object, string, text, permissionMode, type PermissionMode, chatMode, type ChatMode, type RecordValue } from "./server/protocol.js";
 +
@@ -270,10 +270,7 @@ index 0000000000000000000000000000000000000000..8e48f4261c9962f291089b2f79be1d03
 +  }
 +  inputHistory(view: CodexView, threadId = view.threadId): string[] {
 +    if (threadId === view.threadId && Array.isArray(view.snapshot["inputHistory"])) return array(view.snapshot["inputHistory"]).filter((entry): entry is string => typeof entry === "string" && entry.trim() !== "");
-+    try {
-+      return array(JSON.parse(this.read(`${view.key}:${threadId}:input-history`) || "[]"))
-+        .filter((entry): entry is string => typeof entry === "string" && entry.trim() !== "").slice(-100);
-+    } catch { return []; }
++    return this.readStrings(`${view.key}:${threadId}:input-history`).filter((entry) => entry.trim() !== "").slice(-100);
 +  }
 +  saveReferences(view: CodexView, paths: string[]): void {
 +    view.references = [...new Set(paths)].slice(0, 20);
@@ -281,10 +278,7 @@ index 0000000000000000000000000000000000000000..8e48f4261c9962f291089b2f79be1d03
 +    this.changed(view);
 +  }
 +  private readReferences(key: string, threadId: string): string[] {
-+    try {
-+      return array(JSON.parse(this.read(`${key}:${threadId}:references`) || "[]"))
-+        .filter((entry): entry is string => typeof entry === "string" && entry.length <= 4096).slice(0, 20);
-+    } catch { return []; }
++    return this.readStrings(`${key}:${threadId}:references`).filter((entry) => entry.length <= 4096).slice(0, 20);
 +  }
 +  async fork(view: CodexView, turnId: string): Promise<void> {
 +    if (!view.threadId || view.sending || view.snapshot["busy"] === true) return;
@@ -547,6 +541,10 @@ index 0000000000000000000000000000000000000000..8e48f4261c9962f291089b2f79be1d03
 +    for (const listener of view.listeners) listener();
 +    view.context.host.requestRender();
 +  }
++  private readStrings(key: string): string[] {
++    try { return array(JSON.parse(this.read(key) || "[]")).filter((entry): entry is string => typeof entry === "string"); }
++    catch { return []; }
++  }
 +  private read(key: string): string {
 +    const memory = this.memory.get(key);
 +    if (memory !== undefined) return memory;
@@ -569,10 +567,10 @@ index 0000000000000000000000000000000000000000..8e48f4261c9962f291089b2f79be1d03
 +}
 diff --git a/pi-web-plugins/codex/CodexPanel.test.ts b/pi-web-plugins/codex/CodexPanel.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..5de9622b187aaa9977e6da3d6d3f121ff14ee459
+index 0000000000000000000000000000000000000000..4b543a5621cf580d1bd002279d220317e5f5527a
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.test.ts
-@@ -0,0 +1,2187 @@
+@@ -0,0 +1,2257 @@
 +// @vitest-environment happy-dom
 +import { afterEach, describe, expect, it, vi } from "vitest";
 +import type { WorkspaceFileUploadOptions, WorkspaceFileUploadTask, PluginPeerChannelOptions, FileContentResponse, FileTreeResponse, JsonValue, WorkspacePanelContext } from "@jmfederico/pi-web/plugin-api";
@@ -2372,6 +2370,75 @@ index 0000000000000000000000000000000000000000..5de9622b187aaa9977e6da3d6d3f121f
 +    expect(panel.shadowRoot?.querySelector(".worked-divider")?.textContent.trim()).toBe("Worked");
 +  });
 +
++  it("marks worked responses only for turns with reasoning or tool activity", async () => {
++    const { view, panel } = await fixture();
++    view.snapshot = { items: [
++      { id: "tool", kind: "commandExecution", turnId: "tools", status: "completed" },
++      { id: "first", kind: "agentMessage", phase: "final_answer", turnId: "tools", text: "Used tools" },
++      { id: "diff", kind: "diff", turnId: "plain", text: "+line" },
++      { id: "second", kind: "agentMessage", phase: "final_answer", turnId: "plain", text: "Plain response" },
++      { id: "thought", kind: "reasoning", turnId: "reasoned", text: "Thinking" },
++      { id: "third", kind: "agentMessage", phase: "final_answer", turnId: "reasoned", text: "Reasoned response" },
++    ] };
++    panel.requestUpdate(); await panel.updateComplete;
++    const dividers = [...required(panel.shadowRoot).querySelectorAll(".worked-divider")];
++    expect(dividers.map((divider) => divider.nextElementSibling?.textContent)).toEqual([
++      expect.stringContaining("Used tools"), expect.stringContaining("Reasoned response"),
++    ]);
++  });
++
++  it.each(["close", "conversation", "workspace"])("does not steal focus after @ and immediate %s change", async (change) => {
++    const { panel, view, runtime, scope, textarea, request } = await fixture();
++    vi.spyOn(scope.files, "listFiles").mockResolvedValue({ path: "", scannedAt: "now", truncated: false, entries: [] });
++    textarea.focus();
++    textarea.value = "@"; textarea.setSelectionRange(1, 1);
++    textarea.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "@" }));
++    if (change === "close") required(panel.shadowRoot?.querySelector<HTMLDetailsElement>(".context-picker")).open = false;
++    else if (change === "conversation") runtime.select(view, "other");
++    else panel.context = context(request, "other", "/other");
++    await panel.updateComplete;
++    expect(panel.shadowRoot?.activeElement?.classList.contains("context-filter")).not.toBe(true);
++    expect(view.draft).toBe("");
++  });
++
++  it.each(["", "Review ", "Review\n"])("opens workspace files when typing @ after %j without losing surrounding text", async (prefix) => {
++    const { panel, view, scope, textarea } = await fixture();
++    const listFiles = vi.spyOn(scope.files, "listFiles").mockResolvedValue({ path: "", scannedAt: "now", truncated: false,
++      entries: [{ name: "README.md", path: "README.md", type: "file" }] });
++    textarea.focus();
++    textarea.value = `${prefix}@ suffix`;
++    textarea.setSelectionRange(prefix.length + 1, prefix.length + 1);
++    textarea.dispatchEvent(new InputEvent("input", { inputType: "insertText", data: "@" }));
++    await panel.updateComplete;
++    expect(listFiles).toHaveBeenCalledWith("");
++    const picker = required(panel.shadowRoot?.querySelector<HTMLDetailsElement>(".context-picker"));
++    expect(picker.open).toBe(true);
++    expect(panel.shadowRoot?.activeElement).toBe(picker.querySelector(".context-filter"));
++    expect(view.draft).toBe(`${prefix} suffix`);
++    expect(textarea.selectionStart).toBe(prefix.length);
++    await vi.waitFor(() => { expect(picker.querySelector('[aria-label="Add README.md"]')).not.toBeNull(); });
++    required(picker.querySelector<HTMLButtonElement>('[aria-label="Add README.md"]')).click();
++    await panel.updateComplete;
++    expect(view.references).toEqual(["README.md"]);
++    picker.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, composed: true }));
++    expect(picker.open).toBe(false);
++    expect(view.draft).toBe(`${prefix} suffix`);
++  });
++
++  it.each(["email", "paste", "composition", "pending", "delete"])("does not open files for %s input", async (kind) => {
++    const { panel, view, scope, textarea } = await fixture();
++    const listFiles = vi.spyOn(scope.files, "listFiles");
++    view.pending = kind === "pending";
++    textarea.value = kind === "email" ? "name@" : "@";
++    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
++    textarea.dispatchEvent(new InputEvent("input", { data: "@", isComposing: kind === "composition",
++      inputType: kind === "paste" ? "insertFromPaste" : kind === "delete" ? "deleteContentBackward" : "insertText" }));
++    await panel.updateComplete;
++    expect(listFiles).not.toHaveBeenCalled();
++    expect(panel.shadowRoot?.querySelector<HTMLDetailsElement>(".context-picker")?.open).toBe(false);
++    expect(view.draft).toBe(textarea.value);
++  });
++
 +  it("browses workspace context, selects files and directories, removes them and closes the picker", async () => {
 +    const { panel, view, scope } = await fixture();
 +    const listFiles = vi.fn<(path: string) => Promise<FileTreeResponse>>((path) => Promise.resolve<FileTreeResponse>({ path, scannedAt: "now", truncated: false, entries: path === "" ? [{ name: "src", path: "src", type: "directory" }, { name: "README.md", path: "README.md", type: "file" }] : [{ name: "app.ts", path: "src/app.ts", type: "file" }] }));
@@ -2382,6 +2449,7 @@ index 0000000000000000000000000000000000000000..5de9622b187aaa9977e6da3d6d3f121f
 +    panel.shadowRoot?.querySelector<HTMLButtonElement>(".add-files")?.click();
 +    await Promise.resolve(); await panel.updateComplete;
 +    expect(listFiles).toHaveBeenCalledWith("");
++    expect(panel.shadowRoot?.activeElement).toBe(picker.querySelector(".context-filter"));
 +    panel.shadowRoot?.querySelector<HTMLButtonElement>('[aria-label="Add README.md"]')?.click(); await panel.updateComplete;
 +    expect(view.references).toEqual(["README.md"]);
 +    [...picker.querySelectorAll<HTMLButtonElement>(".context-name")].find((button) => button.textContent.includes("src"))?.click();
@@ -2762,10 +2830,10 @@ index 0000000000000000000000000000000000000000..5de9622b187aaa9977e6da3d6d3f121f
 +});
 diff --git a/pi-web-plugins/codex/CodexPanel.ts b/pi-web-plugins/codex/CodexPanel.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..193d2a0e928f575e015c3165ea7d8c8fba54dd04
+index 0000000000000000000000000000000000000000..343e0af1ec96d72e2cdfae200188cae513aecbb1
 --- /dev/null
 +++ b/pi-web-plugins/codex/CodexPanel.ts
-@@ -0,0 +1,1203 @@
+@@ -0,0 +1,1236 @@
 +import { statusReply } from "./statusReply.js";
 +import { LitElement, css, html, svg, nothing } from "lit";
 +import { property } from "lit/decorators.js";
@@ -3049,6 +3117,37 @@ index 0000000000000000000000000000000000000000..193d2a0e928f575e015c3165ea7d8c8f
 +      } catch (error) {
 +        if (state.generation === generation) this.appendCommandReply(state, command, errorText(error), true);
 +      }
++    });
++  }
++  private composerInput(event: Event, view: CodexView): void {
++    const editor = event.target;
++    if (!(editor instanceof HTMLTextAreaElement)) return;
++    this.historyNavigation = undefined;
++    const caret = editor.selectionStart;
++    const mention = event instanceof InputEvent && event.inputType === "insertText" && event.data === "@"
++      && !event.isComposing && !this.composing && !view.pending
++      && editor.selectionEnd === caret && editor.value[caret - 1] === "@"
++      && (caret === 1 || /\s/u.test(editor.value[caret - 2] ?? ""));
++    if (mention) {
++      // @ is a picker shortcut; references are sent separately from the draft.
++      editor.setRangeText("", caret - 1, caret, "end");
++      this.openFiles(view, caret - 1);
++    }
++    this.runtime?.saveDraft(view, editor.value);
++    this.requestUpdate();
++  }
++  private openFiles(view: CodexView, caret?: number): void {
++    const picker = this.renderRoot.querySelector<HTMLDetailsElement>(".context-picker");
++    if (!picker || view.pending) return;
++    this.closeMenus(false, undefined, [picker]);
++    this.addPage = "files";
++    picker.open = true;
++    void this.browse(this.browsePath);
++    const generation = view.generation;
++    void this.updateComplete.then(() => {
++      if (!this.isConnected || this.view !== view || view.generation !== generation || !picker.open || this.addPage !== "files") return;
++      if (caret !== undefined) this.renderRoot.querySelector<HTMLTextAreaElement>("textarea")?.setSelectionRange(caret, caret);
++      picker.querySelector<HTMLInputElement>(".context-filter")?.focus();
 +    });
 +  }
 +  private composerKeydown(event: KeyboardEvent, view: CodexView): void {
@@ -3404,7 +3503,7 @@ index 0000000000000000000000000000000000000000..193d2a0e928f575e015c3165ea7d8c8f
 +        <div class="context-bottom"><small>Selected ${view.references.length} / 20 · Paths only</small><button @click=${() => { this.closeMenus(true, ".context-picker"); }}>Done</button></div>
 +      </div>` : html`
 +          <div class="add-heading">Add</div>
-+          <button class="add-item add-files" ?disabled=${view.pending} @click=${() => { this.addPage = "files"; void this.browse(this.browsePath); }}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 15V6a4 4 0 0 1 8 0v10a6 6 0 0 1-12 0V7m8-1v10a2 2 0 0 1-4 0"/></svg><span>Files and folders</span></button>
++          <button class="add-item add-files" ?disabled=${view.pending} @click=${() => { this.openFiles(view); }}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 15V6a4 4 0 0 1 8 0v10a6 6 0 0 1-12 0V7m8-1v10a2 2 0 0 1-4 0"/></svg><span>Files and folders</span></button>
 +          <button class="add-item add-files-upload" ?disabled=${view.pending || view.sending || view.context.files.capabilityVersion !== 1 || view.attachments.length >= MAX_ATTACHMENTS} @click=${() => { this.closeMenus(false, ".context-picker"); this.renderRoot.querySelector<HTMLInputElement>(".file-input")?.click(); }}><span aria-hidden="true">▧</span><span>Upload files</span><span class="add-description">From this device</span></button>
 +          <button class="add-item add-plan" aria-pressed=${view.mode === "plan"} ?disabled=${view.pending || view.sending || view.snapshot["busy"] === true} @click=${() => { this.togglePlan(view); }}>${this.planIcon()}<span>Plan mode</span><span class="add-description">${view.mode === "plan" ? "Turn plan mode off" : "Turn plan mode on"}</span>${view.mode === "plan" ? html`<span class="add-check" aria-hidden="true">✓</span>` : nothing}</button>
 +          <button class="add-item add-skills" ?disabled=${view.pending || view.sending || !view.connected} @click=${() => { this.addPage = "skills"; this.skillsFilter = ""; void this.loadSkills(); }}><span aria-hidden="true">◇</span><span>Skills</span><span class="add-description">Use a skill</span></button>
@@ -3584,7 +3683,7 @@ index 0000000000000000000000000000000000000000..193d2a0e928f575e015c3165ea7d8c8f
 +        <input class="file-input" type="file" multiple hidden aria-label="Upload files from this device" @change=${(event: Event) => { if (event.target instanceof HTMLInputElement) { const files = Array.from(event.target.files ?? []); event.target.value = ""; this.addFiles(view, files); } }}>
 +        ${this.renderAttachmentTray(view)}
 +        <textarea rows="2" @paste=${(event: ClipboardEvent) => { this.pasteFiles(event, view); }} aria-label="Message Codex" enterkeyhint="enter" placeholder=${queueInput ? "Add to the queue, or use Steer after sending..." : view.mode === "plan" ? "Describe your task to generate a plan..." : home ? "Ask Codex to start a new conversation" : "Ask for follow-up changes"} .value=${view.draft}
-+          @input=${(event: Event) => { if (event.target instanceof HTMLTextAreaElement) { this.historyNavigation = undefined; this.runtime?.saveDraft(view, event.target.value); this.requestUpdate(); } }}
++          @input=${(event: Event) => { this.composerInput(event, view); }}
 +          @compositionstart=${() => { this.composing = true; }} @compositionend=${() => { this.composing = false; }}
 +          @keydown=${(event: KeyboardEvent) => { this.composerKeydown(event, view); }}></textarea>
 +        <div class="composer-controls">
@@ -3631,9 +3730,11 @@ index 0000000000000000000000000000000000000000..193d2a0e928f575e015c3165ea7d8c8f
 +  }
 +  private renderTimeline(items: RecordValue[]) {
 +    const groups: { id: string; activity: boolean; items: RecordValue[] }[] = [];
++    const workedTurns = new Set<RecordValue[string] | undefined>();
 +    for (const item of items) {
 +      const kind = text(item["kind"]);
 +      if (kind === "diff") continue;
++      if (kind !== "userMessage" && kind !== "agentMessage") workedTurns.add(item["turnId"]);
 +      const activity = !["userMessage", "agentMessage", "reasoning", "plan"].includes(kind);
 +      const last = groups.at(-1);
 +      if (activity && last?.activity === true && last.items[0]?.["turnId"] === item["turnId"]) last.items.push(item);
@@ -3643,7 +3744,7 @@ index 0000000000000000000000000000000000000000..193d2a0e928f575e015c3165ea7d8c8f
 +      if (!group.activity) {
 +        const item = group.items[0];
 +        if (item === undefined) return nothing;
-+        const worked = item["kind"] === "agentMessage" && item["phase"] === "final_answer" && items.some((entry) => entry["turnId"] === item["turnId"] && !["agentMessage", "userMessage", "diff"].includes(text(entry["kind"])));
++        const worked = item["kind"] === "agentMessage" && item["phase"] === "final_answer" && workedTurns.has(item["turnId"]);
 +        const duration = this.duration(item["turnDurationMs"]);
 +        return html`${worked ? html`<div class="worked-divider">${duration ? `Worked for ${duration}` : "Worked"}<span></span></div>` : nothing}${this.renderItem(item)}`;
 +      }
@@ -6683,10 +6784,10 @@ index 0000000000000000000000000000000000000000..aa521ac01149dad1f37b381d85c4ca12
 +}
 diff --git a/pi-web-plugins/codex/server/protocol.ts b/pi-web-plugins/codex/server/protocol.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..94a097083b287123012c9e622e8c2a9292b67e86
+index 0000000000000000000000000000000000000000..008ae94bb484e3c7cc6fb0907bd1d5df98bbbbda
 --- /dev/null
 +++ b/pi-web-plugins/codex/server/protocol.ts
-@@ -0,0 +1,85 @@
+@@ -0,0 +1,79 @@
 +import type { JsonValue } from "@jmfederico/pi-web/server-plugin-api";
 +
 +export type RecordValue = Record<string, JsonValue>;
@@ -6756,13 +6857,7 @@ index 0000000000000000000000000000000000000000..94a097083b287123012c9e622e8c2a92
 +}
 +
 +export function historyImages(entries: RecordValue[]): RecordValue[] {
-+  const images: RecordValue[] = [];
-+  for (const entry of entries) {
-+    const image = historyImage(entry);
-+    if (image === undefined) continue;
-+    images.push(image);
-+  }
-+  return images;
++  return entries.map(historyImage).filter((image) => image !== undefined);
 +}
 +
 +function hasAsciiControlCharacter(value: string): boolean {
