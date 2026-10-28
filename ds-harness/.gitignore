@@ -1,0 +1,6 @@
+dsh.conf
+*.log
+*.pid
+__pycache__/
+.dsh-web-token-captured
+.dsh.conf.*

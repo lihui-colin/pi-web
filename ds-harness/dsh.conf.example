@@ -1,0 +1,6 @@
+# Copy this file to dsh.conf and update the values for your environment.
+# port 是对外访问端口，由 token 反向代理监听；dsh web 只绑定本机回环地址。
+port=25228
+server_ip=10.30.0.25
+# dsh_web_run.sh start 会从启动 URL 提取并安全更新此值。
+dsh_token=''
