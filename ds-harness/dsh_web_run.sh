@@ -107,6 +107,7 @@ start() {
     (( port >= 1 && port <= 65535 )) || { fail 'port 必须是 1–65535 之间的整数。'; return 1; }
     [[ -n "${server_ip:-}" ]] || { fail 'server_ip 不能为空。'; return 1; }
     local host_ip command_name upstream_port='' pid index
+    local base_path="/dsh-${port}/" public_url="https://${server_ip}:${port}/dsh-${port}/"
     local tls_cert="${tls_cert:-tls/fullchain.pem}" tls_key="${tls_key:-tls/privkey.pem}"
     [[ "$tls_cert" == /* ]] || tls_cert="$script_dir/$tls_cert"
     [[ "$tls_key" == /* ]] || tls_key="$script_dir/$tls_key"
@@ -127,14 +128,20 @@ PY
 
     # Reuse a running backend's actual port when starting a missing proxy.
     if pid="$(service_pid dsh-web)"; then
+        local running_public_url=''
         local -a arguments
         mapfile -d '' -t arguments <"/proc/$pid/cmdline"
         for ((index=0; index<${#arguments[@]}-1; index++)); do
             if [[ "${arguments[index]}" == --port ]]; then
                 upstream_port="${arguments[index+1]}"
-                break
+            elif [[ "${arguments[index]}" == --public-url ]]; then
+                running_public_url="${arguments[index+1]}"
             fi
         done
+        if [[ "$running_public_url" != "$public_url" ]]; then
+            fail "运行中 DSH 的访问地址与 $public_url 不一致；请在任务完成后安排 stop/start，当前进程保持运行。"
+            return 1
+        fi
         [[ "$upstream_port" =~ ^[0-9]+$ ]] || { fail '无法读取运行中 dsh 的端口。'; return 1; }
     else
         if service_pid dsh-token-proxy >/dev/null; then
@@ -143,16 +150,30 @@ PY
         fi
         upstream_port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
     fi
+    if pid="$(service_pid dsh-token-proxy)"; then
+        local running_base_path=''
+        local -a proxy_arguments
+        mapfile -d '' -t proxy_arguments <"/proc/$pid/cmdline"
+        for ((index=0; index<${#proxy_arguments[@]}-1; index++)); do
+            if [[ "${proxy_arguments[index]}" == --base-path ]]; then
+                running_base_path="${proxy_arguments[index+1]}"
+            fi
+        done
+        if [[ "$running_base_path" != "$base_path" ]]; then
+            fail "运行中代理尚未使用 $base_path；请安排代理维护，当前进程保持运行。"
+            return 1
+        fi
+    fi
     start_service magpie-serve magpie serve
     start_service dsh-web dsh web --port "$upstream_port" --host 127.0.0.1 \
         --trusted-host "${server_ip}:${port}" --trusted-host "127.0.0.1:${upstream_port}" \
-        --public-url "https://${server_ip}:${port}" --no-open
+        --public-url "$public_url" --no-open
     start_service dsh-token-proxy python3 "$proxy_script" \
         --listen-host "$host_ip" --listen-port "$port" \
         --upstream-host 127.0.0.1 --upstream-port "$upstream_port" \
-        --public-host "${server_ip}:${port}" --config "$config_file" \
+        --public-host "${server_ip}:${port}" --base-path "$base_path" --config "$config_file" \
         --tls-cert "$tls_cert" --tls-key "$tls_key"
-    printf '访问地址：https://%s:%s/\n' "$server_ip" "$port"
+    printf '访问地址：%s\n' "$public_url"
 }
 
 stop() {

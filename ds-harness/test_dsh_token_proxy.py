@@ -31,7 +31,7 @@ def create_test_certificate(directory):
 
 
 @contextmanager
-def proxy_fixture(responses, tls_context=None):
+def proxy_fixture(responses, tls_context=None, base_path="/"):
     replies = deque(responses)
     requests = []
     errors = []
@@ -81,7 +81,7 @@ def proxy_fixture(responses, tls_context=None):
     with ThreadingHTTPServer(("127.0.0.1", 0), Upstream) as upstream:
         with TokenProxy(
             ("127.0.0.1", 0), upstream.server_address, "launch-token", "dsh.test:25228",
-            tls_context,
+            tls_context, base_path,
         ) as proxy:
             for server in (upstream, proxy):
                 threading.Thread(
@@ -97,8 +97,8 @@ def proxy_fixture(responses, tls_context=None):
 
 
 class PageAuthenticationTests(unittest.TestCase):
-    def request(self, responses, target="/", headers=None, method="GET", body=None):
-        with proxy_fixture(responses) as (address, requests, replies, errors):
+    def request(self, responses, target="/", headers=None, method="GET", body=None, base_path="/"):
+        with proxy_fixture(responses, base_path=base_path) as (address, requests, replies, errors):
             connection = http.client.HTTPConnection(*address, timeout=2)
             try:
                 connection.request(method, target, body=body, headers=headers or {})
@@ -110,6 +110,47 @@ class PageAuthenticationTests(unittest.TestCase):
             self.assertFalse(replies, "not all expected upstream responses were used")
             self.assertFalse(errors)
             return result, requests
+
+    def test_prefixed_login_scopes_cookie_and_recovers_stale_cookie(self):
+        result, requests = self.request([
+            (401, [], b"expired"),
+            (303, [("Location", "./"), ("Set-Cookie", COOKIE)], b""),
+            (200, [], PAGE),
+        ], target="/dsh-25228/", base_path="/dsh-25228/",
+            headers={"Cookie": "dsh-auth-other=stale"})
+        self.assertEqual((result[0], result[2]), (200, PAGE))
+        self.assertIn("Path=/dsh-25228/", dict(result[1])["Set-Cookie"])
+        self.assertEqual([path for path, _ in requests], ["/", "/?token=launch-token", "/"])
+
+    def test_prefix_redirect_preserves_query_and_rejects_other_paths(self):
+        for target in ("/?token=user-token", "/dsh-25228?token=user-token"):
+            result, requests = self.request([], target=target, base_path="/dsh-25228/")
+            self.assertEqual(result[0], 302)
+            self.assertEqual(dict(result[1])["Location"], "/dsh-25228/?token=user-token")
+            self.assertFalse(requests)
+        for target in ("/api/call", "/dsh-25229/api/call", "/dsh-25228-extra/"):
+            result, requests = self.request([], target=target, base_path="/dsh-25228/")
+            self.assertEqual(result[0], 404)
+            self.assertFalse(requests)
+
+    def test_prefixed_post_and_static_asset_preserve_path_query_and_body(self):
+        for method, target, body in (("POST", "/api/pluginInventory/list?q=x%2Fy", b'{"args":{}}'),
+                                      ("GET", "/app.js?v=42", None)):
+            result, requests = self.request([(200, [], None)], target="/dsh-25228" + target,
+                                            base_path="/dsh-25228/", method=method, body=body)
+            self.assertEqual(result[0], 200)
+            self.assertEqual(requests[0][0], target)
+            self.assertEqual(result[2], body or b"")
+
+    def test_prefixed_redirects(self):
+        for location, expected in (("./api/remote.mux", "./api/remote.mux"),
+                                   ("/api/remote.mux", "/dsh-25228/api/remote.mux"),
+                                   ("https://dsh.test:25228/api/remote.mux", "https://dsh.test:25228/dsh-25228/api/remote.mux"),
+                                   ("https://external.test/", "https://external.test/")):
+            result, _ = self.request([(302, [("Location", location), ("Set-Cookie", COOKIE)], b"")],
+                                     target="/dsh-25228/connect", base_path="/dsh-25228/")
+            self.assertEqual(dict(result[1])["Location"], expected)
+            self.assertIn("Path=/dsh-25228/", dict(result[1])["Set-Cookie"])
 
     def test_first_visit_returns_page_and_strict_cookie_without_redirect(self):
         result, requests = self.request(
@@ -148,6 +189,33 @@ class PageAuthenticationTests(unittest.TestCase):
         )
         self.assertEqual((result[0], result[2]), (200, PAGE))
         self.assertEqual([path for path, _ in requests], ["/"])
+
+    def test_stale_cookie_reauthenticates_page_once(self):
+        for target in ("/", "/index.html"):
+            with self.subTest(target=target):
+                result, requests = self.request([
+                    (401, [], b"authentication required"),
+                    (303, [("Location", "./"), ("Set-Cookie", COOKIE)], b""),
+                    (200, [], PAGE),
+                ], target=target, headers={"Cookie": "dsh-auth-old=expired; theme=dark"})
+                self.assertEqual((result[0], result[2]), (200, PAGE))
+                self.assertEqual([path for path, _ in requests], [target, target + "?token=launch-token", "/"])
+                self.assertEqual(requests[1][1]["Cookie"], "theme=dark")
+                self.assertEqual(dict(result[1])["Set-Cookie"], COOKIE)
+
+    def test_reauthentication_failure_is_not_retried_forever(self):
+        result, requests = self.request([(401, [], b"expired"), (401, [], b"invalid token")],
+                                        headers={"Cookie": "dsh-auth-old=expired"})
+        self.assertEqual(result[0], 401)
+        self.assertEqual(len(requests), 2)
+
+    def test_api_and_explicit_invalid_token_are_not_reauthenticated(self):
+        for target in ("/api/call", "/?token=invalid"):
+            with self.subTest(target=target):
+                result, requests = self.request([(401, [], b"unauthorized")], target=target,
+                                                headers={"Cookie": "dsh-auth-old=expired"})
+                self.assertEqual(result[0], 401)
+                self.assertEqual(len(requests), 1)
 
     def test_explicit_token_keeps_upstream_redirect(self):
         result, requests = self.request(
@@ -281,13 +349,13 @@ class HttpsTests(unittest.TestCase):
         handshake = [("Connection", "Upgrade"), ("Upgrade", "websocket")]
         # The upstream waits for the client frame before replying. This catches relays
         # that wait on select() while the frame is already in the TLS decrypted buffer.
-        with proxy_fixture([(101, handshake, b"")], self.server_context) as fixture:
+        with proxy_fixture([(101, handshake, b"")], self.server_context, "/dsh-25228/") as fixture:
             address, requests, replies, errors = fixture
             with socket.create_connection(address, timeout=2) as raw:
                 with self.client_context.wrap_socket(raw, server_hostname="127.0.0.1") as client:
                     frame = b"\x81\x80abcd"
                     client.sendall(
-                        b"GET /api/remote.mux HTTP/1.1\r\nHost: browser.test\r\n"
+                        b"GET /dsh-25228/api/remote.mux HTTP/1.1\r\nHost: browser.test\r\n"
                         b"Connection: Upgrade\r\nUpgrade: websocket\r\n"
                         b"Cookie: dsh-auth-test=browser-session\r\n"
                         b"Origin: https://dsh.test:25228\r\n\r\n" + frame
@@ -298,6 +366,7 @@ class HttpsTests(unittest.TestCase):
             head, _, body = response.partition(b"\r\n\r\n")
             self.assertTrue(head.startswith(b"HTTP/1.1 101"))
             self.assertEqual(body, frame)
+            self.assertEqual(requests[0][0], "/api/remote.mux")
             self.assertEqual(requests[0][1]["X-Forwarded-Proto"], "https")
             self.assertEqual(requests[0][1]["Origin"], "https://dsh.test:25228")
             self.assertFalse(replies or errors)

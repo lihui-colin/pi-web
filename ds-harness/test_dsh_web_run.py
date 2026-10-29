@@ -63,6 +63,10 @@ class LauncherTests(unittest.TestCase):
                 self.assertFalse(pids(), "missing TLS key must fail before starting services")
                 key.with_suffix(".backup").rename(key)
                 self.assertEqual(run("start"), 0, (root / "launcher.log").read_text())
+                self.assertIn(
+                    f"访问地址：https://127.0.0.1:{port}/dsh-{port}/",
+                    (root / "launcher.log").read_text(),
+                )
                 original = pids()
                 self.assertEqual(len(original), 3)
                 self.assertIn("dsh_token='test-launch-token'", config.read_text())
@@ -75,8 +79,14 @@ class LauncherTests(unittest.TestCase):
                 backend_port = backend[backend.index(b"--port") + 1]
                 self.assertEqual(
                     backend[backend.index(b"--public-url") + 1],
-                    f"https://127.0.0.1:{port}".encode(),
+                    f"https://127.0.0.1:{port}/dsh-{port}/".encode(),
                 )
+                # Changing the advertised URL must never silently reuse/restart a backend.
+                original_config = config.read_text()
+                config.write_text(original_config.replace('server_ip=127.0.0.1', 'server_ip=localhost'))
+                self.assertNotEqual(run("start"), 0)
+                self.assertEqual(pids(), original)
+                config.write_text(original_config)
                 os.kill(original["dsh-token-proxy"], signal.SIGTERM)
                 for _ in range(100):
                     process = Path(f'/proc/{original["dsh-token-proxy"]}/cmdline')
@@ -87,6 +97,7 @@ class LauncherTests(unittest.TestCase):
                 recovered = pids()
                 self.assertEqual(recovered["dsh-web"], original["dsh-web"])
                 proxy = Path(f'/proc/{recovered["dsh-token-proxy"]}/cmdline').read_bytes().split(b"\0")
+                self.assertEqual(proxy[proxy.index(b"--base-path") + 1], f"/dsh-{port}/".encode())
                 self.assertEqual(proxy[proxy.index(b"--upstream-port") + 1], backend_port)
                 self.assertEqual(proxy[proxy.index(b"--tls-cert") + 1], str(cert).encode())
                 self.assertEqual(proxy[proxy.index(b"--tls-key") + 1], str(key).encode())

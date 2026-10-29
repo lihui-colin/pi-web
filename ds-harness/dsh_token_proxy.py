@@ -49,10 +49,13 @@ def append_token(method, target, headers, token):
 
 
 class TokenProxy(ThreadingHTTPServer):
-    def __init__(self, listen, upstream, token, public_host, tls_context=None):
+    def __init__(self, listen, upstream, token, public_host, tls_context=None, base_path="/"):
         if not re.fullmatch(r"[A-Za-z0-9_-]+", token):
             raise ValueError("dsh token is missing or invalid")
         self.upstream, self.token, self.public_host = upstream, token, public_host
+        if base_path != "/" and not re.fullmatch(r"/[A-Za-z0-9_-]+/", base_path):
+            raise ValueError("base path must be / or a single /segment/")
+        self.base_path = base_path
         self.tls_context = tls_context
         super().__init__(listen, ProxyHandler)
 
@@ -76,15 +79,52 @@ class ProxyHandler(BaseHTTPRequestHandler):
         pass  # Request URLs can contain launch tokens.
 
     def send_header(self, name, value):
-        if self.server.tls_context and name.lower() == "set-cookie" and value.startswith("dsh-auth-"):
-            if not re.search(r";\s*secure(?:\s*;|\s*$)", value, re.IGNORECASE):
+        base = self.server.base_path
+        if name.lower() == "set-cookie" and value.startswith("dsh-auth-"):
+            if base != "/":
+                if re.search(r";\s*path=", value, re.IGNORECASE):
+                    value = re.sub(r"(;\s*path=)[^;]*", lambda m: m[1] + base, value, flags=re.IGNORECASE)
+                else:
+                    value += "; Path=" + base
+            if self.server.tls_context and not re.search(r";\s*secure(?:\s*;|\s*$)", value, re.IGNORECASE):
                 value += "; Secure"
+        elif name.lower() == "location" and base != "/":
+            url = urlsplit(value)
+            # Relative redirects already resolve below the public prefix.
+            if (not url.netloc and not url.scheme and value.startswith("/") and not value.startswith("//")) or (
+                url.netloc == self.server.public_host and url.scheme in {"http", "https"}
+            ):
+                if not url.path.startswith(base) and url.path != base.rstrip("/"):
+                    value = urlunsplit(url._replace(path=base + url.path.lstrip("/")))
         super().send_header(name, value)
+
+    def route_path(self):
+        base = self.server.base_path
+        if base == "/":
+            return True
+        url = urlsplit(self.path)
+        if url.scheme or url.netloc:
+            self.send_error(400, "Expected an origin-form request target")
+            return False
+        if url.path in {"/", base.rstrip("/")} and self.command in {"GET", "HEAD"}:
+            self.send_response(302)
+            self.send_header("Location", urlunsplit(url._replace(path=base)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return False
+        if not url.path.startswith(base):
+            self.send_error(404, "Use the instance URL")
+            return False
+        self.path = urlunsplit(url._replace(path="/" + url.path[len(base):]))
+        return True
 
     def proxy(self):
         self.close_connection = True
         self.responded = False
         try:
+            if not self.route_path():
+                return
             websocket = self.headers.get("Upgrade", "").lower() == "websocket"
             headers = {
                 name.lower(): value
@@ -140,7 +180,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         target = append_token(self.command, self.path, self.headers.items(), self.server.token)
         bootstrap = target != self.path and urlsplit(self.path).path == "/"
         session_cookies = []
-        for attempt in range(2):
+        for attempt in range(3):
             with closing(http.client.HTTPConnection(*self.server.upstream, timeout=30)) as upstream:
                 upstream.request(self.command, target, body=body or None, headers=headers)
                 response = upstream.getresponse()
@@ -150,7 +190,27 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     and "=" in value.split(";", 1)[0]
                 ]
                 if (
-                    attempt == 0 and bootstrap and response.status == 303
+                    attempt == 0 and response.status == 401
+                    and self.command == "GET"
+                    and urlsplit(self.path).path in {"/", "/index.html"}
+                    and target == self.path
+                    and not any(name == "token" for name, _ in parse_qsl(
+                        urlsplit(self.path).query, keep_blank_values=True,
+                    ))
+                ):
+                    # A previous backend session's cookie must not prevent login.
+                    # Retry only page navigation; never replay API calls or writes.
+                    response.read()
+                    jar = SimpleCookie(headers.get("cookie", ""))
+                    headers["cookie"] = "; ".join(
+                        cookie.OutputString(attrs=[])
+                        for name, cookie in jar.items() if not name.startswith("dsh-auth-")
+                    )
+                    target = append_token(self.command, self.path, headers.items(), self.server.token)
+                    bootstrap = True
+                    continue
+                if (
+                    attempt < 2 and not session_cookies and bootstrap and response.status == 303
                     and response.getheader("Location") == "./" and cookies
                 ):
                     # Cross-site redirects cannot send Strict cookies. Complete our
@@ -193,6 +253,7 @@ def main():
         parser.add_argument(f"--{endpoint}-host", required=True)
         parser.add_argument(f"--{endpoint}-port", required=True, type=int)
     parser.add_argument("--public-host", required=True)
+    parser.add_argument("--base-path", default="/", help="Public instance prefix, e.g. /dsh-25228/")
     parser.add_argument("--config", required=True)
     parser.add_argument("--tls-cert")
     parser.add_argument("--tls-key")
@@ -208,7 +269,7 @@ def main():
             tls_context.load_cert_chain(args.tls_cert, args.tls_key)
         with TokenProxy(
             (args.listen_host, args.listen_port), (args.upstream_host, args.upstream_port),
-            read_token(args.config), args.public_host, tls_context,
+            read_token(args.config), args.public_host, tls_context, args.base_path,
         ) as server:
             server.serve_forever()
     except (OSError, ValueError) as error:

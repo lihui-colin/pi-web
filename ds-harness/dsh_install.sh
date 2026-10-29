@@ -41,8 +41,9 @@ while (( $# )); do
                 '默认配置为脚本同目录的 dsh.conf，证书相对路径以配置目录为基准。' \
                 '--tls-host 可重复添加额外 SAN；--tls-dir 可覆盖证书目录，需同步调整服务配置。' \
                 '已有证书会校验并保留；--cert-only 只处理证书，--dry-run 不写入文件。' \
-                '局域网客户端需信任生成的 ca.pem；只导入根证书，不复制 CA 私钥。' \
+                '局域网客户端导入 ca.crt（与 ca.pem 同一根证书）；不复制 CA 私钥。' \
                 'DSH_HOME 可指定目标数据目录，默认 ~/.dsh。' \
+                'Magpie 安装最多尝试 3 次；支持 MAGPIE_PROXY 代理及 MAGPIE_MIRROR 镜像前缀。' \
                 '请在新机器或目标 DSH 已停机时安装；本脚本不启停服务。' \
                 '用户数据、模型配置、API Key、magpie 账号需要单独恢复。'
             exit 0 ;;
@@ -74,6 +75,35 @@ run() {
         "$@"
     fi
 }
+
+# 保留官方安装器的平台选择和 SHA-256 校验；重试覆盖其内部二进制下载。
+install_magpie() (
+    local installer_dir attempt
+    installer_dir="$(mktemp -d)" || exit 1
+    trap 'rm -rf -- "$installer_dir"' EXIT
+    local curl_args=(-fsSL --connect-timeout 15 --max-time 120)
+    if [[ -n "${MAGPIE_PROXY:-}" ]]; then
+        curl_args+=(--proxy "$MAGPIE_PROXY")
+    fi
+    for attempt in 1 2 3; do
+        printf 'Magpie 安装尝试 %s/3。\n' "$attempt"
+        # 不使用管道：只有完整下载成功后才执行，失败的下载不能当作脚本运行。
+        if curl "${curl_args[@]}" https://usemagpie.ai/install.sh -o "$installer_dir/install.sh" &&
+            sh "$installer_dir/install.sh"; then
+            exit 0
+        fi
+        if (( attempt < 3 )); then
+            printf 'Magpie 安装失败，3 秒后重试。\n' >&2
+            sleep 3
+        fi
+    done
+    printf '%s\n' \
+        'Magpie 安装失败，停止后续插件安装。' \
+        '若官网或 GitHub 连接失败，请先恢复 DNS/网络，或设置 MAGPIE_PROXY（服务器可访问的代理地址）后重跑。' \
+        'MAGPIE_MIRROR 仅用于 GitHub 二进制下载；安装脚本、版本信息和校验值仍需访问 usemagpie.ai。' \
+        '这两个变量由官方安装器支持；镜像下载仍使用官方 SHA-256 校验。' >&2
+    exit 1
+)
 
 # 先校验配置/证书，再安装软件，避免因配置错误先更新运行环境。
 # 只解析需要的键，不 source 配置，避免执行配置中的 shell 内容。
@@ -107,7 +137,8 @@ const key = dirOverride ? path.resolve(dirOverride, 'privkey.pem') : path.resolv
 const caDir = path.dirname(cert);
 const ca = path.join(caDir, 'ca.pem');
 const caKey = path.join(caDir, 'ca-key.pem');
-if (new Set([cert, key, ca, caKey]).size !== 4) throw new Error('证书、服务器私钥、CA 和 CA 私钥路径不能相同');
+const caCrt = path.join(caDir, 'ca.crt');
+if (new Set([cert, key, ca, caKey, caCrt]).size !== 5) throw new Error('证书、服务器私钥、CA 和 CA 私钥路径不能相同');
 const openssl = args => execFileSync('openssl', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 function validatePair(certPath, keyPath) {
   const x = new crypto.X509Certificate(fs.readFileSync(certPath));
@@ -115,6 +146,23 @@ function validatePair(certPath, keyPath) {
   if (!x.publicKey.export({ type: 'spki', format: 'der' }).equals(actual)) throw new Error(`证书和私钥不匹配：${certPath}`);
   openssl(['x509', '-in', certPath, '-noout', '-checkend', '86400']);
   return x;
+}
+// Export only the public root certificate; preserve the server certificate and keys.
+function exportRootCertificate() {
+  if (!fs.existsSync(ca)) {
+    console.log('未找到本地 ca.pem，未导出 ca.crt；外部签发证书请使用签发方提供的根证书。');
+    return;
+  }
+  const root = new crypto.X509Certificate(fs.readFileSync(ca));
+  if (!root.ca) throw new Error('ca.pem 不是 CA 证书，拒绝导出');
+  openssl(['verify', '-CAfile', ca, cert]);
+  if (fs.existsSync(caCrt)) {
+    const existing = new crypto.X509Certificate(fs.readFileSync(caCrt));
+    if (!existing.raw.equals(root.raw)) throw new Error('已有 ca.crt 与 ca.pem 不一致，请备份并检查后再处理');
+  } else if (preview !== 'true') {
+    fs.writeFileSync(caCrt, root.toString(), { flag: 'wx', mode: 0o644 });
+  }
+  console.log(`${preview === 'true' ? '预览：根证书导出路径' : '设备导入并信任的根证书'}：${caCrt}`);
 }
 console.log(`DSH 配置：${config}\n证书 SAN：${san.join(', ')}\nHTTPS 证书：${cert}\n服务器私钥：${key}`);
 if (fs.existsSync(cert) !== fs.existsSync(key)) throw new Error('已有证书/私钥不完整，停止处理；请先检查备份');
@@ -125,6 +173,7 @@ if (fs.existsSync(cert)) {
     if (!match) throw new Error(`已有证书未覆盖 ${host}；请备份后配置新的证书路径`);
   }
   console.log('已有证书有效、地址和私钥匹配，保留原文件。');
+  exportRootCertificate();
   process.exit(0);
 }
 if (fs.existsSync(ca) !== fs.existsSync(caKey)) throw new Error('已有 CA 文件不完整，停止处理');
@@ -135,7 +184,7 @@ if (fs.existsSync(ca)) {
   openssl(['x509', '-in', ca, '-noout', '-checkend', String(366 * 86400)]);
 }
 if (preview === 'true') {
-  console.log(`预览：将生成/复用本地 CA ${ca}，签发有效期 365 天的 HTTPS 证书，不写入文件。`);
+  console.log(`预览：将生成/复用本地 CA ${ca}，签发有效期 365 天的 HTTPS 证书并导出 ${caCrt}，不写入文件。`);
   process.exit(0);
 }
 for (const dir of new Set([caDir, path.dirname(key)])) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -169,7 +218,8 @@ try {
   fs.writeFileSync(cert, fs.readFileSync(tempCert, 'utf8') + fs.readFileSync(signer, 'utf8'), { flag: 'wx', mode: 0o644 });
   fs.chmodSync(key, 0o600);
   fs.chmodSync(caKey, 0o600);
-  console.log(`HTTPS 证书已生成。请在访问设备上导入并信任根证书：${ca}`);
+  exportRootCertificate();
+  console.log(`HTTPS 证书已生成。请在访问设备上导入并信任根证书：${caCrt}`);
   console.log('不要分发 ca-key.pem 或 privkey.pem；iOS 安装描述文件后还需启用根证书完全信任。');
 } finally {
   if (path.dirname(temp) !== caDir || !path.basename(temp).startsWith('.generate-')) throw new Error('拒绝清理意外的临时路径');
@@ -223,9 +273,9 @@ fi
 if ! "$upgrade" && command -v magpie >/dev/null 2>&1; then
     printf '%s\n' '已存在 magpie，跳过安装。'
 else
-    printf '%s\n' '+ curl -fsSL https://usemagpie.ai/install.sh | sh'
+    printf '%s\n' '+ curl 下载官方 Magpie 安装器后执行（最多尝试 3 次）'
     if ! "$dry_run"; then
-        curl -fsSL --connect-timeout 15 --max-time 120 https://usemagpie.ai/install.sh | sh
+        install_magpie
         if ! command -v magpie >/dev/null 2>&1; then
             printf 'magpie 安装后不在 PATH 中，请按官方安装器提示配置 PATH。\n' >&2
             exit 1
