@@ -31,7 +31,7 @@ bash ds-harness/dsh_cert.sh
 ./ds-harness/dsh_web_run.sh stop
 ```
 
-停止后清除 token；日志和 PID 保存在本目录。配置文件仅当前用户可读写，日志会隐藏启动 token；配置、日志、PID 和 Python 缓存均不提交 Git。`tls/<地址>/` 中的 `ca.crt`、`ca.pem` 和 `fullchain.pem` 可提交仓库；`ca-key.pem`、`privkey.pem` 及生成临时文件继续忽略。迁移机器时私钥需通过单独的加密通道传输，仅克隆仓库无法启动 HTTPS。修改配置后需在合适时机先 `stop` 再 `start`；单独更新入口证书只需重启代理，保留 dsh 后端及运行中的任务。
+停止后清除 token；日志和 PID 保存在本目录。配置文件仅当前用户可读写，日志会隐藏启动 token；配置、日志、PID 和 Python 缓存均不提交 Git。整个 `tls/` 目录（包括公开证书、私钥和生成临时文件）均不提交代码库。迁移机器时需通过单独的加密通道复制证书和私钥，或在目标机器重新生成并重新信任 CA；仅克隆仓库无法启动 HTTPS。修改配置后需在合适时机先 `stop` 再 `start`；单独更新入口证书只需重启代理，保留 dsh 后端及运行中的任务。
 
 独立证书脚本 `dsh_cert.sh` 需要 Node.js >=24 和 OpenSSL，读取 `server_ip`（IP 或 DNS 名称），默认使用脚本同目录的 `dsh.conf`。支持以下参数：
 

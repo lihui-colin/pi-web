@@ -4,10 +4,5 @@ dsh.conf
 __pycache__/
 .dsh-web-token-captured
 .dsh.conf.*
-# 只提交地址目录中的公开证书；私钥和生成中的临时文件留在本机。
-/tls/*
-!/tls/*/
-/tls/*/*
-!/tls/*/ca.crt
-!/tls/*/ca.pem
-!/tls/*/fullchain.pem
+# 证书及私钥只保留本地，不提交代码库。
+/tls/
