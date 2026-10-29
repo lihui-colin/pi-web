@@ -121,10 +121,23 @@ start() {
     (( port >= 1 && port <= 65535 )) || { fail 'port 必须是 1–65535 之间的整数。'; return 1; }
     [[ -n "${server_ip:-}" ]] || { fail 'server_ip 不能为空。'; return 1; }
     local host_ip command_name upstream_port='' pid
-    local base_path="/dsh-${port}/" public_url="https://${server_ip}:${port}/dsh-${port}/"
-    local tls_cert="${tls_cert:-tls/fullchain.pem}" tls_key="${tls_key:-tls/privkey.pem}"
-    [[ "$tls_cert" == /* ]] || tls_cert="$script_dir/$tls_cert"
-    [[ "$tls_key" == /* ]] || tls_key="$script_dir/$tls_key"
+    local public_host="$server_ip"
+    [[ "$server_ip" != *:* ]] || public_host="[$server_ip]"
+    local base_path="/dsh-${port}/" public_url="https://${public_host}:${port}/dsh-${port}/"
+    local tls_address tls_cert tls_key
+    tls_address="$(python3 - "$server_ip" <<'PY'
+import ipaddress, re, sys
+address = sys.argv[1]
+try:
+    ipaddress.ip_address(address)
+except ValueError:
+    if not (len(address) <= 253 and all(re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?', label) for label in address.split('.'))):
+        sys.exit('server_ip 必须是 IP 或域名，不得包含协议、端口或路径。')
+print(address.lower().replace(':', '_'))
+PY
+)" || return 1
+    tls_cert="$script_dir/tls/$tls_address/fullchain.pem"
+    tls_key="$script_dir/tls/$tls_address/privkey.pem"
     read -r host_ip _ <<<"$(hostname -I)"
     [[ -n "$host_ip" ]] || { fail '无法获取本机绑定地址。'; return 1; }
     for command_name in magpie dsh python3; do
@@ -137,7 +150,7 @@ import ssl, sys
 try:
     ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER).load_cert_chain(*sys.argv[1:])
 except (OSError, ValueError) as error:
-    sys.exit(f"无法加载 HTTPS 证书或私钥，请检查 dsh.conf 的 tls_cert / tls_key：{error}")
+    sys.exit(f"无法加载地址目录中的 HTTPS 证书或私钥：{sys.argv[1]} / {sys.argv[2]}。请先运行 dsh_cert.sh：{error}")
 PY
 
     # Reuse a running backend's actual port when starting a missing proxy.
@@ -161,12 +174,12 @@ PY
     fi
     start_service magpie-serve magpie serve
     start_service dsh-web dsh web --port "$upstream_port" --host 127.0.0.1 \
-        --trusted-host "${server_ip}:${port}" --trusted-host "127.0.0.1:${upstream_port}" \
+        --trusted-host "${public_host}:${port}" --trusted-host "127.0.0.1:${upstream_port}" \
         --public-url "$public_url" --no-open
     start_service dsh-token-proxy python3 "$proxy_script" \
         --listen-host "$host_ip" --listen-port "$port" \
         --upstream-host 127.0.0.1 --upstream-port "$upstream_port" \
-        --public-host "${server_ip}:${port}" --base-path "$base_path" --config "$config_file" \
+        --public-host "${public_host}:${port}" --base-path "$base_path" --config "$config_file" \
         --tls-cert "$tls_cert" --tls-key "$tls_key"
     printf '访问地址：%s\n' "$public_url"
 }

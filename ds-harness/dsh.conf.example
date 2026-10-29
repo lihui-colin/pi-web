@@ -3,8 +3,7 @@
 # 访问路径自动生成为 /dsh-{port}/，例如 https://10.30.0.25:25228/dsh-25228/。
 port=25228
 server_ip=10.30.0.25
-# PEM 证书链和无口令私钥；相对路径以本目录为基准，证书 SAN 须匹配 server_ip。
-tls_cert=tls/fullchain.pem
-tls_key=tls/privkey.pem
+# 启动时按 server_ip 自动加载 tls/<地址>/fullchain.pem 和 privkey.pem。
+# 请先运行 dsh_cert.sh；无需配置 tls_cert / tls_key，旧字段会被忽略。
 # dsh_web_run.sh start 会从启动 URL 提取并安全更新此值。
 dsh_token=''

@@ -15,6 +15,42 @@ from test_dsh_token_proxy import create_test_certificate
 
 
 class LauncherTests(unittest.TestCase):
+    def test_certificate_directory_follows_address_and_rejects_fallback(self):
+        with tempfile.TemporaryDirectory(prefix='dsh-cert-selection-') as temporary:
+            root = Path(temporary)
+            script = root / 'dsh_web_run.sh'
+            shutil.copy2(Path(__file__).with_name('dsh_web_run.sh'), script)
+            shutil.copy2(Path(__file__).with_name('dsh_token_proxy.py'), root / 'dsh_token_proxy.py')
+            seed = root / 'seed'
+            seed.mkdir()
+            cert, key = create_test_certificate(seed)
+            config = root / 'dsh.conf'
+            # Stub service management: exercise selection and TLS validation only.
+            command = ['bash', '-c', 'source "$1"; service_pid() { return 1; }; '
+                       'start_service() { printf "SERVICE %s\\n" "$*"; }; start', 'test', str(script)]
+            for address, folder in [('127.0.0.1', '127.0.0.1'), ('10.30.0.25', '10.30.0.25'),
+                                    ('DSH.Example.Test', 'dsh.example.test'), ('::1', '__1')]:
+                with self.subTest(address=address):
+                    directory = root / 'tls' / folder
+                    directory.mkdir(parents=True)
+                    shutil.copy2(cert, directory / 'fullchain.pem')
+                    shutil.copy2(key, directory / 'privkey.pem')
+                    config.write_text(f'port=25228\nserver_ip={address}\ntls_cert=stale.pem\ntls_key=stale.key\n')
+                    result = subprocess.run(command, text=True, capture_output=True, timeout=10)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(f'--tls-cert {directory}/fullchain.pem', result.stdout)
+                    self.assertIn(f'--tls-key {directory}/privkey.pem', result.stdout)
+            # An unrelated IP directory and stale explicit paths must not be used.
+            config.write_text(f'port=25228\nserver_ip=10.30.0.26\ntls_cert={cert}\ntls_key={key}\n')
+            result = subprocess.run(command, text=True, capture_output=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('tls/10.30.0.26/fullchain.pem', result.stderr)
+            self.assertNotIn('SERVICE', result.stdout)
+            config.write_text("port=25228\nserver_ip='../outside'\n")
+            result = subprocess.run(command, text=True, capture_output=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn('SERVICE', result.stdout)
+
     def test_start_reuse_proxy_recovery_and_stop(self):
         with tempfile.TemporaryDirectory(prefix="dsh-launcher-") as temporary:
             root = Path(temporary)
@@ -38,11 +74,15 @@ class LauncherTests(unittest.TestCase):
                 reservation.bind(("127.0.0.1", 0))
                 port = reservation.getsockname()[1]
             config = root / "dsh.conf"
-            (root / "tls").mkdir()
-            cert, key = create_test_certificate(root / "tls")
+            tls = root / 'tls/127.0.0.1'
+            tls.mkdir(parents=True)
+            generated_cert, generated_key = create_test_certificate(tls)
+            cert, key = tls / 'fullchain.pem', tls / 'privkey.pem'
+            generated_cert.rename(cert)
+            generated_key.rename(key)
             config.write_text(
                 f"port={port}\nserver_ip=127.0.0.1\ndsh_token=''\n"
-                "tls_cert=tls/cert.pem\ntls_key=tls/key.pem\n"
+                "tls_cert=tls/stale/cert.pem\ntls_key=tls/stale/key.pem\n"
             )
             environment = {**os.environ, "PATH": f"{binaries}:{os.environ['PATH']}"}
 

@@ -2,10 +2,14 @@
 
 Linux 环境，需要 Bash、Python 3.10+，以及 PATH 中可用的 `dsh` 和 `magpie`。
 
-在仓库根目录配置并启动：
+首次部署时，在仓库根目录依次安装程序、复制模板并编辑 `server_ip`、生成证书，最后启动：
 
 ```bash
+bash ds-harness/dsh_install.sh
 cp ds-harness/dsh.conf.example ds-harness/dsh.conf
+# 编辑 ds-harness/dsh.conf，设置 server_ip 等参数
+bash ds-harness/dsh_cert.sh
+# 启动脚本按 server_ip 自动从 tls/<地址>/ 读取证书
 ./ds-harness/dsh_web_run.sh start
 ```
 
@@ -13,8 +17,9 @@ cp ds-harness/dsh.conf.example ds-harness/dsh.conf
 
 - `server_ip`：浏览器访问的服务器地址。
 - `port`：对外端口，默认 `25228`。
-- `tls_cert`、`tls_key`：PEM 证书链和无口令私钥；默认位于 `tls/fullchain.pem`、`tls/privkey.pem`，相对路径以本目录为基准。证书 SAN 需包含 `server_ip` 对应的 IP 或域名。
 - `dsh_token`：启动时自动提取并更新，不需要手动填写。
+
+启动脚本固定从本目录的 `tls/<server_ip>/fullchain.pem`、`tls/<server_ip>/privkey.pem` 加载 PEM 证书链和无口令私钥；例如 `server_ip=10.30.0.25` 对应 `tls/10.30.0.25/`。域名目录统一小写，IPv6 中的冒号替换为下划线。无需配置 `tls_cert`、`tls_key`，旧配置中的这些字段也不会覆盖自动选择。证书缺失或无法加载时，在启动任何服务前退出；不回退到其他 IP 的目录。
 
 先放好证书并限制私钥权限（例如目录 `700`、私钥 `600`），再运行 `start`；证书缺失或无法加载时会在启动服务前退出。使用私有 CA 签发的证书时，手机及电脑需信任该 CA；已信任同一 CA 的设备无需重复安装。
 
@@ -26,15 +31,20 @@ cp ds-harness/dsh.conf.example ds-harness/dsh.conf
 ./ds-harness/dsh_web_run.sh stop
 ```
 
-停止后清除 token；日志和 PID 保存在本目录。配置文件仅当前用户可读写，日志会隐藏启动 token；配置、`tls/` 证书目录、日志、PID 和 Python 缓存均不提交 Git。修改配置后需在合适时机先 `stop` 再 `start`；单独更新入口证书只需重启代理，保留 dsh 后端及运行中的任务。
+停止后清除 token；日志和 PID 保存在本目录。配置文件仅当前用户可读写，日志会隐藏启动 token；配置、日志、PID 和 Python 缓存均不提交 Git。`tls/<地址>/` 中的 `ca.crt`、`ca.pem` 和 `fullchain.pem` 可提交仓库；`ca-key.pem`、`privkey.pem` 及生成临时文件继续忽略。迁移机器时私钥需通过单独的加密通道传输，仅克隆仓库无法启动 HTTPS。修改配置后需在合适时机先 `stop` 再 `start`；单独更新入口证书只需重启代理，保留 dsh 后端及运行中的任务。
 
-安装脚本同时导出 `tls/ca.crt`，用于手机或电脑导入信任；它是 PEM 编码的公开根证书，与 `ca.pem` 内容对应。`fullchain.pem` 仍用于服务端。已有证书缺少 `.crt` 时可执行：
+独立证书脚本 `dsh_cert.sh` 需要 Node.js >=24 和 OpenSSL，读取 `server_ip`（IP 或 DNS 名称），默认使用脚本同目录的 `dsh.conf`。支持以下参数：
 
 ```bash
-bash ds-harness/dsh_install.sh --cert-only
+bash ds-harness/dsh_cert.sh --dry-run
+bash ds-harness/dsh_cert.sh --config /path/to/dsh.conf --tls-dir /path/to/tls --tls-host extra.example.com
 ```
 
-此操作校验并保留已有证书、私钥，仅补齐根证书导出，不需要重启服务。不要把 `ca-key.pem` 或 `privkey.pem` 发给客户端。
+`--config` 指定配置文件；`--dry-run` 预览操作；`--tls-dir ROOT` 指定证书根目录，默认是配置文件所在目录的 `tls/`；`--tls-host` 添加额外 SAN。脚本在 `ROOT/<server_ip>/` 下生成 `fullchain.pem`、`privkey.pem`、`ca.pem`、`ca.crt` 和 `ca-key.pem`；IPv6 的目录名将每个冒号替换为下划线，例如 `::1` 转为 `__1`。它只生成或校验证书，不修改现用 `dsh.conf`，也不启停服务。默认生成位置与启动脚本自动选择的位置一致；`--tls-dir` 用于导出到其他根目录，启动前需将对应地址子目录中的证书和私钥部署到本项目 `tls/<地址>/`。
+
+同一目标目录中的已有证书会经过校验并保留；旧的平铺 `tls/` 文件保持不变。若复用旧证书，将证书链和私钥分别部署为 `tls/<地址>/fullchain.pem` 和 `tls/<地址>/privkey.pem`。变更 `server_ip` 后，需为新地址运行证书脚本，启动器自动选择新目录。
+
+每个主机目录中的 `ca.crt` 用于手机或电脑导入信任；它是 PEM 编码的公开根证书，与 `ca.pem` 内容对应。主机变化时需在客户端安装新主机的 CA；已信任同一 CA 的设备无需重复安装。`fullchain.pem` 用于服务端，不要把 `ca-key.pem` 或 `privkey.pem` 发给客户端。
 
 ## 安装与更新
 
@@ -66,14 +76,14 @@ magpie 统一管理模型服务商、订阅账号和模型路由。DSH 把模型
 
 ### 安装与配置模型来源
 
-安装脚本会补装缺失的 DSH、插件和 magpie，并按 DSH 配置生成或校验 HTTPS 证书；主动更新请使用上文的 `--upgrade`。先复制配置示例并填写 `server_ip`，再在仓库根目录运行；已有配置不需要重新复制。安装脚本不启动服务，执行前应确认目标 DSH 已停机。
+安装脚本只安装程序和插件，不读取项目配置、不生成证书，也不提供配置或证书相关参数；主动更新请使用上文的 `--upgrade`。安装脚本不启动服务，执行前应确认目标 DSH 已停机。首次配置和证书准备按本文开头的步骤执行，已有配置不需要重新复制。
 
 ```bash
 bash ds-harness/dsh_install.sh --dry-run
 bash ds-harness/dsh_install.sh
 ```
 
-安装需要 Node.js >=24、OpenSSL、npm、curl 和 sh；运行项目启动脚本还需要 Python 3.10+。模型账号和 API Key 需要另外配置或恢复。
+安装程序需要 Node.js >=24、npm、curl 和 sh；安装脚本不依赖 OpenSSL，独立证书脚本需要 OpenSSL。运行项目启动脚本还需要 Python 3.10+。模型账号和 API Key 需要另外配置或恢复。
 
 可打开 magpie 界面的 **Providers → Add provider** 添加模型服务商和 API Key。服务器没有桌面时，可通过以下命令打开本机 Web 管理入口，按终端输出访问；该入口默认绑定回环地址，远程机器可通过 SSH 本地端口转发访问，不要直接把带登录凭据的管理链接公开。
 

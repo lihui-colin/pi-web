@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 SCRIPT = Path(__file__).with_name('dsh_install.sh')
-NAMES = ['@deepseek-ai/dsh-subagent-codex', 'ds-bot', 'dsh-web-mobile', 'dshmarket', 'dsh-ide-git', 'dsh-sidebar-enhancement', 'dsh-sidebar-plus', 'dsh-file-transfer']
+NAMES = ['@deepseek-ai/dsh-subagent-codex', 'ds-bot', 'dsh-web-mobile', 'dshmarket', 'dsh-ide-git', 'dsh-sidebar-enhancement', 'dsh-sidebar-plus']
 
 
 class InstallPlanTests(unittest.TestCase):
@@ -22,7 +22,6 @@ class InstallPlanTests(unittest.TestCase):
             command.write_text('#!/bin/sh\necho 0.2.1-rc.2\n')
             command.chmod(0o755)
         self.config = self.root / 'dsh.conf'
-        self.config.write_text('server_ip=127.0.0.1\n')
         self.profile = self.root / 'data/profiles/web'
         self.profile.mkdir(parents=True)
         (self.profile / 'package.json').write_text(json.dumps({'dependencies': {n: '0.2.1-rc.2' for n in NAMES}}))
@@ -33,7 +32,7 @@ class InstallPlanTests(unittest.TestCase):
         self.env = dict(os.environ, HOME=str(self.root), DSH_HOME=str(self.root / 'data'), PATH=f'{bins}:{os.environ["PATH"]}')
 
     def run_plan(self, *args):
-        result = subprocess.run(['bash', str(SCRIPT), '--dry-run', '--config', str(self.config), *args], env=self.env, text=True, capture_output=True)
+        result = subprocess.run(['bash', str(SCRIPT), '--dry-run', *args], env=self.env, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((self.root / 'tls').exists())
         return result.stdout
@@ -62,46 +61,35 @@ class InstallPlanTests(unittest.TestCase):
         self.assertIn('+ npm install', output)
         self.assertIn('+ curl', output)
         self.assertIn('ds-bot@latest dsh-web-mobile@latest dshmarket@latest dsh-ide-git@latest', output)
-        self.assertIn('dsh-sidebar-enhancement@latest dsh-sidebar-plus@latest github:flyhigao/dsh-file-transfer', output)
-        self.assertNotIn('dsh-file-transfer@latest', output)
+        self.assertIn('dsh-sidebar-enhancement@latest dsh-sidebar-plus@latest', output)
+        self.assertNotIn('dsh-file-transfer', output)
 
-    def test_missing_github_plugin_uses_repository_source(self):
-        package = self.profile / 'node_modules/dsh-file-transfer/package.json'
-        package.unlink()
+    def test_removed_plugin_not_reinstalled(self):
+        manifest = self.profile / 'package.json'
+        pkg = json.loads(manifest.read_text())
+        pkg['dependencies']['dsh-file-transfer'] = 'github:flyhigao/dsh-file-transfer'
+        manifest.write_text(json.dumps(pkg))
         output = self.run_plan()
-        command = next(line for line in output.splitlines() if line.startswith('+ dsh plugin'))
-        self.assertTrue(command.endswith('github:flyhigao/dsh-file-transfer'), command)
-        self.assertNotIn('dsh-file-transfer@latest', command)
+        self.assertNotIn('+ dsh plugin', output)
+        self.assertNotIn('dsh-file-transfer', output)
 
 
-class CertificateExportTests(unittest.TestCase):
-    def test_generate_backfill_and_preview_preserve_certificates(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            config = root / 'dsh.conf'
-            config.write_text('server_ip=127.0.0.1\n')
-            command = ['bash', str(SCRIPT), '--cert-only', '--config', str(config)]
-            def run(*args):
-                result = subprocess.run([*command, *args], text=True, capture_output=True)
-                self.assertEqual(result.returncode, 0, result.stderr)
-            run()
-            tls = root / 'tls'
-            crt = tls / 'ca.crt'
-            original = {p.name: p.read_bytes() for p in tls.iterdir()}
-            self.assertEqual(crt.read_bytes(), (tls / 'ca.pem').read_bytes())
-            self.assertNotIn(b'PRIVATE KEY', crt.read_bytes())
-            crt.unlink()
-            run('--dry-run')
-            self.assertFalse(crt.exists())
-            run()
-            self.assertEqual(original, {p.name: p.read_bytes() for p in tls.iterdir()})
-            # An existing unrelated certificate must not be overwritten.
-            crt.write_bytes((tls / 'fullchain.pem').read_bytes())
-            mismatched = crt.read_bytes()
-            result = subprocess.run(command, text=True, capture_output=True)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn('ca.crt 与 ca.pem 不一致', result.stderr)
-            self.assertEqual(crt.read_bytes(), mismatched)
+    def test_install_without_config_does_not_create_certificates(self):
+        self.assertFalse(self.config.exists())
+        result = subprocess.run(['bash', str(SCRIPT)], env=self.env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.config.exists())
+        self.assertFalse((self.root / 'tls').exists())
+        self.assertNotIn('openssl', result.stdout)
+        self.assertFalse(list(self.root.rglob('*.pem')))
+        self.assertFalse(list(self.root.rglob('*.crt')))
+
+    def test_certificate_options_rejected(self):
+        for option in ['--cert-only', '--config', '--tls-dir', '--tls-host']:
+            with self.subTest(option=option):
+                result = subprocess.run(['bash', str(SCRIPT), option], env=self.env, text=True, capture_output=True)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn('未知参数', result.stderr)
 
 
 class MagpieRetryTests(unittest.TestCase):

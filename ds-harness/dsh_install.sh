@@ -1,47 +1,26 @@
 #!/usr/bin/env bash
-# 安装当前团队使用的 DSH 与插件，DSH/npm 第三方插件使用 latest，GitHub 插件跟随仓库，官方 Codex 插件与 DSH 同版。
-# 适用于 Linux/macOS；需要 Node.js >=24、OpenSSL、npm、curl 和 sh。
+# 安装当前团队使用的 DSH 与插件，DSH/第三方插件使用 latest，官方 Codex 插件与 DSH 同版。
+# 适用于 Linux/macOS；需要 Node.js >=24、npm、curl 和 sh。
 # 当前机器参考：Node.js v26.7.0；不负责自动安装 Node.js。
-# 用法：bash ds-harness/dsh_install.sh [--dry-run] [--upgrade] [--cert-only] [--config 配置文件]
-# HTTPS 地址与证书路径默认读取脚本同目录的 dsh.conf。
+# 用法：bash ds-harness/dsh_install.sh [--dry-run] [--upgrade]
+# HTTPS 证书由同目录 dsh_cert.sh 单独生成。
 # 可设置 DSH_HOME 指定数据目录，默认 $HOME/.dsh。
 # 不启动/停止服务，不迁移用户数据，不写入 API Key。
 set -euo pipefail
 
 dry_run=false
 upgrade=false
-cert_only=false
-script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-config_file="$script_dir/dsh.conf"
-tls_dir=''
-tls_hosts=()
 while (( $# )); do
     case "$1" in
         --dry-run) dry_run=true; shift ;;
         --upgrade) upgrade=true; shift ;;
-        --cert-only) cert_only=true; shift ;;
-        --tls-host|--tls-dir|--config)
-            option="$1"
-            if (( $# < 2 )) || [[ -z "$2" || "$2" == --* ]]; then
-                printf '%s 需要一个值。\n' "$option" >&2; exit 2
-            fi
-            case "$option" in
-                --tls-host) tls_hosts+=("$2") ;;
-                --tls-dir) tls_dir="$2" ;;
-                --config) config_file="$2" ;;
-            esac
-            shift 2 ;;
         -h|--help)
             printf '%s\n' \
-                '用法：bash ds-harness/dsh_install.sh [--dry-run] [--upgrade] [--cert-only] [--config 文件] [--tls-host IP或域名] [--tls-dir 目录]' \
-                '前置：Node.js >=24、OpenSSL；完整安装还需 npm、curl、sh，npm 全局目录需要当前用户可写。' \
+                '用法：bash ds-harness/dsh_install.sh [--dry-run] [--upgrade]' \
+                '前置：Node.js >=24、npm、curl、sh，npm 全局目录需要当前用户可写。' \
                 '默认只补装缺失的程序和插件；--upgrade 主动更新所有程序和插件。' \
-                'DSH/npm 第三方插件使用 latest，GitHub 插件跟随仓库，官方 Codex 插件与 DSH 同版，启用 14 个 bundle。' \
-                '自动读取 DSH 配置的 server_ip、tls_cert、tls_key；--config 可指定配置文件。' \
-                '默认配置为脚本同目录的 dsh.conf，证书相对路径以配置目录为基准。' \
-                '--tls-host 可重复添加额外 SAN；--tls-dir 可覆盖证书目录，需同步调整服务配置。' \
-                '已有证书会校验并保留；--cert-only 只处理证书，--dry-run 不写入文件。' \
-                '局域网客户端导入 ca.crt（与 ca.pem 同一根证书）；不复制 CA 私钥。' \
+                'DSH/第三方插件使用 latest，官方 Codex 插件与 DSH 同版，启用 14 个 bundle。' \
+                'HTTPS 证书请单独运行 bash ds-harness/dsh_cert.sh 创建；本安装器不读取 dsh.conf。' \
                 'DSH_HOME 可指定目标数据目录，默认 ~/.dsh。' \
                 'Magpie 安装最多尝试 3 次；支持 MAGPIE_PROXY 代理及 MAGPIE_MIRROR 镜像前缀。' \
                 '请在新机器或目标 DSH 已停机时安装；本脚本不启停服务。' \
@@ -51,8 +30,7 @@ while (( $# )); do
     esac
 done
 
-required_bins=(node openssl)
-if ! "$cert_only"; then required_bins+=(npm curl sh); fi
+required_bins=(node npm curl sh)
 for bin in "${required_bins[@]}"; do
     if ! command -v "$bin" >/dev/null 2>&1; then
         printf '缺少命令：%s。请先安装前置依赖。\n' "$bin" >&2
@@ -105,131 +83,9 @@ install_magpie() (
     exit 1
 )
 
-# 先校验配置/证书，再安装软件，避免因配置错误先更新运行环境。
-# 只解析需要的键，不 source 配置，避免执行配置中的 shell 内容。
-node --input-type=module - "$config_file" "$tls_dir" "$dry_run" "${tls_hosts[@]}" <<'TLS_NODE'
-import fs from 'node:fs';
-import path from 'node:path';
-import net from 'node:net';
-import crypto from 'node:crypto';
-import { execFileSync } from 'node:child_process';
-const [configArg, dirOverride, preview, ...extraHosts] = process.argv.slice(2);
-const config = path.resolve(configArg);
-if (!fs.existsSync(config)) throw new Error(`缺少 DSH 配置：${config}。请先从 dsh.conf.example 复制并填写 server_ip。`);
-const values = {};
-for (const line of fs.readFileSync(config, 'utf8').split(/\r?\n/)) {
-  const m = line.match(/^\s*(server_ip|tls_cert|tls_key)\s*=\s*(.*?)\s*$/);
-  if (!m) continue;
-  const raw = m[2];
-  const quoted = raw.match(/^(['"])(.*?)\1\s*(?:#.*)?$/);
-  values[m[1]] = quoted ? quoted[2] : raw.replace(/\s+#.*$/, '').trim();
-}
-if (!values.server_ip) throw new Error('DSH 配置缺少 server_ip');
-const hosts = [...new Set([values.server_ip, ...extraHosts])];
-const san = hosts.map(host => {
-  if (net.isIP(host)) return `IP:${host}`;
-  if (host.length <= 253 && host.split('.').every(label => /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/.test(label))) return `DNS:${host}`;
-  throw new Error(`无效的 IP 或域名：${host}，请勿包含协议、端口或路径`);
-});
-const base = path.dirname(config);
-const cert = dirOverride ? path.resolve(dirOverride, 'fullchain.pem') : path.resolve(base, values.tls_cert || 'tls/fullchain.pem');
-const key = dirOverride ? path.resolve(dirOverride, 'privkey.pem') : path.resolve(base, values.tls_key || 'tls/privkey.pem');
-const caDir = path.dirname(cert);
-const ca = path.join(caDir, 'ca.pem');
-const caKey = path.join(caDir, 'ca-key.pem');
-const caCrt = path.join(caDir, 'ca.crt');
-if (new Set([cert, key, ca, caKey, caCrt]).size !== 5) throw new Error('证书、服务器私钥、CA 和 CA 私钥路径不能相同');
-const openssl = args => execFileSync('openssl', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-function validatePair(certPath, keyPath) {
-  const x = new crypto.X509Certificate(fs.readFileSync(certPath));
-  const actual = crypto.createPublicKey(crypto.createPrivateKey(fs.readFileSync(keyPath))).export({ type: 'spki', format: 'der' });
-  if (!x.publicKey.export({ type: 'spki', format: 'der' }).equals(actual)) throw new Error(`证书和私钥不匹配：${certPath}`);
-  openssl(['x509', '-in', certPath, '-noout', '-checkend', '86400']);
-  return x;
-}
-// Export only the public root certificate; preserve the server certificate and keys.
-function exportRootCertificate() {
-  if (!fs.existsSync(ca)) {
-    console.log('未找到本地 ca.pem，未导出 ca.crt；外部签发证书请使用签发方提供的根证书。');
-    return;
-  }
-  const root = new crypto.X509Certificate(fs.readFileSync(ca));
-  if (!root.ca) throw new Error('ca.pem 不是 CA 证书，拒绝导出');
-  openssl(['verify', '-CAfile', ca, cert]);
-  if (fs.existsSync(caCrt)) {
-    const existing = new crypto.X509Certificate(fs.readFileSync(caCrt));
-    if (!existing.raw.equals(root.raw)) throw new Error('已有 ca.crt 与 ca.pem 不一致，请备份并检查后再处理');
-  } else if (preview !== 'true') {
-    fs.writeFileSync(caCrt, root.toString(), { flag: 'wx', mode: 0o644 });
-  }
-  console.log(`${preview === 'true' ? '预览：根证书导出路径' : '设备导入并信任的根证书'}：${caCrt}`);
-}
-console.log(`DSH 配置：${config}\n证书 SAN：${san.join(', ')}\nHTTPS 证书：${cert}\n服务器私钥：${key}`);
-if (fs.existsSync(cert) !== fs.existsSync(key)) throw new Error('已有证书/私钥不完整，停止处理；请先检查备份');
-if (fs.existsSync(cert)) {
-  const x = validatePair(cert, key);
-  for (const host of hosts) {
-    const match = net.isIP(host) ? x.checkIP(host) : x.checkHost(host, { subject: 'never' });
-    if (!match) throw new Error(`已有证书未覆盖 ${host}；请备份后配置新的证书路径`);
-  }
-  console.log('已有证书有效、地址和私钥匹配，保留原文件。');
-  exportRootCertificate();
-  process.exit(0);
-}
-if (fs.existsSync(ca) !== fs.existsSync(caKey)) throw new Error('已有 CA 文件不完整，停止处理');
-if (fs.existsSync(ca)) {
-  const x = validatePair(ca, caKey);
-  if (!x.ca) throw new Error('ca.pem 不是 CA 证书');
-  // 服务器证书有效期为 365 天，CA 必须至少覆盖这一时间。
-  openssl(['x509', '-in', ca, '-noout', '-checkend', String(366 * 86400)]);
-}
-if (preview === 'true') {
-  console.log(`预览：将生成/复用本地 CA ${ca}，签发有效期 365 天的 HTTPS 证书并导出 ${caCrt}，不写入文件。`);
-  process.exit(0);
-}
-for (const dir of new Set([caDir, path.dirname(key)])) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-const temp = fs.mkdtempSync(path.join(caDir, '.generate-'));
-try {
-  const tempCa = path.join(temp, 'ca.pem'), tempCaKey = path.join(temp, 'ca-key.pem');
-  const reqConfig = path.join(temp, 'openssl.cnf');
-  fs.writeFileSync(reqConfig, '[req]\ndistinguished_name=dn\n[dn]\n[v3_ca]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid:always\n');
-  if (!fs.existsSync(ca)) {
-    openssl(['req', '-x509', '-newkey', 'rsa:3072', '-nodes', '-sha256', '-days', '3650',
-      '-config', reqConfig, '-extensions', 'v3_ca', '-subj', '/CN=DSH Local HTTPS CA',
-      '-keyout', tempCaKey, '-out', tempCa]);
-    fs.chmodSync(tempCaKey, 0o600);
-  }
-  const signer = fs.existsSync(ca) ? ca : tempCa;
-  const signerKey = fs.existsSync(caKey) ? caKey : tempCaKey;
-  const tempKey = path.join(temp, 'privkey.pem'), csr = path.join(temp, 'server.csr');
-  const tempCert = path.join(temp, 'server.pem'), ext = path.join(temp, 'server.ext');
-  openssl(['req', '-new', '-newkey', 'rsa:2048', '-nodes', '-sha256', '-config', reqConfig, '-subj', '/CN=DSH HTTPS', '-keyout', tempKey, '-out', csr]);
-  fs.chmodSync(tempKey, 0o600);
-  fs.writeFileSync(ext, `basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid,issuer\nsubjectAltName=${san.join(',')}\n`);
-  openssl(['x509', '-req', '-in', csr, '-CA', signer, '-CAkey', signerKey,
-    '-set_serial', `0x${crypto.randomBytes(16).toString('hex')}`, '-days', '365', '-sha256', '-extfile', ext, '-out', tempCert]);
-  openssl(['verify', '-CAfile', signer, tempCert]);
-  validatePair(tempCert, tempKey);
-  if (!fs.existsSync(ca)) {
-    fs.copyFileSync(tempCaKey, caKey, fs.constants.COPYFILE_EXCL);
-    fs.copyFileSync(tempCa, ca, fs.constants.COPYFILE_EXCL);
-  }
-  fs.copyFileSync(tempKey, key, fs.constants.COPYFILE_EXCL);
-  fs.writeFileSync(cert, fs.readFileSync(tempCert, 'utf8') + fs.readFileSync(signer, 'utf8'), { flag: 'wx', mode: 0o644 });
-  fs.chmodSync(key, 0o600);
-  fs.chmodSync(caKey, 0o600);
-  exportRootCertificate();
-  console.log(`HTTPS 证书已生成。请在访问设备上导入并信任根证书：${caCrt}`);
-  console.log('不要分发 ca-key.pem 或 privkey.pem；iOS 安装描述文件后还需启用根证书完全信任。');
-} finally {
-  if (path.dirname(temp) !== caDir || !path.basename(temp).startsWith('.generate-')) throw new Error('拒绝清理意外的临时路径');
-  fs.rmSync(temp, { recursive: true, force: true });
-}
-TLS_NODE
-if "$cert_only"; then exit 0; fi
 
 printf '目标数据目录：%s\n' "$DSH_HOME"
-printf '%s\n' 'DSH/npm 第三方插件使用 latest，GitHub 插件跟随仓库，官方 Codex 插件与 DSH 同版；不会启动或重启服务。'
+printf '%s\n' 'DSH/第三方插件使用 latest，官方 Codex 插件与 DSH 同版；不会启动或重启服务。'
 npm_packages=()
 dsh_will_install=false
 for bin in dsh pnpm; do
@@ -291,8 +147,7 @@ import path from 'node:path';
 const [dir, version, upgrade] = process.argv.slice(2);
 const manifest = path.join(dir, 'package.json');
 const pkg = fs.existsSync(manifest) ? JSON.parse(fs.readFileSync(manifest, 'utf8')) : {};
-const names = ['@deepseek-ai/dsh-subagent-codex', 'ds-bot', 'dsh-web-mobile', 'dshmarket', 'dsh-ide-git', 'dsh-sidebar-enhancement', 'dsh-sidebar-plus', 'dsh-file-transfer'];
-const sources = { 'dsh-file-transfer': 'github:flyhigao/dsh-file-transfer' };
+const names = ['@deepseek-ai/dsh-subagent-codex', 'ds-bot', 'dsh-web-mobile', 'dshmarket', 'dsh-ide-git', 'dsh-sidebar-enhancement', 'dsh-sidebar-plus'];
 for (const name of names) {
   const target = name === names[0] ? version : 'latest';
   const installedPath = path.join(dir, 'node_modules', name, 'package.json');
@@ -303,7 +158,7 @@ for (const name of names) {
       (name !== names[0] || installed.version === version)) {
     console.error(`已安装 ${name}@${installed.version}，跳过安装。`);
   } else {
-    console.log(sources[name] ?? `${name}@${target}`);
+    console.log(`${name}@${target}`);
   }
 }
 PLAN_NODE
@@ -369,6 +224,7 @@ else
         '安装完成，未启动或重启任何服务。' \
         '请另外恢复 DSH 用户数据、模型配置、magpie 账号与密钥、共享 Skills 和项目文件。' \
         'magpie 支持 magpie backup / magpie restore 迁移加密备份。' \
+        'HTTPS 证书请另行运行 bash ds-harness/dsh_cert.sh，启动时按 server_ip 自动选择 tls/<地址>/。' \
         '配置完成后可运行 magpie serve，并使用项目 HTTPS 启动脚本启动 DSH。' \
         '直接启动 dsh web 时，请传 --tls-cert <配置的证书路径> --tls-key <配置的私钥路径>。' \
         '客户端需信任本地 CA；网页语音还需要麦克风权限及语音服务配置。' \
