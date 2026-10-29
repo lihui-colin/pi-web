@@ -23,7 +23,7 @@ bash ds-harness/dsh_cert.sh
 
 先放好证书并限制私钥权限（例如目录 `700`、私钥 `600`），再运行 `start`；证书缺失或无法加载时会在启动服务前退出。使用私有 CA 签发的证书时，手机及电脑需信任该 CA；已信任同一 CA 的设备无需重复安装。
 
-浏览器访问 `https://<server_ip>:<port>/dsh-<port>/`，默认地址为 `https://10.30.0.25:25228/dsh-25228/`。路径自动根据 `port` 生成，无需额外配置。该端口只接受 HTTPS，旧 HTTP 书签需更新。启动顺序为 `magpie serve` → 回环地址上的 dsh → 对外 HTTPS 入口代理。重复 `start` 会复用现有进程；代理单独退出后，再次 `start` 会复用运行中 dsh 的实际端口。
+浏览器访问 `https://<server_ip>:<port>/`，默认地址为 `https://10.30.0.25:25228/`。服务使用根路径，登录 Cookie 按端口添加实例标识，无需 DNS 或路径前缀。该端口只接受 HTTPS，旧 HTTP 书签需更新。启动顺序为 `magpie serve` → 回环地址上的 dsh → 对外 HTTPS 入口代理。重复 `start` 会复用现有进程；代理单独退出后，再次 `start` 会复用运行中 dsh 的实际端口。
 
 确认没有需要保留的运行中任务后，按相反顺序停止：
 
@@ -145,11 +145,15 @@ magpie healthcheck
 
 ## 代理行为
 
-代理使用 Python 标准库终止 TLS、解析 HTTP 和分块响应，WSS 保留升级握手并双向转发；到回环地址上游的连接仍为 HTTP。首次访问实例路径 `/dsh-<port>/` 时补上启动 token，在代理内部完成登录交换，再把首页和 `HttpOnly; SameSite=Strict; Secure` Cookie 一起返回，避免手机从其他网页进入时发生重定向循环。已有有效 Cookie、自带 token 的请求保持原样；首页的失效 Cookie 会触发一次重新认证，API 和写入请求不会被自动重放；实例路径下的 `/connect` 保留独立 API 会话的登录重定向。
+代理使用 Python 标准库终止 TLS、解析 HTTP 和分块响应，WSS 保留升级握手并双向转发；到回环地址上游的连接仍为 HTTP。首次访问根路径 `/` 时补上启动 token，在代理内部完成登录交换，再把首页和 `HttpOnly; SameSite=Strict; Secure` Cookie 一起返回，避免手机从其他网页进入时发生重定向循环。已有有效 Cookie、自带 token 的请求保持原样；首页的失效 Cookie 会触发一次重新认证，API 和写入请求不会被自动重放；实例路径下的 `/connect` 保留独立 API 会话的登录重定向。
 
-代理剥离 `/dsh-<port>/` 前缀后转发 HTTP/API/WebSocket，登录 Cookie 的 `Path` 改为该实例路径，并改写站内绝对路径跳转。访问端口根路径或未带尾斜杠的实例路径会跳转到规范入口；其他前缀不会转发到后端。不同端口隔离 localStorage 等同源存储，不同 Cookie Path 限制 Cookie 发送范围；路径不构成安全隔离边界。
+启动器为 DSH 配置根路径 `--public-url`，代理直接转发原始 HTTP/API/WebSocket 路径。文件插件的上传、下载、保存、新建、重命名、删除及快捷命令接口不再需要路径兼容规则；此前逐接口的前缀重定向已移除。
 
-从旧的根路径部署迁移时，DSH 的 `--public-url` 和代理路径需要同时更新。`start` 检测到旧实例时会报错提示，不自动停止会话；请在任务完成后安排停止、启动，并清理一次旧的根路径 Cookie。既有根路径部署在代码更新后继续运行，直至安排迁移。
+启动器传入 `--cookie-prefix dsh<port>_`，例如 `dsh25228_`。上游 `Set-Cookie: dsh-auth-…=…` 返回浏览器时改为 `dsh25228_dsh-auth-…=…`，保留值、Path、HttpOnly、SameSite、Expires 和 Max-Age 等属性，HTTPS 下补上 Secure。退出登录的删除 Cookie 同样改名。请求进入代理时仅保留本实例命名的登录 Cookie，并恢复上游名称；未带标识的旧 Cookie、其他端口的 Cookie 及无关 Cookie 不转发。自动登录判断和失效 Cookie 恢复使用还原后的请求头，WebSocket 握手也采用相同筛选规则。代理内部 token 登录交换继续使用上游原始 Cookie 名。
+
+不同端口已隔离 localStorage/IndexedDB；Cookie 名称标识用于避免登录冲突，不改变浏览器仍向同一主机不同端口发送 Cookie 的规则，因此适用于同一可信环境中的服务。代理只改写 DSH 的 `dsh-auth-` 登录 Cookie，不承担任意插件自定义 Cookie 的命名适配。
+
+从旧 `/dsh-<port>/` 入口迁移时，需要在确认任务可中断后同时更新 DSH 的 `--public-url` 和代理进程；只重启代理不够。启动器检测到旧访问地址或缺少 Cookie 标识的代理会拒绝接管，保留现有进程。迁移后使用根路径书签，首次访问自动重新登录。旧 Cookie 会被忽略，可按名称删除旧 `dsh-auth-` Cookie；不要为清理登录状态而清空整个站点存储，以免丢失本地设置。代理不再提供 `--base-path` 参数和路径重写功能。
 
 已核对本机 `@deepseek-ai/dsh@0.2.1-rc.2` 的 `dsh-client-connection`：token 换 Cookie、Host 校验和浏览器 WebSocket 授权均由上游提供，本目录复用这些能力。免手动输入 token 的入口只应供可信网络使用。
 

@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # 安装当前团队使用的 DSH 与插件，DSH/第三方插件使用 latest，官方 Codex 插件与 DSH 同版。
 # 适用于 Linux/macOS；需要 Node.js >=24、npm、curl 和 sh。
-# 当前机器参考：Node.js v26.7.0；不负责自动安装 Node.js。
 # 用法：bash ds-harness/dsh_install.sh [--dry-run] [--upgrade]
 # HTTPS 证书由同目录 dsh_cert.sh 单独生成。
 # 可设置 DSH_HOME 指定数据目录，默认 $HOME/.dsh。
@@ -30,8 +29,7 @@ while (( $# )); do
     esac
 done
 
-required_bins=(node npm curl sh)
-for bin in "${required_bins[@]}"; do
+for bin in node npm curl sh; do
     if ! command -v "$bin" >/dev/null 2>&1; then
         printf '缺少命令：%s。请先安装前置依赖。\n' "$bin" >&2
         exit 1
@@ -40,7 +38,6 @@ done
 node -e 'if (Number(process.versions.node.split(".")[0]) < 24) { console.error("需要 Node.js >=24"); process.exit(1); }'
 export DSH_HOME="${DSH_HOME:-${HOME:?}/.dsh}"
 DSH_HOME="$(node -e 'const p=require("node:path"),o=require("node:os"); let s=process.env.DSH_HOME; if(s==="~")s=o.homedir(); else if(s.startsWith("~/"))s=p.join(o.homedir(),s.slice(2)); console.log(p.resolve(s));')"
-export DSH_HOME
 # magpie 官方安装器默认把 CLI 放在 ~/.local/bin。
 export PATH="${HOME:?}/.local/bin:$PATH"
 profile_dir="$DSH_HOME/profiles/web"
@@ -83,19 +80,18 @@ install_magpie() (
     exit 1
 )
 
-
 printf '目标数据目录：%s\n' "$DSH_HOME"
 printf '%s\n' 'DSH/第三方插件使用 latest，官方 Codex 插件与 DSH 同版；不会启动或重启服务。'
 npm_packages=()
 dsh_will_install=false
 for bin in dsh pnpm; do
     if "$upgrade" || ! command -v "$bin" >/dev/null 2>&1; then
+        package="$bin"
         if [[ "$bin" == dsh ]]; then
-            npm_packages+=('@deepseek-ai/dsh@latest')
+            package='@deepseek-ai/dsh'
             dsh_will_install=true
-        else
-            npm_packages+=('pnpm@latest')
         fi
+        npm_packages+=("$package@latest")
     else
         printf '已存在 %s，跳过安装。\n' "$bin"
     fi
@@ -217,9 +213,7 @@ NODE
 if "$dry_run"; then
     printf '%s\n' '预览完成：node 步骤将配置 14 个 bundle；未安装程序或修改文件。'
 else
-    run dsh --version
-    run pnpm --version
-    run magpie --version
+    for bin in dsh pnpm magpie; do run "$bin" --version; done
     printf '%s\n' \
         '安装完成，未启动或重启任何服务。' \
         '请另外恢复 DSH 用户数据、模型配置、magpie 账号与密钥、共享 Skills 和项目文件。' \

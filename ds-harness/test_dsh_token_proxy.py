@@ -10,8 +10,10 @@ import unittest
 from collections import deque
 from contextlib import contextmanager
 from http.cookies import SimpleCookie
+from http.cookiejar import CookieJar
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.request import HTTPCookieProcessor, HTTPSHandler, ProxyHandler, build_opener
 
 from dsh_token_proxy import TokenProxy
 
@@ -31,7 +33,7 @@ def create_test_certificate(directory):
 
 
 @contextmanager
-def proxy_fixture(responses, tls_context=None, base_path="/"):
+def proxy_fixture(responses, tls_context=None, cookie_prefix=""):
     replies = deque(responses)
     requests = []
     errors = []
@@ -81,7 +83,7 @@ def proxy_fixture(responses, tls_context=None, base_path="/"):
     with ThreadingHTTPServer(("127.0.0.1", 0), Upstream) as upstream:
         with TokenProxy(
             ("127.0.0.1", 0), upstream.server_address, "launch-token", "dsh.test:25228",
-            tls_context, base_path,
+            tls_context, cookie_prefix,
         ) as proxy:
             for server in (upstream, proxy):
                 threading.Thread(
@@ -97,8 +99,51 @@ def proxy_fixture(responses, tls_context=None, base_path="/"):
 
 
 class PageAuthenticationTests(unittest.TestCase):
-    def request(self, responses, target="/", headers=None, method="GET", body=None, base_path="/"):
-        with proxy_fixture(responses, base_path=base_path) as (address, requests, replies, errors):
+    def test_namespaced_login_ignores_foreign_and_legacy_cookies(self):
+        result, requests = self.request([
+            (303, [("Location", "./"), ("Set-Cookie", COOKIE)], b""),
+            (200, [], PAGE),
+        ], cookie_prefix="dsh25228_", headers={"Cookie":
+            "dsh25229_dsh-auth-test=other; dsh-auth-old=legacy; theme=dark"})
+        self.assertEqual(result[0], 200)
+        self.assertEqual(dict(result[1])["Set-Cookie"], "dsh25228_" + COOKIE)
+        self.assertEqual(requests[0][0], "/?token=launch-token")
+        self.assertIsNone(requests[0][1].get("Cookie"))
+        self.assertEqual(requests[1][1]["Cookie"], "dsh-auth-test=browser-session")
+
+    def test_namespaced_cookie_restored_before_login_and_stale_retry(self):
+        headers = {"Cookie": "dsh25229_dsh-auth-test=other; dsh25228_dsh-auth-test=mine; dsh-auth-old=legacy"}
+        _, requests = self.request([(200, [], PAGE)], headers=headers, cookie_prefix="dsh25228_")
+        self.assertEqual(requests[0][0], "/")
+        self.assertEqual(requests[0][1]["Cookie"], "dsh-auth-test=mine")
+        result, requests = self.request([
+            (401, [], b"expired"),
+            (303, [("Location", "./"), ("Set-Cookie", COOKIE)], b""),
+            (200, [], PAGE),
+        ], headers=headers, cookie_prefix="dsh25228_")
+        self.assertEqual(dict(result[1])["Set-Cookie"], "dsh25228_" + COOKIE)
+        self.assertEqual([r[0] for r in requests], ["/", "/?token=launch-token", "/"])
+
+    def test_namespaced_cookie_deletion_preserves_attributes(self):
+        deletion = "dsh-auth-test=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; SameSite=Strict"
+        result, _ = self.request([(200, [("Set-Cookie", deletion)], b"")],
+                                 target="/logout", cookie_prefix="dsh25228_")
+        self.assertEqual(dict(result[1])["Set-Cookie"], "dsh25228_" + deletion)
+
+    def test_root_plugin_routes_forward_once_with_instance_cookie(self):
+        for operation in ("save", "create", "mkdir", "rename", "remove", "upload", "quick/load", "quick/save", "download"):
+            target = "/sidebar-enhancer/" + operation
+            method = "GET" if operation == "download" else "POST"
+            payload = bytes(range(256)) * 1024
+            result, requests = self.request([(200, [], None)], target=target, method=method,
+                body=payload, cookie_prefix="dsh25228_",
+                headers={"Cookie": "dsh25228_dsh-auth-test=mine; dsh25229_dsh-auth-test=other"})
+            self.assertEqual((result[0], result[2]), (200, payload))
+            self.assertEqual([r[0] for r in requests], [target])
+            self.assertEqual(requests[0][1]["Cookie"], "dsh-auth-test=mine")
+
+    def request(self, responses, target="/", headers=None, method="GET", body=None, cookie_prefix=""):
+        with proxy_fixture(responses, cookie_prefix=cookie_prefix) as (address, requests, replies, errors):
             connection = http.client.HTTPConnection(*address, timeout=2)
             try:
                 connection.request(method, target, body=body, headers=headers or {})
@@ -111,46 +156,24 @@ class PageAuthenticationTests(unittest.TestCase):
             self.assertFalse(errors)
             return result, requests
 
-    def test_prefixed_login_scopes_cookie_and_recovers_stale_cookie(self):
+    def test_download_keeps_binary_body_and_attachment_headers(self):
+        target = "/sidebar-enhancer/download?sessionId=session-test&path=dir%2Farchive.zip"
+        payload = bytes(range(256)) * 1000
+        attachment = 'attachment; filename="archive.zip"'
         result, requests = self.request([
-            (401, [], b"expired"),
-            (303, [("Location", "./"), ("Set-Cookie", COOKIE)], b""),
-            (200, [], PAGE),
-        ], target="/dsh-25228/", base_path="/dsh-25228/",
-            headers={"Cookie": "dsh-auth-other=stale"})
-        self.assertEqual((result[0], result[2]), (200, PAGE))
-        self.assertIn("Path=/dsh-25228/", dict(result[1])["Set-Cookie"])
-        self.assertEqual([path for path, _ in requests], ["/", "/?token=launch-token", "/"])
+            (200, [("Content-Type", "application/zip"), ("Content-Disposition", attachment)], payload),
+        ], target=target)
+        self.assertEqual((result[0], result[2]), (200, payload))
+        self.assertEqual(dict(result[1])["Content-Disposition"], attachment)
+        self.assertEqual(requests[0][0], target)
 
-    def test_prefix_redirect_preserves_query_and_rejects_other_paths(self):
-        for target in ("/?token=user-token", "/dsh-25228?token=user-token"):
-            result, requests = self.request([], target=target, base_path="/dsh-25228/")
-            self.assertEqual(result[0], 302)
-            self.assertEqual(dict(result[1])["Location"], "/dsh-25228/?token=user-token")
-            self.assertFalse(requests)
-        for target in ("/api/call", "/dsh-25229/api/call", "/dsh-25228-extra/"):
-            result, requests = self.request([], target=target, base_path="/dsh-25228/")
-            self.assertEqual(result[0], 404)
-            self.assertFalse(requests)
-
-    def test_prefixed_post_and_static_asset_preserve_path_query_and_body(self):
+    def test_post_and_static_asset_preserve_path_query_and_body(self):
         for method, target, body in (("POST", "/api/pluginInventory/list?q=x%2Fy", b'{"args":{}}'),
                                       ("GET", "/app.js?v=42", None)):
-            result, requests = self.request([(200, [], None)], target="/dsh-25228" + target,
-                                            base_path="/dsh-25228/", method=method, body=body)
+            result, requests = self.request([(200, [], None)], target=target, method=method, body=body)
             self.assertEqual(result[0], 200)
             self.assertEqual(requests[0][0], target)
             self.assertEqual(result[2], body or b"")
-
-    def test_prefixed_redirects(self):
-        for location, expected in (("./api/remote.mux", "./api/remote.mux"),
-                                   ("/api/remote.mux", "/dsh-25228/api/remote.mux"),
-                                   ("https://dsh.test:25228/api/remote.mux", "https://dsh.test:25228/dsh-25228/api/remote.mux"),
-                                   ("https://external.test/", "https://external.test/")):
-            result, _ = self.request([(302, [("Location", location), ("Set-Cookie", COOKIE)], b"")],
-                                     target="/dsh-25228/connect", base_path="/dsh-25228/")
-            self.assertEqual(dict(result[1])["Location"], expected)
-            self.assertIn("Path=/dsh-25228/", dict(result[1])["Set-Cookie"])
 
     def test_first_visit_returns_page_and_strict_cookie_without_redirect(self):
         result, requests = self.request(
@@ -281,13 +304,13 @@ class PageAuthenticationTests(unittest.TestCase):
 
     def test_websocket_handshake_and_early_frame_survive(self):
         handshake = [("Connection", "Upgrade"), ("Upgrade", "websocket")]
-        with proxy_fixture([(101, handshake, b"\x81\x02ok")]) as (address, requests, replies, errors):
+        with proxy_fixture([(101, handshake, b"\x81\x02ok")], cookie_prefix="dsh25228_") as (address, requests, replies, errors):
             with socket.create_connection(address, timeout=2) as client:
                 frame = b"\x81\x80abcd"
                 client.sendall(
                     b"GET /api/remote.mux HTTP/1.1\r\nHost: browser.test\r\n"
                     b"Connection: Upgrade\r\nUpgrade: websocket\r\n"
-                    b"Cookie: dsh-auth-test=browser-session\r\n"
+                    b"Cookie: dsh25228_dsh-auth-test=browser-session; dsh25229_dsh-auth-test=other\r\n"
                     b"Origin: http://dsh.test:25228\r\n\r\n" + frame
                 )
                 response = b""
@@ -312,6 +335,27 @@ class HttpsTests(unittest.TestCase):
         cls.server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         cls.server_context.load_cert_chain(cert, key)
         cls.client_context = ssl.create_default_context(cafile=str(cert))
+
+    def test_two_root_instances_share_browser_jar_without_login_collision(self):
+        def responses():
+            return [(303, [("Location", "./"), ("Set-Cookie", COOKIE)], b""),
+                    (200, [], PAGE), (200, [], b"ok")]
+        with proxy_fixture(responses(), self.server_context, cookie_prefix="dsh25228_") as first, \
+             proxy_fixture(responses(), self.server_context, cookie_prefix="dsh25229_") as second:
+            jar = CookieJar()
+            opener = build_opener(ProxyHandler({}), HTTPSHandler(context=self.client_context), HTTPCookieProcessor(jar))
+            for address, *_ in (first, second):
+                with opener.open(f"https://{address[0]}:{address[1]}/", timeout=2) as response:
+                    self.assertEqual(response.read(), PAGE)
+            self.assertEqual({cookie.name for cookie in jar},
+                             {"dsh25228_dsh-auth-test", "dsh25229_dsh-auth-test"})
+            self.assertTrue(all(cookie.path == "/" and cookie.secure for cookie in jar))
+            for address, requests, remaining, errors in (first, second):
+                with opener.open(f"https://{address[0]}:{address[1]}/api/test", timeout=2) as response:
+                    self.assertEqual(response.read(), b"ok")
+                self.assertIsNone(requests[0][1].get("Cookie"))
+                self.assertEqual(requests[-1][1]["Cookie"], "dsh-auth-test=browser-session")
+                self.assertFalse(remaining or errors)
 
     def test_https_bootstrap_and_api_cookies_are_secure(self):
         for target, replies in (
@@ -349,13 +393,13 @@ class HttpsTests(unittest.TestCase):
         handshake = [("Connection", "Upgrade"), ("Upgrade", "websocket")]
         # The upstream waits for the client frame before replying. This catches relays
         # that wait on select() while the frame is already in the TLS decrypted buffer.
-        with proxy_fixture([(101, handshake, b"")], self.server_context, "/dsh-25228/") as fixture:
+        with proxy_fixture([(101, handshake, b"")], self.server_context) as fixture:
             address, requests, replies, errors = fixture
             with socket.create_connection(address, timeout=2) as raw:
                 with self.client_context.wrap_socket(raw, server_hostname="127.0.0.1") as client:
                     frame = b"\x81\x80abcd"
                     client.sendall(
-                        b"GET /dsh-25228/api/remote.mux HTTP/1.1\r\nHost: browser.test\r\n"
+                        b"GET /api/remote.mux HTTP/1.1\r\nHost: browser.test\r\n"
                         b"Connection: Upgrade\r\nUpgrade: websocket\r\n"
                         b"Cookie: dsh-auth-test=browser-session\r\n"
                         b"Origin: https://dsh.test:25228\r\n\r\n" + frame

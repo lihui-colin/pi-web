@@ -60,13 +60,13 @@ def update_cookies(value, additions=(), *, remove_auth=False):
 
 
 class TokenProxy(ThreadingHTTPServer):
-    def __init__(self, listen, upstream, token, public_host, tls_context=None, base_path="/"):
+    def __init__(self, listen, upstream, token, public_host, tls_context=None, cookie_prefix=""):
         if not re.fullmatch(r"[A-Za-z0-9_-]+", token):
             raise ValueError("dsh token is missing or invalid")
         self.upstream, self.token, self.public_host = upstream, token, public_host
-        if base_path != "/" and not re.fullmatch(r"/[A-Za-z0-9_-]+/", base_path):
-            raise ValueError("base path must be / or a single /segment/")
-        self.base_path = base_path
+        if cookie_prefix and not re.fullmatch(r"dsh[0-9]+_", cookie_prefix):
+            raise ValueError("cookie prefix must be dsh<port>_")
+        self.cookie_prefix = cookie_prefix
         self.tls_context = tls_context
         super().__init__(listen, ProxyHandler)
 
@@ -90,57 +90,34 @@ class ProxyHandler(BaseHTTPRequestHandler):
         pass  # Request URLs can contain launch tokens.
 
     def send_header(self, name, value):
-        base = self.server.base_path
         if name.lower() == "set-cookie" and value.startswith("dsh-auth-"):
-            if base != "/":
-                if re.search(r";\s*path=", value, re.IGNORECASE):
-                    value = re.sub(r"(;\s*path=)[^;]*", lambda m: m[1] + base, value, flags=re.IGNORECASE)
-                else:
-                    value += "; Path=" + base
             if self.server.tls_context and not re.search(r";\s*secure(?:\s*;|\s*$)", value, re.IGNORECASE):
                 value += "; Secure"
-        elif name.lower() == "location" and base != "/":
-            url = urlsplit(value)
-            # Relative redirects already resolve below the public prefix.
-            if (not url.netloc and not url.scheme and value.startswith("/") and not value.startswith("//")) or (
-                url.netloc == self.server.public_host and url.scheme in {"http", "https"}
-            ):
-                if not url.path.startswith(base) and url.path != base.rstrip("/"):
-                    value = urlunsplit(url._replace(path=base + url.path.lstrip("/")))
+            value = self.server.cookie_prefix + value
         super().send_header(name, value)
-
-    def route_path(self):
-        base = self.server.base_path
-        if base == "/":
-            return True
-        url = urlsplit(self.path)
-        if url.scheme or url.netloc:
-            self.send_error(400, "Expected an origin-form request target")
-            return False
-        if url.path in {"/", base.rstrip("/")} and self.command in {"GET", "HEAD"}:
-            self.send_response(302)
-            self.send_header("Location", urlunsplit(url._replace(path=base)))
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", "0")
-            self.end_headers()
-            return False
-        if not url.path.startswith(base):
-            self.send_error(404, "Use the instance URL")
-            return False
-        self.path = urlunsplit(url._replace(path="/" + url.path[len(base):]))
-        return True
 
     def proxy(self):
         self.close_connection = True
         self.responded = False
         try:
-            if not self.route_path():
-                return
             websocket = self.headers.get("Upgrade", "").lower() == "websocket"
             headers = {
                 name.lower(): value
                 for name, value in filtered_headers(self.headers.items(), websocket=websocket)
             }
+            if self.server.cookie_prefix:
+                # Only this instance's login cookies reach HTTP and WebSocket
+                # backends. Ignore legacy and other instances' cookies entirely.
+                prefix = self.server.cookie_prefix
+                cookies = []
+                for header in self.headers.get_all("Cookie", []):
+                    for part in header.split(";"):
+                        name, sep, value = part.strip().partition("=")
+                        if sep and name.startswith(prefix + "dsh-auth-"):
+                            cookies.append(name[len(prefix):] + "=" + value)
+                headers.pop("cookie", None)
+                if cookies:
+                    headers["cookie"] = "; ".join(cookies)
             headers.update({
                 "host": self.server.public_host,
                 "x-forwarded-host": self.server.public_host,
@@ -188,7 +165,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 raise ValueError("truncated request body")
             body.extend(chunk)
 
-        target = append_token(self.command, self.path, self.headers.items(), self.server.token)
+        target = append_token(self.command, self.path, headers.items(), self.server.token)
         path = urlsplit(self.path).path
         bootstrap = target != self.path and path == "/"
         # Reuse the same method/query checks, ignoring old cookies for the retry.
@@ -252,7 +229,7 @@ def main():
         parser.add_argument(f"--{endpoint}-host", required=True)
         parser.add_argument(f"--{endpoint}-port", required=True, type=int)
     parser.add_argument("--public-host", required=True)
-    parser.add_argument("--base-path", default="/", help="Public instance prefix, e.g. /dsh-25228/")
+    parser.add_argument("--cookie-prefix", default="", help="Login cookie namespace, e.g. dsh25228_")
     parser.add_argument("--config", required=True)
     parser.add_argument("--tls-cert")
     parser.add_argument("--tls-key")
@@ -268,7 +245,7 @@ def main():
             tls_context.load_cert_chain(args.tls_cert, args.tls_key)
         with TokenProxy(
             (args.listen_host, args.listen_port), (args.upstream_host, args.upstream_port),
-            read_token(args.config), args.public_host, tls_context, args.base_path,
+            read_token(args.config), args.public_host, tls_context, args.cookie_prefix,
         ) as server:
             server.serve_forever()
     except (OSError, ValueError) as error:

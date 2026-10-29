@@ -123,7 +123,7 @@ start() {
     local host_ip command_name upstream_port='' pid
     local public_host="$server_ip"
     [[ "$server_ip" != *:* ]] || public_host="[$server_ip]"
-    local base_path="/dsh-${port}/" public_url="https://${public_host}:${port}/dsh-${port}/"
+    local public_url="https://${public_host}:${port}/" cookie_prefix="dsh${port}_"
     local tls_address tls_cert tls_key
     tls_address="$(python3 - "$server_ip" <<'PY'
 import ipaddress, re, sys
@@ -168,8 +168,8 @@ PY
         fi
         upstream_port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
     fi
-    if pid="$(service_pid dsh-token-proxy)" && [[ "$(process_option "$pid" --base-path)" != "$base_path" ]]; then
-        fail "运行中代理尚未使用 $base_path；请安排代理维护，当前进程保持运行。"
+    if pid="$(service_pid dsh-token-proxy)" && [[ "$(process_option "$pid" --cookie-prefix || true)" != "$cookie_prefix" ]]; then
+        fail "运行中代理尚未使用根路径与实例 Cookie 隔离；请安排代理维护，当前进程保持运行。"
         return 1
     fi
     start_service magpie-serve magpie serve
@@ -179,7 +179,7 @@ PY
     start_service dsh-token-proxy python3 "$proxy_script" \
         --listen-host "$host_ip" --listen-port "$port" \
         --upstream-host 127.0.0.1 --upstream-port "$upstream_port" \
-        --public-host "${public_host}:${port}" --base-path "$base_path" --config "$config_file" \
+        --public-host "${public_host}:${port}" --cookie-prefix "$cookie_prefix" --config "$config_file" \
         --tls-cert "$tls_cert" --tls-key "$tls_key"
     printf '访问地址：%s\n' "$public_url"
 }

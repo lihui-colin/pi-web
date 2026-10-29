@@ -49,16 +49,16 @@ import { execFileSync } from 'node:child_process';
 const [configArg, dirOverride, preview, ...extraHosts] = process.argv.slice(2);
 const config = path.resolve(configArg);
 if (!fs.existsSync(config)) throw new Error(`缺少 DSH 配置：${config}。请先从 dsh.conf.example 复制并填写 server_ip。`);
-const values = {};
+let serverIp;
 for (const line of fs.readFileSync(config, 'utf8').split(/\r?\n/)) {
   const m = line.match(/^\s*(server_ip)\s*=\s*(.*?)\s*$/);
   if (!m) continue;
   const raw = m[2];
   const quoted = raw.match(/^(['"])(.*?)\1\s*(?:#.*)?$/);
-  values[m[1]] = quoted ? quoted[2] : raw.replace(/\s+#.*$/, '').trim();
+  serverIp = quoted ? quoted[2] : raw.replace(/\s+#.*$/, '').trim();
 }
-if (!values.server_ip) throw new Error('DSH 配置缺少 server_ip');
-const hosts = [...new Set([values.server_ip, ...extraHosts])];
+if (!serverIp) throw new Error('DSH 配置缺少 server_ip');
+const hosts = [...new Set([serverIp, ...extraHosts])];
 const san = hosts.map(host => {
   if (net.isIP(host)) return `IP:${host}`;
   if (host.length <= 253 && host.split('.').every(label => /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/.test(label))) return `DNS:${host}`;
@@ -66,15 +66,13 @@ const san = hosts.map(host => {
 });
 const base = path.dirname(config);
 // Always namespace output by the address, even if legacy tls_cert/tls_key point elsewhere.
-const addressDir = values.server_ip.toLowerCase().replaceAll(':', '_');
+const addressDir = serverIp.toLowerCase().replaceAll(':', '_');
 const outputDir = path.join(dirOverride ? path.resolve(dirOverride) : path.join(base, 'tls'), addressDir);
 const cert = path.join(outputDir, 'fullchain.pem');
 const key = path.join(outputDir, 'privkey.pem');
-const caDir = path.dirname(cert);
-const ca = path.join(caDir, 'ca.pem');
-const caKey = path.join(caDir, 'ca-key.pem');
-const caCrt = path.join(caDir, 'ca.crt');
-if (new Set([cert, key, ca, caKey, caCrt]).size !== 5) throw new Error('证书、服务器私钥、CA 和 CA 私钥路径不能相同');
+const ca = path.join(outputDir, 'ca.pem');
+const caKey = path.join(outputDir, 'ca-key.pem');
+const caCrt = path.join(outputDir, 'ca.crt');
 const openssl = args => execFileSync('openssl', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 function validatePair(certPath, keyPath) {
   const x = new crypto.X509Certificate(fs.readFileSync(certPath));
@@ -127,15 +125,15 @@ if (preview === 'true') {
   console.log(`预览：将生成/复用本地 CA ${ca}，签发有效期 365 天的 HTTPS 证书并导出 ${caCrt}，不写入文件。`);
   process.exit(0);
 }
-for (const dir of new Set([caDir, path.dirname(key)])) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-const temp = fs.mkdtempSync(path.join(caDir, '.generate-'));
+fs.mkdirSync(outputDir, { recursive: true, mode: 0o700 });
+const temp = fs.mkdtempSync(path.join(outputDir, '.generate-'));
 try {
   const tempCa = path.join(temp, 'ca.pem'), tempCaKey = path.join(temp, 'ca-key.pem');
   const reqConfig = path.join(temp, 'openssl.cnf');
   fs.writeFileSync(reqConfig, '[req]\ndistinguished_name=dn\n[dn]\n[v3_ca]\nbasicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\nsubjectKeyIdentifier=hash\nauthorityKeyIdentifier=keyid:always\n');
   if (!fs.existsSync(ca)) {
     openssl(['req', '-x509', '-newkey', 'rsa:3072', '-nodes', '-sha256', '-days', '3650',
-      '-config', reqConfig, '-extensions', 'v3_ca', '-subj', `/CN=DSH Local HTTPS CA ${values.server_ip}`,
+      '-config', reqConfig, '-extensions', 'v3_ca', '-subj', `/CN=DSH Local HTTPS CA ${serverIp}`,
       '-keyout', tempCaKey, '-out', tempCa]);
     fs.chmodSync(tempCaKey, 0o600);
   }
@@ -162,7 +160,6 @@ try {
   console.log(`HTTPS 证书已生成。请在访问设备上导入并信任根证书：${caCrt}`);
   console.log('不要分发 ca-key.pem 或 privkey.pem；iOS 安装描述文件后还需启用根证书完全信任。');
 } finally {
-  if (path.dirname(temp) !== caDir || !path.basename(temp).startsWith('.generate-')) throw new Error('拒绝清理意外的临时路径');
   fs.rmSync(temp, { recursive: true, force: true });
 }
 TLS_NODE
