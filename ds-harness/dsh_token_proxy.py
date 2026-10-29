@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Forward dsh HTTP/WebSocket traffic and finish page login without browser redirects."""
+"""Forward dsh HTTP(S)/WebSocket traffic and finish login without browser redirects."""
 
 import argparse
 import http.client
 import re
 import select
 import socket
+import ssl
 import sys
 from contextlib import closing
 from http.cookies import SimpleCookie
@@ -48,11 +49,21 @@ def append_token(method, target, headers, token):
 
 
 class TokenProxy(ThreadingHTTPServer):
-    def __init__(self, listen, upstream, token, public_host):
+    def __init__(self, listen, upstream, token, public_host, tls_context=None):
         if not re.fullmatch(r"[A-Za-z0-9_-]+", token):
             raise ValueError("dsh token is missing or invalid")
         self.upstream, self.token, self.public_host = upstream, token, public_host
+        self.tls_context = tls_context
         super().__init__(listen, ProxyHandler)
+
+    def get_request(self):
+        connection, address = super().get_request()
+        if self.tls_context:
+            # Defer the handshake to the request thread so idle clients cannot block accepts.
+            connection = self.tls_context.wrap_socket(
+                connection, server_side=True, do_handshake_on_connect=False,
+            )
+        return connection, address
 
 
 class ProxyHandler(BaseHTTPRequestHandler):
@@ -63,6 +74,12 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
     def log_message(self, *_args):
         pass  # Request URLs can contain launch tokens.
+
+    def send_header(self, name, value):
+        if self.server.tls_context and name.lower() == "set-cookie" and value.startswith("dsh-auth-"):
+            if not re.search(r";\s*secure(?:\s*;|\s*$)", value, re.IGNORECASE):
+                value += "; Secure"
+        super().send_header(name, value)
 
     def proxy(self):
         self.close_connection = True
@@ -76,7 +93,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             headers.update({
                 "host": self.server.public_host,
                 "x-forwarded-host": self.server.public_host,
-                "x-forwarded-proto": "http",
+                "x-forwarded-proto": "https" if self.server.tls_context else "http",
             })
             if websocket:
                 self.proxy_websocket(headers)
@@ -95,7 +112,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
             upstream.sendall((request + "\r\n").encode("iso-8859-1"))
             self.responded = True
             while True:
-                ready, _, _ = select.select([self.connection, upstream], [], [], 300)
+                # TLS may hold decrypted early frames even when the socket is not readable.
+                if isinstance(self.connection, ssl.SSLSocket) and self.connection.pending():
+                    ready = [self.connection]
+                else:
+                    ready, _, _ = select.select([self.connection, upstream], [], [], 300)
                 if not ready:
                     return
                 for source in ready:
@@ -173,13 +194,21 @@ def main():
         parser.add_argument(f"--{endpoint}-port", required=True, type=int)
     parser.add_argument("--public-host", required=True)
     parser.add_argument("--config", required=True)
+    parser.add_argument("--tls-cert")
+    parser.add_argument("--tls-key")
     args = parser.parse_args()
     if not all(1 <= port <= 65535 for port in (args.listen_port, args.upstream_port)):
         parser.error("ports must be between 1 and 65535")
+    if bool(args.tls_cert) != bool(args.tls_key):
+        parser.error("--tls-cert and --tls-key must be supplied together")
     try:
+        tls_context = None
+        if args.tls_cert:
+            tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            tls_context.load_cert_chain(args.tls_cert, args.tls_key)
         with TokenProxy(
             (args.listen_host, args.listen_port), (args.upstream_host, args.upstream_port),
-            read_token(args.config), args.public_host,
+            read_token(args.config), args.public_host, tls_context,
         ) as server:
             server.serve_forever()
     except (OSError, ValueError) as error:

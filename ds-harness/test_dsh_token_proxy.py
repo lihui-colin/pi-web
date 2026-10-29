@@ -2,12 +2,16 @@
 
 import http.client
 import socket
+import ssl
+import subprocess
+import tempfile
 import threading
 import unittest
 from collections import deque
 from contextlib import contextmanager
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 from dsh_token_proxy import TokenProxy
 
@@ -16,8 +20,18 @@ COOKIE = "dsh-auth-test=browser-session; Path=/; HttpOnly; SameSite=Strict"
 PAGE = b"<!doctype html><title>DeepSeek Harness</title>"
 
 
+def create_test_certificate(directory):
+    cert, key = Path(directory) / "cert.pem", Path(directory) / "key.pem"
+    subprocess.run([
+        "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+        "-subj", "/CN=localhost", "-addext", "subjectAltName=IP:127.0.0.1,DNS:localhost",
+        "-keyout", str(key), "-out", str(cert),
+    ], check=True, capture_output=True, timeout=15)
+    return cert, key
+
+
 @contextmanager
-def proxy_fixture(responses):
+def proxy_fixture(responses, tls_context=None):
     replies = deque(responses)
     requests = []
     errors = []
@@ -66,7 +80,8 @@ def proxy_fixture(responses):
 
     with ThreadingHTTPServer(("127.0.0.1", 0), Upstream) as upstream:
         with TokenProxy(
-            ("127.0.0.1", 0), upstream.server_address, "launch-token", "dsh.test:25228"
+            ("127.0.0.1", 0), upstream.server_address, "launch-token", "dsh.test:25228",
+            tls_context,
         ) as proxy:
             for server in (upstream, proxy):
                 threading.Thread(
@@ -217,6 +232,74 @@ class PageAuthenticationTests(unittest.TestCase):
             self.assertEqual(requests[0][1]["Host"], "dsh.test:25228")
             self.assertEqual(requests[0][1]["Origin"], "http://dsh.test:25228")
             self.assertEqual(requests[0][1]["Cookie"], "dsh-auth-test=browser-session")
+            self.assertFalse(replies or errors)
+
+
+class HttpsTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        directory = tempfile.TemporaryDirectory(prefix="dsh-tls-")
+        cls.addClassCleanup(directory.cleanup)
+        cert, key = create_test_certificate(directory.name)
+        cls.server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        cls.server_context.load_cert_chain(cert, key)
+        cls.client_context = ssl.create_default_context(cafile=str(cert))
+
+    def test_https_bootstrap_and_api_cookies_are_secure(self):
+        for target, replies in (
+            ("/", [(303, [("Location", "./"), ("Set-Cookie", COOKIE)], b""), (200, [], PAGE)]),
+            ("/connect", [(302, [("Location", "./api/remote.mux"), ("Set-Cookie", COOKIE)], b"")]),
+        ):
+            with self.subTest(target=target), proxy_fixture(replies, self.server_context) as fixture:
+                address, requests, remaining, errors = fixture
+                connection = http.client.HTTPSConnection(*address, context=self.client_context, timeout=2)
+                try:
+                    connection.request("GET", target, headers={
+                        "Origin": "https://dsh.test:25228", "X-Forwarded-Proto": "http",
+                    })
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 200 if target == "/" else 302)
+                    self.assertEqual(response.getheader("Set-Cookie"), COOKIE + "; Secure")
+                    self.assertEqual(response.read(), PAGE if target == "/" else b"")
+                finally:
+                    connection.close()
+                self.assertEqual(requests[0][1]["Origin"], "https://dsh.test:25228")
+                self.assertEqual(requests[0][1]["X-Forwarded-Proto"], "https")
+                self.assertFalse(remaining or errors)
+
+    def test_idle_tls_client_does_not_block_other_clients(self):
+        with proxy_fixture([(200, [], PAGE)], self.server_context) as (address, *_):
+            with socket.create_connection(address, timeout=2):
+                connection = http.client.HTTPSConnection(*address, context=self.client_context, timeout=2)
+                try:
+                    connection.request("GET", "/app.js")
+                    self.assertEqual(connection.getresponse().read(), PAGE)
+                finally:
+                    connection.close()
+
+    def test_wss_forwards_frame_buffered_with_upgrade_headers(self):
+        handshake = [("Connection", "Upgrade"), ("Upgrade", "websocket")]
+        # The upstream waits for the client frame before replying. This catches relays
+        # that wait on select() while the frame is already in the TLS decrypted buffer.
+        with proxy_fixture([(101, handshake, b"")], self.server_context) as fixture:
+            address, requests, replies, errors = fixture
+            with socket.create_connection(address, timeout=2) as raw:
+                with self.client_context.wrap_socket(raw, server_hostname="127.0.0.1") as client:
+                    frame = b"\x81\x80abcd"
+                    client.sendall(
+                        b"GET /api/remote.mux HTTP/1.1\r\nHost: browser.test\r\n"
+                        b"Connection: Upgrade\r\nUpgrade: websocket\r\n"
+                        b"Cookie: dsh-auth-test=browser-session\r\n"
+                        b"Origin: https://dsh.test:25228\r\n\r\n" + frame
+                    )
+                    response = b""
+                    while chunk := client.recv(4096):
+                        response += chunk
+            head, _, body = response.partition(b"\r\n\r\n")
+            self.assertTrue(head.startswith(b"HTTP/1.1 101"))
+            self.assertEqual(body, frame)
+            self.assertEqual(requests[0][1]["X-Forwarded-Proto"], "https")
+            self.assertEqual(requests[0][1]["Origin"], "https://dsh.test:25228")
             self.assertFalse(replies or errors)
 
 

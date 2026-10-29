@@ -11,6 +11,8 @@ import time
 import unittest
 from pathlib import Path
 
+from test_dsh_token_proxy import create_test_certificate
+
 
 class LauncherTests(unittest.TestCase):
     def test_start_reuse_proxy_recovery_and_stop(self):
@@ -36,7 +38,12 @@ class LauncherTests(unittest.TestCase):
                 reservation.bind(("127.0.0.1", 0))
                 port = reservation.getsockname()[1]
             config = root / "dsh.conf"
-            config.write_text(f"port={port}\nserver_ip=127.0.0.1\ndsh_token=''\n")
+            (root / "tls").mkdir()
+            cert, key = create_test_certificate(root / "tls")
+            config.write_text(
+                f"port={port}\nserver_ip=127.0.0.1\ndsh_token=''\n"
+                "tls_cert=tls/cert.pem\ntls_key=tls/key.pem\n"
+            )
             environment = {**os.environ, "PATH": f"{binaries}:{os.environ['PATH']}"}
 
             def run(action):
@@ -51,6 +58,10 @@ class LauncherTests(unittest.TestCase):
                 return {p.stem: int(p.read_text()) for p in root.glob("*.pid")}
 
             try:
+                key.rename(key.with_suffix(".backup"))
+                self.assertNotEqual(run("start"), 0)
+                self.assertFalse(pids(), "missing TLS key must fail before starting services")
+                key.with_suffix(".backup").rename(key)
                 self.assertEqual(run("start"), 0, (root / "launcher.log").read_text())
                 original = pids()
                 self.assertEqual(len(original), 3)
@@ -62,6 +73,10 @@ class LauncherTests(unittest.TestCase):
 
                 backend = Path(f'/proc/{original["dsh-web"]}/cmdline').read_bytes().split(b"\0")
                 backend_port = backend[backend.index(b"--port") + 1]
+                self.assertEqual(
+                    backend[backend.index(b"--public-url") + 1],
+                    f"https://127.0.0.1:{port}".encode(),
+                )
                 os.kill(original["dsh-token-proxy"], signal.SIGTERM)
                 for _ in range(100):
                     process = Path(f'/proc/{original["dsh-token-proxy"]}/cmdline')
@@ -73,6 +88,8 @@ class LauncherTests(unittest.TestCase):
                 self.assertEqual(recovered["dsh-web"], original["dsh-web"])
                 proxy = Path(f'/proc/{recovered["dsh-token-proxy"]}/cmdline').read_bytes().split(b"\0")
                 self.assertEqual(proxy[proxy.index(b"--upstream-port") + 1], backend_port)
+                self.assertEqual(proxy[proxy.index(b"--tls-cert") + 1], str(cert).encode())
+                self.assertEqual(proxy[proxy.index(b"--tls-key") + 1], str(key).encode())
                 self.assertEqual(run("stop"), 0)
                 self.assertFalse(pids())
                 self.assertIn("dsh_token=''", config.read_text())

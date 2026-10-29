@@ -107,12 +107,23 @@ start() {
     (( port >= 1 && port <= 65535 )) || { fail 'port 必须是 1–65535 之间的整数。'; return 1; }
     [[ -n "${server_ip:-}" ]] || { fail 'server_ip 不能为空。'; return 1; }
     local host_ip command_name upstream_port='' pid index
+    local tls_cert="${tls_cert:-tls/fullchain.pem}" tls_key="${tls_key:-tls/privkey.pem}"
+    [[ "$tls_cert" == /* ]] || tls_cert="$script_dir/$tls_cert"
+    [[ "$tls_key" == /* ]] || tls_key="$script_dir/$tls_key"
     read -r host_ip _ <<<"$(hostname -I)"
     [[ -n "$host_ip" ]] || { fail '无法获取本机绑定地址。'; return 1; }
     for command_name in magpie dsh python3; do
         command -v "$command_name" >/dev/null || { fail "找不到 $command_name 命令。"; return 1; }
     done
     [[ -f "$proxy_script" ]] || { fail "找不到 $proxy_script"; return 1; }
+    # Validate HTTPS before starting any services; never fall back to plaintext.
+    python3 - "$tls_cert" "$tls_key" <<'PY'
+import ssl, sys
+try:
+    ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER).load_cert_chain(*sys.argv[1:])
+except (OSError, ValueError) as error:
+    sys.exit(f"无法加载 HTTPS 证书或私钥，请检查 dsh.conf 的 tls_cert / tls_key：{error}")
+PY
 
     # Reuse a running backend's actual port when starting a missing proxy.
     if pid="$(service_pid dsh-web)"; then
@@ -135,12 +146,13 @@ start() {
     start_service magpie-serve magpie serve
     start_service dsh-web dsh web --port "$upstream_port" --host 127.0.0.1 \
         --trusted-host "${server_ip}:${port}" --trusted-host "127.0.0.1:${upstream_port}" \
-        --public-url "http://${server_ip}:${port}" --no-open
+        --public-url "https://${server_ip}:${port}" --no-open
     start_service dsh-token-proxy python3 "$proxy_script" \
         --listen-host "$host_ip" --listen-port "$port" \
         --upstream-host 127.0.0.1 --upstream-port "$upstream_port" \
-        --public-host "${server_ip}:${port}" --config "$config_file"
-    printf '访问地址：http://%s:%s/\n' "$server_ip" "$port"
+        --public-host "${server_ip}:${port}" --config "$config_file" \
+        --tls-cert "$tls_cert" --tls-key "$tls_key"
+    printf '访问地址：https://%s:%s/\n' "$server_ip" "$port"
 }
 
 stop() {

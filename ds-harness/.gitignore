@@ -4,3 +4,4 @@ dsh.conf
 __pycache__/
 .dsh-web-token-captured
 .dsh.conf.*
+/tls/
