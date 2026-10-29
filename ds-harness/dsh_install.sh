@@ -2,8 +2,8 @@
 # 安装当前团队使用的 DSH 与插件，全部使用执行时的最新发布版本。
 # 适用于 Linux/macOS；需要 Node.js >=24、OpenSSL、npm、curl 和 sh。
 # 当前机器参考：Node.js v26.7.0；不负责自动安装 Node.js。
-# 用法：bash dsh_harness/dsh_install.sh [--dry-run] [--cert-only] [--config 配置文件]
-# HTTPS 地址与证书路径默认读取 ../ds-harness/dsh.conf。
+# 用法：bash ds-harness/dsh_install.sh [--dry-run] [--cert-only] [--config 配置文件]
+# HTTPS 地址与证书路径默认读取脚本同目录的 dsh.conf。
 # 可设置 DSH_HOME 指定数据目录，默认 $HOME/.dsh。
 # 不启动/停止服务，不迁移用户数据，不写入 API Key。
 set -euo pipefail
@@ -11,7 +11,7 @@ set -euo pipefail
 dry_run=false
 cert_only=false
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-config_file="$script_dir/../ds-harness/dsh.conf"
+config_file="$script_dir/dsh.conf"
 tls_dir=''
 tls_hosts=()
 while (( $# )); do
@@ -31,12 +31,12 @@ while (( $# )); do
             shift 2 ;;
         -h|--help)
             printf '%s\n' \
-                '用法：bash dsh_harness/dsh_install.sh [--dry-run] [--cert-only] [--config 文件] [--tls-host IP或域名] [--tls-dir 目录]' \
+                '用法：bash ds-harness/dsh_install.sh [--dry-run] [--cert-only] [--config 文件] [--tls-host IP或域名] [--tls-dir 目录]' \
                 '前置：Node.js >=24、OpenSSL；完整安装还需 npm、curl、sh，npm 全局目录需要当前用户可写。' \
                 '安装/更新 DSH、pnpm、5 个额外插件，以及官方 magpie。' \
                 '全部使用执行时的最新版本，启用当前 web profile 的 12 个 bundle。' \
                 '自动读取 DSH 配置的 server_ip、tls_cert、tls_key；--config 可指定配置文件。' \
-                '默认配置为脚本上级 ds-harness/dsh.conf，证书相对路径以配置目录为基准。' \
+                '默认配置为脚本同目录的 dsh.conf，证书相对路径以配置目录为基准。' \
                 '--tls-host 可重复添加额外 SAN；--tls-dir 可覆盖证书目录，需同步调整服务配置。' \
                 '已有证书会校验并保留；--cert-only 只处理证书，--dry-run 不写入文件。' \
                 '局域网客户端需信任生成的 ca.pem；只导入根证书，不复制 CA 私钥。' \
