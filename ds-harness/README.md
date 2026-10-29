@@ -28,6 +28,16 @@ cp ds-harness/dsh.conf.example ds-harness/dsh.conf
 
 停止后清除 token；日志和 PID 保存在本目录。配置文件仅当前用户可读写，日志会隐藏启动 token；配置、`tls/` 证书目录、日志、PID 和 Python 缓存均不提交 Git。修改配置后需在合适时机先 `stop` 再 `start`；单独更新入口证书只需重启代理，保留 dsh 后端及运行中的任务。
 
+## 安装与更新
+
+```bash
+bash ds-harness/dsh_install.sh
+```
+
+脚本使用 `latest` 安装 DSH、pnpm 和第三方插件，官方 `@deepseek-ai/dsh-subagent-codex` 按安装后的 `dsh --version` 选择同版发布包。该插件的 `latest` 标签可能仍指向旧版本；已核对 npm 发布元数据，`0.2.1-rc.2` 的 DSH peer 依赖均要求 `0.2.1-rc.2`。保留上游插件管理器的兼容性检查，不自动添加 `allow-version` 豁免；同版包缺失或不兼容时停止安装。
+
+安装不启停服务；在新机器或目标 DSH 已停机时执行。可先用 `--dry-run` 预览，预览中的 Codex 插件版本是占位符，实际执行时才会确定。
+
 ## 代理行为
 
 代理使用 Python 标准库终止 TLS、解析 HTTP 和分块响应，WSS 保留升级握手并双向转发；到回环地址上游的连接仍为 HTTP。首次访问 `/` 时补上启动 token，在代理内部完成登录交换，再把首页和 `HttpOnly; SameSite=Strict; Secure` Cookie 一起返回，避免手机从其他网页进入时发生重定向循环。已有 Cookie、自带 token 的请求保持原样；`/connect` 保留独立 API 会话的登录重定向。

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 安装当前团队使用的 DSH 与插件，全部使用执行时的最新发布版本。
+# 安装当前团队使用的 DSH 与插件，DSH/第三方插件使用 latest，官方 Codex 插件与 DSH 同版。
 # 适用于 Linux/macOS；需要 Node.js >=24、OpenSSL、npm、curl 和 sh。
 # 当前机器参考：Node.js v26.7.0；不负责自动安装 Node.js。
 # 用法：bash ds-harness/dsh_install.sh [--dry-run] [--cert-only] [--config 配置文件]
@@ -34,7 +34,7 @@ while (( $# )); do
                 '用法：bash ds-harness/dsh_install.sh [--dry-run] [--cert-only] [--config 文件] [--tls-host IP或域名] [--tls-dir 目录]' \
                 '前置：Node.js >=24、OpenSSL；完整安装还需 npm、curl、sh，npm 全局目录需要当前用户可写。' \
                 '安装/更新 DSH、pnpm、5 个额外插件，以及官方 magpie。' \
-                '全部使用执行时的最新版本，启用当前 web profile 的 12 个 bundle。' \
+                'DSH/第三方插件使用 latest，官方 Codex 插件与 DSH 同版，启用 12 个 bundle。' \
                 '自动读取 DSH 配置的 server_ip、tls_cert、tls_key；--config 可指定配置文件。' \
                 '默认配置为脚本同目录的 dsh.conf，证书相对路径以配置目录为基准。' \
                 '--tls-host 可重复添加额外 SAN；--tls-dir 可覆盖证书目录，需同步调整服务配置。' \
@@ -177,7 +177,7 @@ TLS_NODE
 if "$cert_only"; then exit 0; fi
 
 printf '目标数据目录：%s\n' "$DSH_HOME"
-printf '%s\n' '将安装执行时的最新版本；不会启动或重启服务。'
+printf '%s\n' 'DSH/第三方插件使用 latest，官方 Codex 插件与 DSH 同版；不会启动或重启服务。'
 run npm install --global '@deepseek-ai/dsh@latest' 'pnpm@latest'
 if ! "$dry_run"; then
     for bin in dsh pnpm; do
@@ -186,6 +186,18 @@ if ! "$dry_run"; then
             exit 1
         fi
     done
+fi
+
+# 官方插件的 latest 标签可能滞后于运行时；使用实际安装的 DSH 版本。
+# dry-run 不执行安装，不能把当前机器的旧版本当作安装后的版本。
+if "$dry_run"; then
+    dsh_version='<安装后的 DSH 版本>'
+else
+    dsh_version="$(dsh --version)"
+    if [[ ! "$dsh_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+        printf '无法识别 DSH 版本：%s，停止安装插件。\n' "$dsh_version" >&2
+        exit 1
+    fi
 fi
 
 # 官方安装来源：https://github.com/yetone/magpie#quick-start
@@ -206,7 +218,7 @@ if [[ -f "$profile_dir/package.json" ]]; then
     run cp -p -- "$profile_dir/package.json" "$backup"
 fi
 run dsh plugin --profile web add -w --save-exact \
-    '@deepseek-ai/dsh-subagent-codex@latest' \
+    "@deepseek-ai/dsh-subagent-codex@$dsh_version" \
     'ds-bot@latest' \
     'dsh-web-mobile@latest' \
     'dshmarket@latest' \
