@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 安装当前团队使用的 DSH 与插件，DSH/第三方插件使用 latest，官方 Codex 插件与 DSH 同版。
+# 安装当前团队使用的 DSH 与插件，DSH/npm 第三方插件使用 latest，GitHub 插件跟随仓库，官方 Codex 插件与 DSH 同版。
 # 适用于 Linux/macOS；需要 Node.js >=24、OpenSSL、npm、curl 和 sh。
 # 当前机器参考：Node.js v26.7.0；不负责自动安装 Node.js。
 # 用法：bash ds-harness/dsh_install.sh [--dry-run] [--upgrade] [--cert-only] [--config 配置文件]
@@ -36,7 +36,7 @@ while (( $# )); do
                 '用法：bash ds-harness/dsh_install.sh [--dry-run] [--upgrade] [--cert-only] [--config 文件] [--tls-host IP或域名] [--tls-dir 目录]' \
                 '前置：Node.js >=24、OpenSSL；完整安装还需 npm、curl、sh，npm 全局目录需要当前用户可写。' \
                 '默认只补装缺失的程序和插件；--upgrade 主动更新所有程序和插件。' \
-                'DSH/第三方插件使用 latest，官方 Codex 插件与 DSH 同版，启用 12 个 bundle。' \
+                'DSH/npm 第三方插件使用 latest，GitHub 插件跟随仓库，官方 Codex 插件与 DSH 同版，启用 14 个 bundle。' \
                 '自动读取 DSH 配置的 server_ip、tls_cert、tls_key；--config 可指定配置文件。' \
                 '默认配置为脚本同目录的 dsh.conf，证书相对路径以配置目录为基准。' \
                 '--tls-host 可重复添加额外 SAN；--tls-dir 可覆盖证书目录，需同步调整服务配置。' \
@@ -229,7 +229,7 @@ TLS_NODE
 if "$cert_only"; then exit 0; fi
 
 printf '目标数据目录：%s\n' "$DSH_HOME"
-printf '%s\n' 'DSH/第三方插件使用 latest，官方 Codex 插件与 DSH 同版；不会启动或重启服务。'
+printf '%s\n' 'DSH/npm 第三方插件使用 latest，GitHub 插件跟随仓库，官方 Codex 插件与 DSH 同版；不会启动或重启服务。'
 npm_packages=()
 dsh_will_install=false
 for bin in dsh pnpm; do
@@ -291,7 +291,8 @@ import path from 'node:path';
 const [dir, version, upgrade] = process.argv.slice(2);
 const manifest = path.join(dir, 'package.json');
 const pkg = fs.existsSync(manifest) ? JSON.parse(fs.readFileSync(manifest, 'utf8')) : {};
-const names = ['@deepseek-ai/dsh-subagent-codex', 'ds-bot', 'dsh-web-mobile', 'dshmarket', 'dsh-ide-git'];
+const names = ['@deepseek-ai/dsh-subagent-codex', 'ds-bot', 'dsh-web-mobile', 'dshmarket', 'dsh-ide-git', 'dsh-sidebar-enhancement', 'dsh-sidebar-plus', 'dsh-file-transfer'];
+const sources = { 'dsh-file-transfer': 'github:flyhigao/dsh-file-transfer' };
 for (const name of names) {
   const target = name === names[0] ? version : 'latest';
   const installedPath = path.join(dir, 'node_modules', name, 'package.json');
@@ -302,7 +303,7 @@ for (const name of names) {
       (name !== names[0] || installed.version === version)) {
     console.error(`已安装 ${name}@${installed.version}，跳过安装。`);
   } else {
-    console.log(`${name}@${target}`);
+    console.log(sources[name] ?? `${name}@${target}`);
   }
 }
 PLAN_NODE
@@ -342,6 +343,8 @@ const expected = [
   'dshmarket',
   'ds-bot',
   '@deepseek-ai/dsh-experimental-voice-input-bundle',
+  'dsh-sidebar-enhancement',
+  'dsh-sidebar-plus',
   'dsh-ide-git',
 ];
 pkg.dsh ??= {};
@@ -357,7 +360,7 @@ console.log('插件实际安装版本：\n' + JSON.stringify(pkg.dependencies, n
 NODE
 
 if "$dry_run"; then
-    printf '%s\n' '预览完成：node 步骤将配置 12 个 bundle；未安装程序或修改文件。'
+    printf '%s\n' '预览完成：node 步骤将配置 14 个 bundle；未安装程序或修改文件。'
 else
     run dsh --version
     run pnpm --version

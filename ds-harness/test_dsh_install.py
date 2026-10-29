@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 SCRIPT = Path(__file__).with_name('dsh_install.sh')
-NAMES = ['@deepseek-ai/dsh-subagent-codex', 'ds-bot', 'dsh-web-mobile', 'dshmarket', 'dsh-ide-git']
+NAMES = ['@deepseek-ai/dsh-subagent-codex', 'ds-bot', 'dsh-web-mobile', 'dshmarket', 'dsh-ide-git', 'dsh-sidebar-enhancement', 'dsh-sidebar-plus', 'dsh-file-transfer']
 
 
 class InstallPlanTests(unittest.TestCase):
@@ -62,6 +62,16 @@ class InstallPlanTests(unittest.TestCase):
         self.assertIn('+ npm install', output)
         self.assertIn('+ curl', output)
         self.assertIn('ds-bot@latest dsh-web-mobile@latest dshmarket@latest dsh-ide-git@latest', output)
+        self.assertIn('dsh-sidebar-enhancement@latest dsh-sidebar-plus@latest github:flyhigao/dsh-file-transfer', output)
+        self.assertNotIn('dsh-file-transfer@latest', output)
+
+    def test_missing_github_plugin_uses_repository_source(self):
+        package = self.profile / 'node_modules/dsh-file-transfer/package.json'
+        package.unlink()
+        output = self.run_plan()
+        command = next(line for line in output.splitlines() if line.startswith('+ dsh plugin'))
+        self.assertTrue(command.endswith('github:flyhigao/dsh-file-transfer'), command)
+        self.assertNotIn('dsh-file-transfer@latest', command)
 
 
 class CertificateExportTests(unittest.TestCase):
