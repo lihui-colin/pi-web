@@ -48,6 +48,17 @@ def append_token(method, target, headers, token):
     return urlunsplit(url._replace(query=query))
 
 
+def update_cookies(value, additions=(), *, remove_auth=False):
+    jar = SimpleCookie(value)
+    if remove_auth:
+        for name in list(jar):
+            if name.startswith("dsh-auth-"):
+                del jar[name]
+    for cookie in additions:
+        jar.load(cookie)
+    return "; ".join(cookie.OutputString(attrs=[]) for cookie in jar.values())
+
+
 class TokenProxy(ThreadingHTTPServer):
     def __init__(self, listen, upstream, token, public_host, tls_context=None, base_path="/"):
         if not re.fullmatch(r"[A-Za-z0-9_-]+", token):
@@ -178,7 +189,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
             body.extend(chunk)
 
         target = append_token(self.command, self.path, self.headers.items(), self.server.token)
-        bootstrap = target != self.path and urlsplit(self.path).path == "/"
+        path = urlsplit(self.path).path
+        bootstrap = target != self.path and path == "/"
+        # Reuse the same method/query checks, ignoring old cookies for the retry.
+        login_target = append_token(self.command, self.path, [], self.server.token)
+        can_reauthenticate = path in {"/", "/index.html"} and target == self.path != login_target
         session_cookies = []
         for attempt in range(3):
             with closing(http.client.HTTPConnection(*self.server.upstream, timeout=30)) as upstream:
@@ -189,24 +204,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     if name.lower() == "set-cookie" and value.startswith("dsh-auth-")
                     and "=" in value.split(";", 1)[0]
                 ]
-                if (
-                    attempt == 0 and response.status == 401
-                    and self.command == "GET"
-                    and urlsplit(self.path).path in {"/", "/index.html"}
-                    and target == self.path
-                    and not any(name == "token" for name, _ in parse_qsl(
-                        urlsplit(self.path).query, keep_blank_values=True,
-                    ))
-                ):
-                    # A previous backend session's cookie must not prevent login.
-                    # Retry only page navigation; never replay API calls or writes.
+                if attempt == 0 and response.status == 401 and can_reauthenticate:
+                    # Only page navigation can be retried; API calls and writes never are.
                     response.read()
-                    jar = SimpleCookie(headers.get("cookie", ""))
-                    headers["cookie"] = "; ".join(
-                        cookie.OutputString(attrs=[])
-                        for name, cookie in jar.items() if not name.startswith("dsh-auth-")
-                    )
-                    target = append_token(self.command, self.path, headers.items(), self.server.token)
+                    headers["cookie"] = update_cookies(headers.get("cookie", ""), remove_auth=True)
+                    target = login_target
                     bootstrap = True
                     continue
                 if (
@@ -216,10 +218,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     # Cross-site redirects cannot send Strict cookies. Complete our
                     # token exchange upstream, then return the page and cookie together.
                     session_cookies = cookies
-                    jar = SimpleCookie(headers.get("cookie", ""))
-                    for cookie in cookies:
-                        jar.load(cookie)
-                    headers["cookie"] = "; ".join(m.OutputString(attrs=[]) for m in jar.values())
+                    headers["cookie"] = update_cookies(headers.get("cookie", ""), cookies)
                     target = "/"
                     continue
 

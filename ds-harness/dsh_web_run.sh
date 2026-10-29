@@ -23,6 +23,20 @@ service_pid() {
     printf '%s\n' "$pid"
 }
 
+# Read a named option without splitting arguments containing spaces.
+process_option() {
+    local pid="$1" option="$2" index
+    local -a arguments
+    mapfile -d '' -t arguments <"/proc/$pid/cmdline" || return 1
+    for ((index=0; index<${#arguments[@]}-1; index++)); do
+        if [[ "${arguments[index]}" == "$option" ]]; then
+            printf '%s\n' "${arguments[index+1]}"
+            return 0
+        fi
+    done
+    return 1
+}
+
 write_token() {
     local token="$1" temporary
     [[ -z "$token" || "$token" =~ ^[A-Za-z0-9_-]+$ ]] || return 1
@@ -106,7 +120,7 @@ start() {
     port=$((10#$port))
     (( port >= 1 && port <= 65535 )) || { fail 'port 必须是 1–65535 之间的整数。'; return 1; }
     [[ -n "${server_ip:-}" ]] || { fail 'server_ip 不能为空。'; return 1; }
-    local host_ip command_name upstream_port='' pid index
+    local host_ip command_name upstream_port='' pid
     local base_path="/dsh-${port}/" public_url="https://${server_ip}:${port}/dsh-${port}/"
     local tls_cert="${tls_cert:-tls/fullchain.pem}" tls_key="${tls_key:-tls/privkey.pem}"
     [[ "$tls_cert" == /* ]] || tls_cert="$script_dir/$tls_cert"
@@ -128,17 +142,8 @@ PY
 
     # Reuse a running backend's actual port when starting a missing proxy.
     if pid="$(service_pid dsh-web)"; then
-        local running_public_url=''
-        local -a arguments
-        mapfile -d '' -t arguments <"/proc/$pid/cmdline"
-        for ((index=0; index<${#arguments[@]}-1; index++)); do
-            if [[ "${arguments[index]}" == --port ]]; then
-                upstream_port="${arguments[index+1]}"
-            elif [[ "${arguments[index]}" == --public-url ]]; then
-                running_public_url="${arguments[index+1]}"
-            fi
-        done
-        if [[ "$running_public_url" != "$public_url" ]]; then
+        upstream_port="$(process_option "$pid" --port)" || { fail '无法读取运行中 dsh 的端口。'; return 1; }
+        if [[ "$(process_option "$pid" --public-url)" != "$public_url" ]]; then
             fail "运行中 DSH 的访问地址与 $public_url 不一致；请在任务完成后安排 stop/start，当前进程保持运行。"
             return 1
         fi
@@ -150,19 +155,9 @@ PY
         fi
         upstream_port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
     fi
-    if pid="$(service_pid dsh-token-proxy)"; then
-        local running_base_path=''
-        local -a proxy_arguments
-        mapfile -d '' -t proxy_arguments <"/proc/$pid/cmdline"
-        for ((index=0; index<${#proxy_arguments[@]}-1; index++)); do
-            if [[ "${proxy_arguments[index]}" == --base-path ]]; then
-                running_base_path="${proxy_arguments[index+1]}"
-            fi
-        done
-        if [[ "$running_base_path" != "$base_path" ]]; then
-            fail "运行中代理尚未使用 $base_path；请安排代理维护，当前进程保持运行。"
-            return 1
-        fi
+    if pid="$(service_pid dsh-token-proxy)" && [[ "$(process_option "$pid" --base-path)" != "$base_path" ]]; then
+        fail "运行中代理尚未使用 $base_path；请安排代理维护，当前进程保持运行。"
+        return 1
     fi
     start_service magpie-serve magpie serve
     start_service dsh-web dsh web --port "$upstream_port" --host 127.0.0.1 \
