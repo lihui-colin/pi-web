@@ -34,9 +34,11 @@ cp ds-harness/dsh.conf.example ds-harness/dsh.conf
 bash ds-harness/dsh_install.sh
 ```
 
-脚本使用 `latest` 安装 DSH、pnpm 和第三方插件，官方 `@deepseek-ai/dsh-subagent-codex` 按安装后的 `dsh --version` 选择同版发布包。该插件的 `latest` 标签可能仍指向旧版本；已核对 npm 发布元数据，`0.2.1-rc.2` 的 DSH peer 依赖均要求 `0.2.1-rc.2`。保留上游插件管理器的兼容性检查，不自动添加 `allow-version` 豁免；同版包缺失或不兼容时停止安装。
+默认跳过 PATH 中已有的 DSH、pnpm 和 magpie；插件同时检查 web profile 的依赖声明及实际安装文件，只补装缺失项。官方 Codex 插件版本与 DSH 不一致时仍会对齐。使用 `--upgrade` 可主动更新全部程序和插件。
 
-安装不启停服务；在新机器或目标 DSH 已停机时执行。可先用 `--dry-run` 预览，预览中的 Codex 插件版本是占位符，实际执行时才会确定。
+需要安装时，脚本使用 `latest` 安装 DSH、pnpm 和第三方插件，官方 `@deepseek-ai/dsh-subagent-codex` 按安装后的 `dsh --version` 选择同版发布包。该插件的 `latest` 标签可能仍指向旧版本；已核对 npm 发布元数据，`0.2.1-rc.2` 的 DSH peer 依赖均要求 `0.2.1-rc.2`。保留上游插件管理器的兼容性检查，不自动添加 `allow-version` 豁免；同版包缺失或不兼容时停止安装。
+
+安装不启停服务；在新机器或目标 DSH 已停机时执行。可先用 `--dry-run` 预览，仅在预览需要安装或更新 DSH 时，Codex 插件版本使用占位符，实际执行时才会确定。
 
 ## 代理行为
 

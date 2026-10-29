@@ -2,13 +2,14 @@
 # 安装当前团队使用的 DSH 与插件，DSH/第三方插件使用 latest，官方 Codex 插件与 DSH 同版。
 # 适用于 Linux/macOS；需要 Node.js >=24、OpenSSL、npm、curl 和 sh。
 # 当前机器参考：Node.js v26.7.0；不负责自动安装 Node.js。
-# 用法：bash ds-harness/dsh_install.sh [--dry-run] [--cert-only] [--config 配置文件]
+# 用法：bash ds-harness/dsh_install.sh [--dry-run] [--upgrade] [--cert-only] [--config 配置文件]
 # HTTPS 地址与证书路径默认读取脚本同目录的 dsh.conf。
 # 可设置 DSH_HOME 指定数据目录，默认 $HOME/.dsh。
 # 不启动/停止服务，不迁移用户数据，不写入 API Key。
 set -euo pipefail
 
 dry_run=false
+upgrade=false
 cert_only=false
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 config_file="$script_dir/dsh.conf"
@@ -17,6 +18,7 @@ tls_hosts=()
 while (( $# )); do
     case "$1" in
         --dry-run) dry_run=true; shift ;;
+        --upgrade) upgrade=true; shift ;;
         --cert-only) cert_only=true; shift ;;
         --tls-host|--tls-dir|--config)
             option="$1"
@@ -31,9 +33,9 @@ while (( $# )); do
             shift 2 ;;
         -h|--help)
             printf '%s\n' \
-                '用法：bash ds-harness/dsh_install.sh [--dry-run] [--cert-only] [--config 文件] [--tls-host IP或域名] [--tls-dir 目录]' \
+                '用法：bash ds-harness/dsh_install.sh [--dry-run] [--upgrade] [--cert-only] [--config 文件] [--tls-host IP或域名] [--tls-dir 目录]' \
                 '前置：Node.js >=24、OpenSSL；完整安装还需 npm、curl、sh，npm 全局目录需要当前用户可写。' \
-                '安装/更新 DSH、pnpm、5 个额外插件，以及官方 magpie。' \
+                '默认只补装缺失的程序和插件；--upgrade 主动更新所有程序和插件。' \
                 'DSH/第三方插件使用 latest，官方 Codex 插件与 DSH 同版，启用 12 个 bundle。' \
                 '自动读取 DSH 配置的 server_ip、tls_cert、tls_key；--config 可指定配置文件。' \
                 '默认配置为脚本同目录的 dsh.conf，证书相对路径以配置目录为基准。' \
@@ -178,7 +180,23 @@ if "$cert_only"; then exit 0; fi
 
 printf '目标数据目录：%s\n' "$DSH_HOME"
 printf '%s\n' 'DSH/第三方插件使用 latest，官方 Codex 插件与 DSH 同版；不会启动或重启服务。'
-run npm install --global '@deepseek-ai/dsh@latest' 'pnpm@latest'
+npm_packages=()
+dsh_will_install=false
+for bin in dsh pnpm; do
+    if "$upgrade" || ! command -v "$bin" >/dev/null 2>&1; then
+        if [[ "$bin" == dsh ]]; then
+            npm_packages+=('@deepseek-ai/dsh@latest')
+            dsh_will_install=true
+        else
+            npm_packages+=('pnpm@latest')
+        fi
+    else
+        printf '已存在 %s，跳过安装。\n' "$bin"
+    fi
+done
+if (( ${#npm_packages[@]} )); then
+    run npm install --global "${npm_packages[@]}"
+fi
 if ! "$dry_run"; then
     for bin in dsh pnpm; do
         if ! command -v "$bin" >/dev/null 2>&1; then
@@ -190,7 +208,7 @@ fi
 
 # 官方插件的 latest 标签可能滞后于运行时；使用实际安装的 DSH 版本。
 # dry-run 不执行安装，不能把当前机器的旧版本当作安装后的版本。
-if "$dry_run"; then
+if "$dry_run" && "$dsh_will_install"; then
     dsh_version='<安装后的 DSH 版本>'
 else
     dsh_version="$(dsh --version)"
@@ -202,14 +220,47 @@ fi
 
 # 官方安装来源：https://github.com/yetone/magpie#quick-start
 # 安装/更新程序，不运行 magpie serve，也不安装常驻服务。
-printf '%s\n' '+ curl -fsSL https://usemagpie.ai/install.sh | sh'
-if ! "$dry_run"; then
-    curl -fsSL --connect-timeout 15 --max-time 120 https://usemagpie.ai/install.sh | sh
-    if ! command -v magpie >/dev/null 2>&1; then
-        printf 'magpie 安装后不在 PATH 中，请按官方安装器提示配置 PATH。\n' >&2
-        exit 1
+if ! "$upgrade" && command -v magpie >/dev/null 2>&1; then
+    printf '%s\n' '已存在 magpie，跳过安装。'
+else
+    printf '%s\n' '+ curl -fsSL https://usemagpie.ai/install.sh | sh'
+    if ! "$dry_run"; then
+        curl -fsSL --connect-timeout 15 --max-time 120 https://usemagpie.ai/install.sh | sh
+        if ! command -v magpie >/dev/null 2>&1; then
+            printf 'magpie 安装后不在 PATH 中，请按官方安装器提示配置 PATH。\n' >&2
+            exit 1
+        fi
     fi
 fi
+
+# 同时检查 profile 声明和实际包文件，避免把未完成的安装当作已安装。
+# 官方 Codex 插件版本不匹配时仍需对齐；由上游执行最终兼容性检查。
+plugin_plan="$(node --input-type=module - "$profile_dir" "$dsh_version" "$upgrade" <<'PLAN_NODE'
+import fs from 'node:fs';
+import path from 'node:path';
+const [dir, version, upgrade] = process.argv.slice(2);
+const manifest = path.join(dir, 'package.json');
+const pkg = fs.existsSync(manifest) ? JSON.parse(fs.readFileSync(manifest, 'utf8')) : {};
+const names = ['@deepseek-ai/dsh-subagent-codex', 'ds-bot', 'dsh-web-mobile', 'dshmarket', 'dsh-ide-git'];
+for (const name of names) {
+  const target = name === names[0] ? version : 'latest';
+  const installedPath = path.join(dir, 'node_modules', name, 'package.json');
+  let installed;
+  if (fs.existsSync(installedPath)) installed = JSON.parse(fs.readFileSync(installedPath, 'utf8'));
+  const declared = pkg.dependencies?.[name] || pkg.devDependencies?.[name] || pkg.optionalDependencies?.[name];
+  if (upgrade !== 'true' && declared && installed?.name === name && installed.version &&
+      (name !== names[0] || installed.version === version)) {
+    console.error(`已安装 ${name}@${installed.version}，跳过安装。`);
+  } else {
+    console.log(`${name}@${target}`);
+  }
+}
+PLAN_NODE
+)"
+plugins=()
+while IFS= read -r plugin; do
+    if [[ -n "$plugin" ]]; then plugins+=("$plugin"); fi
+done <<< "$plugin_plan"
 
 # dsh plugin 会初始化 web profile，并更新包清单及锁文件。
 # 先备份已有包清单；完整的会话、配置和密钥仍需另行备份。
@@ -217,12 +268,11 @@ if [[ -f "$profile_dir/package.json" ]]; then
     backup="$profile_dir/package.json.before-dsh-install.$(date +%Y%m%dT%H%M%S).$$"
     run cp -p -- "$profile_dir/package.json" "$backup"
 fi
-run dsh plugin --profile web add -w --save-exact \
-    "@deepseek-ai/dsh-subagent-codex@$dsh_version" \
-    'ds-bot@latest' \
-    'dsh-web-mobile@latest' \
-    'dshmarket@latest' \
-    'dsh-ide-git@latest'
+if (( ${#plugins[@]} )); then
+    run dsh plugin --profile web add -w --save-exact "${plugins[@]}"
+else
+    printf '%s\n' '所需插件均已安装，跳过插件安装。'
+fi
 
 # 官方实验功能随 DSH 分发，不另行固定旧版依赖。
 # 恢复本机 bundle 顺序，并保留目标 profile 中其他已有 bundle。
