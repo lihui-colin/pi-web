@@ -11,12 +11,32 @@ import hashlib
 import ipaddress
 import os
 import re
-import shutil
 import signal
 import subprocess
 import sys
 from pathlib import Path
 from urllib.parse import urlsplit
+
+
+def require_local_nginx():
+    prefix = Path(__file__).resolve().parent / ".local/nginx"
+    nginx = prefix / "sbin/nginx"
+    install = "run dsh_nginx_install.sh to install the project-local Nginx"
+    if not nginx.is_file() or not os.access(nginx, os.X_OK):
+        raise ValueError(f"project-local Nginx is missing or not executable: {nginx}; {install}")
+    resolved = nginx.resolve()
+    if not resolved.is_relative_to(prefix):
+        raise ValueError(f"project-local Nginx resolves outside its installation directory: {nginx}; {install}")
+    nginx = resolved
+    try:
+        version = subprocess.run([str(nginx), "-v"], capture_output=True, text=True)
+    except OSError as error:
+        raise ValueError(f"cannot execute project-local Nginx: {nginx}; {install}: {error}") from error
+    match = re.search(r"nginx/(\d+)\.(\d+)\.(\d+)", version.stdout + version.stderr)
+    if version.returncode or not match or tuple(map(int, match.groups())) < (1, 24, 0):
+        raise ValueError(f"project-local Nginx 1.24 or newer is required: {nginx}; {install}")
+    return str(nginx)
+
 
 def read_token(config_path):
     match = re.search(r"(?m)^dsh_token='([A-Za-z0-9_-]+)'\s*$", Path(config_path).read_text())
@@ -94,6 +114,9 @@ http {{
     access_log off;
     client_body_temp_path {quote(runtime_dir / 'body')};
     proxy_temp_path {quote(runtime_dir / 'proxy')};
+    fastcgi_temp_path {quote(runtime_dir / 'fastcgi')};
+    uwsgi_temp_path {quote(runtime_dir / 'uwsgi')};
+    scgi_temp_path {quote(runtime_dir / 'scgi')};
     map $http_upgrade $dsh_upgrade_connection {{ default upgrade; "" ""; }}
     map $http_cookie $dsh_request_cookie {{
         default "";
@@ -221,15 +244,9 @@ def main():
     parser.add_argument("--tls-cert", required=True, type=Path)
     parser.add_argument("--tls-key", required=True, type=Path)
     args = parser.parse_args()
-    nginx = shutil.which("nginx")
-    if not nginx:
-        parser.error("nginx is required (with HTTP SSL support, version 1.24 or newer)")
     runtime = args.config.resolve().parent / f".nginx-{args.listen_port}"
     try:
-        version = subprocess.run([nginx, "-v"], capture_output=True, text=True)
-        match = re.search(r"nginx/(\d+)\.(\d+)\.(\d+)", version.stdout + version.stderr)
-        if not match or tuple(map(int, match.groups())) < (1, 24, 0):
-            parser.error("nginx 1.24 or newer is required for consistent multi-value response headers")
+        nginx = require_local_nginx()
         # Launch token and runtime files are private, including temp directories.
         os.umask(0o077)
         runtime.mkdir(mode=0o700, exist_ok=True)

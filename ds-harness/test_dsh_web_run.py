@@ -11,16 +11,58 @@ import time
 import unittest
 from pathlib import Path
 
-from test_support import create_test_certificate
+from test_support import copy_test_nginx, create_test_certificate, local_nginx
+
+NGINX = local_nginx()
 
 
 class LauncherTests(unittest.TestCase):
+    def test_local_binary_failure_precedes_config_and_service_start(self):
+        with tempfile.TemporaryDirectory(prefix="dsh-launcher-binary-") as temporary:
+            root = Path(temporary)
+            script = root / "dsh_web_run.sh"
+            for name in ("dsh_web_run.sh", "dsh_nginx.py"):
+                shutil.copy2(Path(__file__).with_name(name), root / name)
+            binaries = root / "bin"
+            binaries.mkdir()
+            fallback = binaries / "nginx"
+            fallback.write_text("#!/bin/sh\nprintf 'PATH nginx must not run' >&2\nexit 99\n")
+            fallback.chmod(0o755)
+            environment = {**os.environ, "PATH": f"{binaries}:{os.environ['PATH']}"}
+            local = root / ".local/nginx/sbin/nginx"
+            local.parent.mkdir(parents=True)
+            # No config or TLS inputs: the binary check must run before reading them.
+            command = ["bash", "-c", 'source "$1"; '
+                       'start_service() { printf "SERVICE %s\\n" "$*"; }; '
+                       'if start; then exit 0; else exit 1; fi', "test", str(script)]
+            for label, contents, mode in [
+                ("missing", None, 0),
+                ("not executable", "#!/bin/sh\nexit 0\n", 0o600),
+                ("old version", "#!/bin/sh\nprintf 'nginx/1.22.1' >&2\n", 0o700),
+                ("failed version", "#!/bin/sh\nprintf 'nginx/1.30.0' >&2\nexit 1\n", 0o700),
+            ]:
+                with self.subTest(binary=label):
+                    if contents is not None:
+                        local.write_text(contents)
+                        local.chmod(mode)
+                    result = subprocess.run(command, cwd=binaries, env=environment,
+                                            text=True, capture_output=True, timeout=10)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(str(local), result.stderr)
+                    self.assertIn("dsh_nginx_install.sh", result.stderr)
+                    self.assertNotIn("PATH nginx must not run", result.stderr)
+                    self.assertNotIn("SERVICE", result.stdout)
+                    self.assertNotIn("dsh.conf.example", result.stderr)
+                    self.assertFalse(list(root.glob("*.pid")))
+
+    @unittest.skipUnless(NGINX, "run dsh_nginx_install.sh to install the project-local Nginx")
     def test_certificate_directory_follows_address_and_rejects_fallback(self):
         with tempfile.TemporaryDirectory(prefix='dsh-cert-selection-') as temporary:
             root = Path(temporary)
             script = root / 'dsh_web_run.sh'
             shutil.copy2(Path(__file__).with_name('dsh_web_run.sh'), script)
             shutil.copy2(Path(__file__).with_name('dsh_nginx.py'), root / 'dsh_nginx.py')
+            copy_test_nginx(root)
             seed = root / 'seed'
             seed.mkdir()
             cert, key = create_test_certificate(seed)
@@ -51,12 +93,13 @@ class LauncherTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertNotIn('SERVICE', result.stdout)
 
-    @unittest.skipUnless(shutil.which("nginx"), "nginx is required for launcher integration")
+    @unittest.skipUnless(NGINX, "run dsh_nginx_install.sh to install the project-local Nginx")
     def test_start_reuse_proxy_recovery_and_stop(self):
         with tempfile.TemporaryDirectory(prefix="dsh-launcher-") as temporary:
             root = Path(temporary)
             for name in ("dsh_web_run.sh", "dsh_nginx.py"):
                 shutil.copy2(Path(__file__).with_name(name), root / name)
+            copy_test_nginx(root)
             binaries = root / "bin"
             binaries.mkdir()
             for name in ("dsh", "magpie"):
@@ -71,6 +114,8 @@ class LauncherTests(unittest.TestCase):
                 command.chmod(0o755)
             (binaries / "hostname").write_text("#!/bin/sh\nprintf '127.0.0.1\\n'\n")
             (binaries / "hostname").chmod(0o755)
+            (binaries / "nginx").write_text("#!/bin/sh\nprintf 'PATH nginx must not run' >&2\nexit 99\n")
+            (binaries / "nginx").chmod(0o755)
             with socket.socket() as reservation:
                 reservation.bind(("127.0.0.1", 0))
                 port = reservation.getsockname()[1]
@@ -114,6 +159,11 @@ class LauncherTests(unittest.TestCase):
                 nginx_config = nginx_runtime / "nginx.conf"
                 self.assertEqual(nginx_runtime.stat().st_mode & 0o777, 0o700)
                 self.assertEqual(nginx_config.stat().st_mode & 0o777, 0o600)
+                for name in ("body", "proxy", "fastcgi", "uwsgi", "scgi"):
+                    directory = nginx_runtime / name
+                    self.assertTrue(directory.is_dir(), f"Nginx did not create {directory}")
+                    self.assertEqual(directory.stat().st_uid, os.geteuid())
+                    self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
                 self.assertIn("dsh_token='test-launch-token'", config.read_text())
                 self.assertEqual(config.stat().st_mode & 0o077, 0)
                 self.assertNotIn("test-launch-token", (root / "dsh-web.log").read_text())

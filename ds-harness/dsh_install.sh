@@ -6,6 +6,7 @@
 # 可设置 DSH_HOME 指定数据目录，默认 $HOME/.dsh。
 # 不启动/停止服务，不迁移用户数据，不写入 API Key。
 set -euo pipefail
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
 dry_run=false
 upgrade=false
@@ -18,7 +19,8 @@ while (( $# )); do
                 '用法：bash ds-harness/dsh_install.sh [--dry-run] [--upgrade]' \
                 '前置：Node.js >=24、npm、curl、sh，npm 全局目录需要当前用户可写。' \
                 '默认补装缺失程序和插件；--upgrade 更新 DSH、pnpm、Magpie 和插件。' \
-                '缺少 Nginx 时通过 Debian/Ubuntu apt 或 macOS Homebrew 安装；已有 Nginx 只检查版本 >=1.24 和 HTTP SSL 模块。' \
+                'Nginx 及静态依赖安装到本目录 .local/nginx；首次构建需要 cc、make、perl、tar、Python 3。' \
+                '不会安装系统包或使用系统 Nginx；已有本地 Nginx 只检查版本 >=1.24 和 HTTP SSL 模块。' \
                 'DSH/第三方插件使用 latest，官方 Codex 插件与 DSH 同版，启用 14 个 bundle。' \
                 'HTTPS 证书请单独运行 bash ds-harness/dsh_cert.sh 创建；本安装器不读取 dsh.conf。' \
                 'DSH_HOME 可指定目标数据目录，默认 ~/.dsh。' \
@@ -39,8 +41,8 @@ done
 node -e 'if (Number(process.versions.node.split(".")[0]) < 24) { console.error("需要 Node.js >=24"); process.exit(1); }'
 export DSH_HOME="${DSH_HOME:-${HOME:?}/.dsh}"
 DSH_HOME="$(node -e 'const p=require("node:path"),o=require("node:os"); let s=process.env.DSH_HOME; if(s==="~")s=o.homedir(); else if(s.startsWith("~/"))s=p.join(o.homedir(),s.slice(2)); console.log(p.resolve(s));')"
-# magpie 使用 ~/.local/bin；发行版 Nginx 通常位于 /usr/sbin。
-export PATH="${HOME:?}/.local/bin:$PATH:/usr/sbin:/sbin"
+# magpie 官方安装器默认把 CLI 放在 ~/.local/bin。
+export PATH="${HOME:?}/.local/bin:$PATH"
 profile_dir="$DSH_HOME/profiles/web"
 
 run() {
@@ -52,101 +54,13 @@ run() {
     fi
 }
 
-# 只补装缺失的 Nginx；已有实例不随 --upgrade 更新。
+# 本地依赖安装器不使用 PATH 中的系统 Nginx。
 ensure_nginx() {
-    local details major minor
-    local -a privileged=()
-    if ! command -v nginx >/dev/null 2>&1; then
-        case "$(uname -s)" in
-            Linux)
-                command -v apt-get >/dev/null 2>&1 || {
-                    printf '%s\n' '缺少 Nginx；自动安装支持 Debian/Ubuntu apt 和 macOS Homebrew，请先安装 Nginx >=1.24（含 HTTP SSL 模块）。' >&2
-                    return 1
-                }
-                if (( EUID != 0 )); then privileged=(sudo); fi
-                if "$dry_run"; then
-                    printf '%s\n' '将临时禁止 Nginx 包自动启停服务，并跳过 needrestart 钩子。'
-                    run "${privileged[@]}" apt-get update
-                    run "${privileged[@]}" env DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1 apt-get install -y --no-install-recommends nginx
-                    return
-                fi
-                if (( ${#privileged[@]} )) && ! command -v sudo >/dev/null 2>&1; then
-                    printf '%s\n' '安装 Nginx 需要 root 或 sudo；请由管理员安装后重跑。' >&2
-                    return 1
-                fi
-                run "${privileged[@]}" sh -s -- /usr/sbin/policy-rc.d <<'NGINX_APT'
-set -eu
-policy="$1"
-temporary=
-cleanup() {
-    if [ -n "$temporary" ]; then
-        # Only unlink the exact policy inode published by this invocation.
-        if [ "$policy" -ef "$temporary" ]; then rm -- "$policy"; fi
-        rm -f -- "$temporary"
+    if "$dry_run"; then
+        bash "$script_dir/dsh_nginx_install.sh" --dry-run
+    else
+        bash "$script_dir/dsh_nginx_install.sh"
     fi
-}
-trap cleanup EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
-if [ ! -e "$policy" ] && [ ! -L "$policy" ]; then
-    temporary="$(mktemp "${policy%/*}/.dsh-policy-rc.d.XXXXXX")"
-    printf '#!/bin/sh\nexit 101\n' >"$temporary"
-    chmod 755 "$temporary"
-    # Atomic no-clobber publication; an existing policy is never replaced.
-    ln -T -- "$temporary" "$policy"
-fi
-for service in nginx nginx.service; do
-    for action in start stop restart reload upgrade try-restart force-reload '(start)' '(restart)' '(try-restart)'; do
-        for level in '' 1 2 3 4 5 S; do
-            set -- "$service" "$action"
-            if [ -n "$level" ]; then set -- "$@" "$level"; fi
-            result=0
-            "$policy" "$@" >/dev/null 2>&1 || result=$?
-            if [ "$result" -ne 101 ]; then
-                printf '%s\n' '现有 policy-rc.d 未禁止 Nginx 启停，自动安装已停止；请由管理员处理该策略或预装 Nginx。' >&2
-                exit 1
-            fi
-        done
-    done
-done
-export DEBIAN_FRONTEND=noninteractive NEEDRESTART_SUSPEND=1
-apt-get update
-apt-get install -y --no-install-recommends nginx
-NGINX_APT
-                ;;
-            Darwin)
-                command -v brew >/dev/null 2>&1 || {
-                    printf '%s\n' '缺少 Homebrew，请先安装 Homebrew 或 Nginx >=1.24。' >&2
-                    return 1
-                }
-                run brew install nginx
-                if "$dry_run"; then return; fi
-                ;;
-            *)
-                printf '%s\n' '当前平台不支持自动安装 Nginx，请先安装 Nginx >=1.24。' >&2
-                return 1 ;;
-        esac
-    fi
-    command -v nginx >/dev/null 2>&1 || {
-        printf '%s\n' '安装后仍找不到 nginx，请检查安装结果及 PATH。' >&2
-        return 1
-    }
-    details="$(nginx -V 2>&1)" || return 1
-    if [[ ! "$details" =~ nginx/([0-9]+)\.([0-9]+)\.[0-9]+ ]]; then
-        printf '%s\n' '无法识别 Nginx 版本，停止安装。' >&2
-        return 1
-    fi
-    major="${BASH_REMATCH[1]}"; minor="${BASH_REMATCH[2]}"
-    if ! (( major > 1 || (major == 1 && minor >= 24) )); then
-        printf '%s\n' '需要 Nginx >=1.24；现有版本未自动升级，请安排升级后重跑。' >&2
-        return 1
-    fi
-    if [[ "$details" != *--with-http_ssl_module* ]]; then
-        printf '%s\n' 'Nginx 缺少 HTTP SSL 模块，请安装支持 HTTPS 的构建。' >&2
-        return 1
-    fi
-    printf '%s\n' 'Nginx 版本及 HTTP SSL 模块检查通过，复用现有安装。'
 }
 
 # 保留官方安装器的平台选择和 SHA-256 校验；重试覆盖其内部二进制下载。

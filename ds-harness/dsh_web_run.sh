@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-export PATH="$PATH:/usr/sbin:/sbin"
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 config_file="$script_dir/dsh.conf"
@@ -115,6 +114,18 @@ stop_service() {
 }
 
 start() {
+    command -v python3 >/dev/null || { fail '找不到 python3 命令。'; return 1; }
+    [[ -f "$proxy_script" ]] || { fail "找不到 $proxy_script"; return 1; }
+    # Share the direct supervisor's local binary and version checks before launch.
+    python3 -B - "$script_dir" <<'PY' || return 1
+import sys
+sys.path.insert(0, sys.argv[1])
+from dsh_nginx import require_local_nginx
+try:
+    require_local_nginx()
+except (OSError, ValueError) as error:
+    sys.exit(f"dsh nginx: {error}")
+PY
     [[ -f "$config_file" ]] || { fail '请先复制 dsh.conf.example 为 dsh.conf 并填写配置。'; return 1; }
     source "$config_file"
     [[ "${port:-}" =~ ^[0-9]{1,5}$ ]] || { fail 'port 必须是 1–65535 之间的整数。'; return 1; }
@@ -141,10 +152,9 @@ PY
     tls_key="$script_dir/tls/$tls_address/privkey.pem"
     read -r host_ip _ <<<"$(hostname -I)"
     [[ -n "$host_ip" ]] || { fail '无法获取本机绑定地址。'; return 1; }
-    for command_name in magpie dsh python3 nginx; do
+    for command_name in magpie dsh; do
         command -v "$command_name" >/dev/null || { fail "找不到 $command_name 命令。"; return 1; }
     done
-    [[ -f "$proxy_script" ]] || { fail "找不到 $proxy_script"; return 1; }
     # Validate HTTPS before starting any services; never fall back to plaintext.
     python3 - "$tls_cert" "$tls_key" <<'PY'
 import ssl, sys

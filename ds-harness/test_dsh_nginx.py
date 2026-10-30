@@ -7,6 +7,7 @@ import signal
 import socket
 import ssl
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -18,7 +19,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from dsh_nginx import cookie_name, render_config
-from test_support import create_test_certificate
+from test_support import create_test_certificate, local_nginx
 
 PAGE = b"<!doctype html><title>DeepSeek Harness</title>"
 WAIT = 5
@@ -26,7 +27,95 @@ PUBLIC_HOST = "dsh.test:25228"
 COOKIE_NAME = cookie_name(PUBLIC_HOST)
 COOKIE_PAIR = COOKIE_NAME + "=browser-session"
 COOKIE = COOKIE_PAIR + "; Path=/; HttpOnly; SameSite=Strict"
-NGINX = shutil.which("nginx")
+NGINX = local_nginx()
+
+
+class NginxBinaryTests(unittest.TestCase):
+    def test_local_binary_cannot_escape_installation_through_symlinks(self):
+        for component in (".local", ".local/nginx", ".local/nginx/sbin", ".local/nginx/sbin/nginx"):
+            with self.subTest(component=component), tempfile.TemporaryDirectory(prefix="dsh-nginx-link-") as temporary:
+                root = Path(temporary) / "project"
+                root.mkdir()
+                shutil.copy2(Path(__file__).with_name("dsh_nginx.py"), root / "dsh_nginx.py")
+                outside = Path(temporary) / "outside"
+                binary = outside / "nginx/sbin/nginx"
+                binary.parent.mkdir(parents=True)
+                marker = outside / "executed"
+                binary.write_text(f"#!{sys.executable}\nfrom pathlib import Path\n"
+                                  f"Path({str(marker)!r}).touch()\nprint('nginx/1.30.0')\n")
+                binary.chmod(0o700)
+                link = root / component
+                link.parent.mkdir(parents=True, exist_ok=True)
+                target = outside.joinpath(*Path(component).parts[1:])
+                link.symlink_to(target, target_is_directory=target.is_dir())
+                result = subprocess.run(
+                    [sys.executable, "-B", "-c", "from dsh_nginx import require_local_nginx; require_local_nginx()"],
+                    cwd=root, text=True, capture_output=True, timeout=10,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("outside its installation directory", result.stderr)
+                self.assertIn("dsh_nginx_install.sh", result.stderr)
+                self.assertFalse(marker.exists(), "an external binary must not even run its version check")
+
+    def test_symlink_to_binary_inside_installation_remains_local(self):
+        with tempfile.TemporaryDirectory(prefix="dsh-nginx-local-link-") as temporary:
+            root = Path(temporary)
+            shutil.copy2(Path(__file__).with_name("dsh_nginx.py"), root / "dsh_nginx.py")
+            binary = root / ".local/nginx/sbin/nginx-versioned"
+            binary.parent.mkdir(parents=True)
+            binary.write_text("#!/bin/sh\nprintf 'nginx/1.30.0' >&2\n")
+            binary.chmod(0o700)
+            binary.with_name("nginx").symlink_to(binary.name)
+            result = subprocess.run(
+                [sys.executable, "-B", "-c", "from dsh_nginx import require_local_nginx; print(require_local_nginx())"],
+                cwd=root, text=True, capture_output=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), str(binary))
+
+    def test_direct_entry_rejects_unusable_local_binary_without_path_fallback(self):
+        with tempfile.TemporaryDirectory(prefix="dsh-nginx-binary-") as temporary:
+            root = Path(temporary)
+            script = root / "dsh_nginx.py"
+            shutil.copy2(Path(__file__).with_name("dsh_nginx.py"), script)
+            binaries = root / "bin"
+            binaries.mkdir()
+            fallback = binaries / "nginx"
+            fallback.write_text("#!/bin/sh\nprintf 'PATH nginx must not run' >&2\nexit 99\n")
+            fallback.chmod(0o755)
+            environment = {**os.environ, "PATH": f"{binaries}:{os.environ['PATH']}"}
+            local = root / ".local/nginx/sbin/nginx"
+            local.parent.mkdir(parents=True)
+            with socket.socket() as reservation:
+                reservation.bind(("127.0.0.1", 0))
+                port = reservation.getsockname()[1]
+            command = [
+                sys.executable, str(script), "--listen-host", "127.0.0.1", "--listen-port", str(port),
+                "--upstream-host", "127.0.0.1", "--upstream-port", str(port),
+                "--public-host", f"127.0.0.1:{port}", "--config", str(root / "absent.conf"),
+                "--tls-cert", str(root / "absent.pem"), "--tls-key", str(root / "absent.key"),
+            ]
+            # Nonexistent runtime inputs ensure all binary failures precede config/TLS reads.
+            for label, contents, mode in [
+                ("missing", None, 0),
+                ("not executable", "#!/bin/sh\nexit 0\n", 0o600),
+                ("invalid executable", "not an executable\n", 0o700),
+                ("old version", "#!/bin/sh\nprintf 'nginx/1.22.1' >&2\n", 0o700),
+                ("failed version", "#!/bin/sh\nprintf 'nginx/1.30.0' >&2\nexit 1\n", 0o700),
+                ("invalid version", "#!/bin/sh\nprintf 'not nginx' >&2\n", 0o700),
+            ]:
+                with self.subTest(binary=label):
+                    if contents is not None:
+                        local.write_text(contents)
+                        local.chmod(mode)
+                    result = subprocess.run(command, cwd=binaries, env=environment,
+                                            text=True, capture_output=True, timeout=10)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(str(local), result.stderr)
+                    self.assertIn("dsh_nginx_install.sh", result.stderr)
+                    self.assertNotIn("PATH nginx must not run", result.stderr)
+                    self.assertNotIn("absent.conf", result.stderr)
+                    self.assertFalse((root / f".nginx-{port}").exists())
 
 
 def reply(handler, status=200, headers=(), body=b"ok"):
@@ -54,7 +143,7 @@ def read_head(stream):
     return int(line.split()[1]), http.client.parse_headers(stream)
 
 
-@unittest.skipUnless(NGINX, "nginx is not installed")
+@unittest.skipUnless(NGINX, "run dsh_nginx_install.sh to install the project-local Nginx")
 class NginxProxyTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -133,7 +222,7 @@ class NginxProxyTests(unittest.TestCase):
                                 raise AssertionError("test nginx never opened its local listener")
                             threading.Event().wait(0.01)
                     yield SimpleNamespace(address=address, requests=requests, accepts=accepts,
-                                          replies=replies, errors=errors)
+                                          replies=replies, errors=errors, runtime=Path(directory))
                 finally:
                     process.terminate()
                     try:
@@ -164,6 +253,19 @@ class NginxProxyTests(unittest.TestCase):
             return response.status, response.getheaders(), response.read()
         finally:
             connection.close()
+
+    def test_every_http_temp_directory_is_created_inside_the_instance(self):
+        with self.fixture() as fixture:
+            # Check directories Nginx actually creates, even for unused HTTP modules.
+            # Omitting fastcgi_temp_path can otherwise silently use /var/lib/nginx/fastcgi
+            # on system builds, or the shared installation prefix on local builds.
+            for name in ("body", "proxy", "fastcgi", "uwsgi", "scgi"):
+                with self.subTest(directory=name):
+                    directory = fixture.runtime / name
+                    self.assertTrue(directory.is_dir(), f"Nginx did not create {directory}")
+                    self.assertEqual(directory.stat().st_uid, os.geteuid())
+                    self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+                    self.assertEqual(directory.resolve().parent, fixture.runtime.resolve())
 
     def test_bootstrap_and_stale_cookie_complete_without_browser_redirect(self):
         for path in ("/", "/index.html"):
