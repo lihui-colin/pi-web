@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export PATH="$PATH:/usr/sbin:/sbin"
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 config_file="$script_dir/dsh.conf"
 token_capture_file="$script_dir/.dsh-web-token-captured"
-proxy_script="$script_dir/dsh_token_proxy.py"
+proxy_script="$script_dir/dsh_nginx.py"
 
 fail() { printf '%s\n' "$*" >&2; return 1; }
 
@@ -140,7 +141,7 @@ PY
     tls_key="$script_dir/tls/$tls_address/privkey.pem"
     read -r host_ip _ <<<"$(hostname -I)"
     [[ -n "$host_ip" ]] || { fail '无法获取本机绑定地址。'; return 1; }
-    for command_name in magpie dsh python3; do
+    for command_name in magpie dsh python3 nginx; do
         command -v "$command_name" >/dev/null || { fail "找不到 $command_name 命令。"; return 1; }
     done
     [[ -f "$proxy_script" ]] || { fail "找不到 $proxy_script"; return 1; }
@@ -169,7 +170,7 @@ PY
         upstream_port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
     fi
     if pid="$(service_pid dsh-token-proxy)" && [[ "$(process_option "$pid" --cookie-prefix || true)" != "$cookie_prefix" ]]; then
-        fail "运行中代理尚未使用根路径与实例 Cookie 隔离；请安排代理维护，当前进程保持运行。"
+        fail "运行中代理的 Cookie 前缀与配置不一致；请安排代理维护，当前进程保持运行。"
         return 1
     fi
     start_service magpie-serve magpie serve

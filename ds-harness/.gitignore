@@ -6,3 +6,5 @@ __pycache__/
 .dsh.conf.*
 # 证书及私钥只保留本地，不提交代码库。
 /tls/
+# Nginx 配置含进程启动 token，运行文件仅保留本地。
+/.nginx-*/

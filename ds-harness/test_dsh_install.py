@@ -21,6 +21,9 @@ class InstallPlanTests(unittest.TestCase):
             command = bins / name
             command.write_text('#!/bin/sh\necho 0.2.1-rc.2\n')
             command.chmod(0o755)
+        nginx = bins / 'nginx'
+        nginx.write_text('#!/bin/sh\necho "nginx version: nginx/1.24.0"\necho "configure arguments: --with-http_ssl_module"\n')
+        nginx.chmod(0o755)
         self.config = self.root / 'dsh.conf'
         self.profile = self.root / 'data/profiles/web'
         self.profile.mkdir(parents=True)
@@ -90,6 +93,167 @@ class InstallPlanTests(unittest.TestCase):
                 result = subprocess.run(['bash', str(SCRIPT), option], env=self.env, text=True, capture_output=True)
                 self.assertEqual(result.returncode, 2)
                 self.assertIn('未知参数', result.stderr)
+
+
+class NginxInstallTests(unittest.TestCase):
+    def setUp(self):
+        import sys
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.bins = self.root / 'bin'
+        self.bins.mkdir()
+        self.policy = self.root / 'policy-rc.d'
+        self.installed = self.root / 'nginx-installed'
+        self.env = dict(os.environ, CASE_ROOT=str(self.root), PATH=f'{self.bins}:{os.environ["PATH"]}',
+                        TEST_OS='Linux', TEST_DISABLED='', TEST_DRY_RUN='false',
+                        TEST_VERSION='1.24.0', TEST_SSL='--with-http_ssl_module')
+        def executable(name, body):
+            path = self.bins / name
+            path.write_text(f'#!{sys.executable}\n' + body)
+            path.chmod(0o755)
+        # Redirect the privileged script to a temporary policy; never touch /usr/sbin.
+        executable('sh', '''import os, sys
+assert sys.argv[1:] == ['-s', '--', '/usr/sbin/policy-rc.d']
+os.execv('/bin/sh', ['/bin/sh', '-s', '--', os.environ['CASE_ROOT'] + '/policy-rc.d'])
+''')
+        executable('sudo', '''import os, sys
+assert sys.argv[1:] == ['sh', '-s', '--', '/usr/sbin/policy-rc.d']
+os.execvp(sys.argv[1], sys.argv[1:])
+''')
+        package_manager = '''import json, os, subprocess, sys
+from pathlib import Path
+root = Path(os.environ['CASE_ROOT'])
+name = Path(sys.argv[0]).name
+with (root / 'packages.jsonl').open('a') as log:
+    log.write(json.dumps([name, *sys.argv[1:]]) + '\\n')
+if name == 'apt-get':
+    assert os.environ['NEEDRESTART_SUSPEND'] == '1'
+    assert os.environ['DEBIAN_FRONTEND'] == 'noninteractive'
+    for service in ('nginx', 'nginx.service'):
+        assert subprocess.call([str(root / 'policy-rc.d'), service, 'start']) == 101
+if os.environ.get('TEST_FAIL') == sys.argv[1]:
+    sys.exit(41)
+if sys.argv[1] == 'install' and not os.environ.get('TEST_NO_BINARY'):
+    (root / 'nginx-installed').touch()
+'''
+        for name in ('apt-get', 'brew'):
+            executable(name, package_manager)
+        source = SCRIPT.read_text()
+        functions = source[source.index('run() {'):source.index('# 保留官方安装器')]
+        self.script = '''set -euo pipefail
+dry_run="$TEST_DRY_RUN"
+''' + functions + '''
+uname() { printf '%s\\n' "$TEST_OS"; }
+nginx() { printf 'nginx version: nginx/%s\\nconfigure arguments: %s\\n' "$TEST_VERSION" "$TEST_SSL"; }
+command() {
+    if [[ "$1" == -v ]]; then
+        if [[ "$2" == nginx && ! -f "$CASE_ROOT/nginx-installed" ]]; then return 1; fi
+        if [[ " $TEST_DISABLED " == *" $2 "* ]]; then return 1; fi
+    fi
+    builtin command "$@"
+}
+ensure_nginx
+'''
+
+    def run_nginx(self, **overrides):
+        result = subprocess.run(['bash', '-c', self.script], env=dict(self.env, **overrides),
+                                text=True, capture_output=True, timeout=15)
+        calls = self.root / 'packages.jsonl'
+        return result, [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
+
+    def test_apt_installs_missing_nginx_without_starting_services(self):
+        result, calls = self.run_nginx()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls, [['apt-get', 'update'], ['apt-get', 'install', '-y', '--no-install-recommends', 'nginx']])
+        self.assertTrue(self.installed.exists())
+        self.assertFalse(self.policy.exists())
+        self.assertFalse(list(self.root.glob('.dsh-policy-rc.d.*')))
+
+    def test_dry_run_never_invokes_package_manager_or_creates_policy(self):
+        result, calls = self.run_nginx(TEST_DRY_RUN='true')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('apt-get update', result.stdout)
+        self.assertIn('NEEDRESTART_SUSPEND=1', result.stdout)
+        self.assertIn('apt-get install -y --no-install-recommends nginx', result.stdout)
+        self.assertEqual(calls, [])
+        self.assertFalse(self.installed.exists())
+        self.assertFalse(self.policy.exists())
+
+    def test_existing_nginx_is_reused_even_with_upgrade(self):
+        self.installed.touch()
+        result, calls = self.run_nginx(upgrade='true')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls, [])
+
+    def test_existing_policy_is_preserved(self):
+        target = self.root / 'admin-policy'
+        target.write_text('#!/bin/sh\nexit 101\n')
+        target.chmod(0o755)
+        self.policy.symlink_to(target)
+        result, _ = self.run_nginx()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.policy.is_symlink())
+        self.assertEqual(target.read_text(), '#!/bin/sh\nexit 101\n')
+
+    def test_permissive_existing_policy_stops_before_install(self):
+        policies = [
+            '#!/bin/sh\nexit 0\n',
+            '#!/bin/sh\nif [ "$#" -gt 2 ]; then exit 0; fi\nexit 101\n',
+            '#!/bin/sh\nif [ "$2" = "(start)" ]; then exit 0; fi\nexit 101\n',
+        ]
+        for policy in policies:
+            with self.subTest(policy=policy):
+                self.policy.write_text(policy)
+                self.policy.chmod(0o755)
+                result, calls = self.run_nginx()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('未禁止 Nginx 启停', result.stderr)
+                self.assertEqual(calls, [])
+                self.assertEqual(self.policy.read_text(), policy)
+
+    def test_failed_package_operation_cleans_temporary_policy(self):
+        for failure in ('update', 'install'):
+            with self.subTest(failure=failure):
+                result, _ = self.run_nginx(TEST_FAIL=failure)
+                self.assertEqual(result.returncode, 41, result.stderr)
+                self.assertFalse(self.policy.exists())
+                self.assertFalse(list(self.root.glob('.dsh-policy-rc.d.*')))
+                self.assertFalse(self.installed.exists())
+
+    def test_existing_incompatible_nginx_is_not_upgraded(self):
+        self.installed.touch()
+        for version, flags, error in [('1.22.1', '--with-http_ssl_module', '需要 Nginx >=1.24'),
+                                      ('1.24.0', '', '缺少 HTTP SSL 模块'),
+                                      ('unknown', '--with-http_ssl_module', '无法识别 Nginx 版本')]:
+            with self.subTest(version=version, flags=flags):
+                result, calls = self.run_nginx(TEST_VERSION=version, TEST_SSL=flags)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(error, result.stderr)
+                self.assertEqual(calls, [])
+
+    def test_post_install_result_is_checked(self):
+        result, _ = self.run_nginx(TEST_NO_BINARY='1')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('仍找不到 nginx', result.stderr)
+        self.assertFalse(self.policy.exists())
+
+    def test_homebrew_install_and_preview(self):
+        result, calls = self.run_nginx(TEST_OS='Darwin', TEST_DRY_RUN='true')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('brew install nginx', result.stdout)
+        self.assertEqual(calls, [])
+        result, calls = self.run_nginx(TEST_OS='Darwin')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls, [['brew', 'install', 'nginx']])
+        self.assertFalse(self.policy.exists())
+
+    def test_missing_package_manager_or_unsupported_platform(self):
+        for system, disabled in [('Linux', 'apt-get'), ('Darwin', 'brew'), ('Other', '')]:
+            with self.subTest(system=system):
+                result, calls = self.run_nginx(TEST_OS=system, TEST_DISABLED=disabled)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(calls, [])
 
 
 class MagpieRetryTests(unittest.TestCase):

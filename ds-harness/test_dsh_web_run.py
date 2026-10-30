@@ -11,7 +11,7 @@ import time
 import unittest
 from pathlib import Path
 
-from test_dsh_token_proxy import create_test_certificate
+from test_support import create_test_certificate
 
 
 class LauncherTests(unittest.TestCase):
@@ -20,7 +20,7 @@ class LauncherTests(unittest.TestCase):
             root = Path(temporary)
             script = root / 'dsh_web_run.sh'
             shutil.copy2(Path(__file__).with_name('dsh_web_run.sh'), script)
-            shutil.copy2(Path(__file__).with_name('dsh_token_proxy.py'), root / 'dsh_token_proxy.py')
+            shutil.copy2(Path(__file__).with_name('dsh_nginx.py'), root / 'dsh_nginx.py')
             seed = root / 'seed'
             seed.mkdir()
             cert, key = create_test_certificate(seed)
@@ -51,10 +51,11 @@ class LauncherTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertNotIn('SERVICE', result.stdout)
 
+    @unittest.skipUnless(shutil.which("nginx"), "nginx is required for launcher integration")
     def test_start_reuse_proxy_recovery_and_stop(self):
         with tempfile.TemporaryDirectory(prefix="dsh-launcher-") as temporary:
             root = Path(temporary)
-            for name in ("dsh_web_run.sh", "dsh_token_proxy.py"):
+            for name in ("dsh_web_run.sh", "dsh_nginx.py"):
                 shutil.copy2(Path(__file__).with_name(name), root / name)
             binaries = root / "bin"
             binaries.mkdir()
@@ -109,6 +110,10 @@ class LauncherTests(unittest.TestCase):
                 )
                 original = pids()
                 self.assertEqual(len(original), 3)
+                nginx_runtime = root / f".nginx-{port}"
+                nginx_config = nginx_runtime / "nginx.conf"
+                self.assertEqual(nginx_runtime.stat().st_mode & 0o777, 0o700)
+                self.assertEqual(nginx_config.stat().st_mode & 0o777, 0o600)
                 self.assertIn("dsh_token='test-launch-token'", config.read_text())
                 self.assertEqual(config.stat().st_mode & 0o077, 0)
                 self.assertNotIn("test-launch-token", (root / "dsh-web.log").read_text())
@@ -143,6 +148,7 @@ class LauncherTests(unittest.TestCase):
                 self.assertEqual(proxy[proxy.index(b"--tls-key") + 1], str(key).encode())
                 self.assertEqual(run("stop"), 0)
                 self.assertFalse(pids())
+                self.assertFalse(nginx_config.exists())
                 self.assertIn("dsh_token=''", config.read_text())
                 self.assertEqual(run("stop"), 0)
             finally:
