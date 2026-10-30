@@ -845,6 +845,10 @@ class ProcessIdentityTests(unittest.TestCase):
                 self.assertIsNone(unrelated.poll())
                 self.assertEqual(pidfile.read_text(), str(unrelated.pid))
                 self.assertIn('stale-token', self.config.read_text())
+                if legacy:
+                    output = (self.root / 'launcher.log').read_text()
+                    self.assertIn(f'缺少身份记录 {self.logs / "magpie-serve.identity"}', output)
+                    self.assertIn('不要删除 PID 文件绕过检查', output)
 
     def test_slow_token_retry_exact_url_and_persistent_ready(self):
         script = self.bins / 'dsh'

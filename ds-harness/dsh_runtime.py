@@ -333,6 +333,10 @@ def run_operation():
             print(f'pidfd 检查失败，请检查 Linux 内核和系统调用权限 ({type(error).__name__})', file=sys.stderr)
         elif operation == 'check-nginx':
             print(f'dsh nginx: {error}', file=sys.stderr)
+        elif operation != 'ready' and isinstance(error, FileNotFoundError) and error.filename == str(statefile):
+            print(f'{service}: PID 对应进程仍在运行，但缺少身份记录 {statefile}；'
+                  '可能由旧版脚本启动，拒绝接管或停止。请在任务可中断时核验并迁移旧进程；'
+                  '不要删除 PID 文件绕过检查。', file=sys.stderr)
         elif operation != 'ready':
             print(f'{service}: 无法验证进程身份，保留现场；请安排维护 ({type(error).__name__})', file=sys.stderr)
         sys.exit(2)
