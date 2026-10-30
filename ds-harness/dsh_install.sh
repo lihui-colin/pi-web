@@ -236,12 +236,15 @@ ensure_config() {
         while true; do
             printf '请输入浏览器访问的服务器 IP（IPv4 或 IPv6）：' >&2
             IFS= read -r address || { printf '\n未读取到 IP，未创建配置；请交互运行安装器。\n' >&2; return 1; }
-            if node -e 'process.exit(require("node:net").isIP(process.argv[1]) ? 0 : 1)' "$address"; then break; fi
+            address="$(node -p 'process.argv[1].trim()' -- "$address")"
+            [[ -n "$address" ]] || continue
+            if node -e 'process.exit(require("node:net").isIP(process.argv[1]) ? 0 : 1)' -- "$address"; then break; fi
             printf 'IP 格式无效，请重新输入，不要包含协议或端口。\n' >&2
         done
         while true; do
             printf '请输入 HTTPS 端口 [25228]：' >&2
             IFS= read -r listen_port || { printf '\n未读取到端口，未创建配置。\n' >&2; return 1; }
+            listen_port="$(node -p 'process.argv[1].trim()' -- "$listen_port")"
             listen_port="${listen_port:-25228}"
             if [[ "$listen_port" =~ ^[0-9]{1,5}$ ]] && (( 10#$listen_port >= 1 && 10#$listen_port <= 65535 )); then break; fi
             printf '端口必须是 1–65535 之间的整数，请重新输入。\n' >&2

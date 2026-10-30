@@ -125,6 +125,19 @@ class InstallPlanTests(unittest.TestCase):
         self.assertFalse(list(self.root.rglob('*.pem')))
         self.assertFalse(list(self.root.rglob('*.crt')))
 
+    def test_first_input_accepts_surrounding_whitespace_and_crlf(self):
+        result = self.install(' \t10.30.0.25 \t\r\n \t12345 \t\r\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.config.read_text(), "server_ip='10.30.0.25'\nport=12345\ndsh_token=''\n")
+        self.assertNotIn('格式无效', result.stderr)
+        self.assertNotIn('端口必须', result.stderr)
+
+    def test_leading_blank_lines_do_not_report_invalid_ip(self):
+        result = self.install('\n \t\r\n127.0.0.1\n\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("server_ip='127.0.0.1'\nport=25228\n", self.config.read_text())
+        self.assertNotIn('格式无效', result.stderr)
+
     def test_invalid_answers_are_retried_and_ipv6_default_port_supported(self):
         result = self.install('https://host\n::1\n0\n65536\nabc\n\n')
         self.assertEqual(result.returncode, 0, result.stderr)
