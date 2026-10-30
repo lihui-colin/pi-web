@@ -3,7 +3,8 @@
 # 访问地址为 https://<server_ip>:<port>/，例如 https://10.30.0.25:25228/。
 port=25228
 server_ip=10.30.0.25
-# listen_host 默认使用 server_ip，须为本机 IPv4/IPv6；域名或 NAT 部署请显式指定。
+# listen_host 未填时优先使用可本机绑定的 server_ip，否则选择唯一可用本机 IP。
+# 多网卡或检测失败时必须显式指定；显式地址无法绑定会在启动前报错。
 # listen_host=127.0.0.1
 # 启动时按 server_ip 自动加载 data/tls/<地址>/fullchain.pem 和 privkey.pem。
 # 请先运行 dsh_cert.sh；无需配置 tls_cert / tls_key，旧字段会被忽略。

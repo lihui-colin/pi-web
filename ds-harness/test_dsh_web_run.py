@@ -1,6 +1,5 @@
 """Exercise launcher lifecycle with temporary services, without touching live sessions."""
 
-import ast
 import io
 import errno
 import fcntl
@@ -19,7 +18,7 @@ from unittest import mock
 from types import SimpleNamespace
 from pathlib import Path
 
-from test_support import copy_test_nginx, create_test_certificate, local_nginx
+from test_support import copy_test_launcher, copy_test_nginx, create_test_certificate, local_nginx
 
 NGINX = local_nginx()
 
@@ -31,7 +30,7 @@ class LauncherTests(unittest.TestCase):
                     prefix='dsh-launcher-lock-') as temporary:
                 root = Path(temporary)
                 script = root / 'dsh_web_run.sh'
-                shutil.copy2(Path(__file__).with_name(script.name), script)
+                copy_test_launcher(root)
                 barrier = root / 'release'
                 os.mkfifo(barrier)
                 # Keep both FIFO ends open so cleanup can always release a failed test.
@@ -90,7 +89,7 @@ main "$action"
         with tempfile.TemporaryDirectory(prefix='dsh-listen-selection-') as temporary:
             root = Path(temporary)
             script = root / 'dsh_web_run.sh'
-            shutil.copy2(Path(__file__).with_name(script.name), script)
+            copy_test_launcher(root)
             # Isolate address validation from Nginx availability and socket permissions.
             (root / 'dsh_nginx.py').write_text('def require_local_nginx(): pass\n')
             binaries = root / 'bin'
@@ -98,7 +97,7 @@ main "$action"
             for name in ('dsh', 'magpie', 'hostname'):
                 executable = binaries / name
                 executable.write_text('#!/bin/sh\ntouch "$(dirname "$0")/called-' + name + '"\n'
-                                      "printf '192.0.2.10 10.0.0.2 2001:db8::10\\n'\n")
+                                      "printf '%s\\n' \"${TEST_HOST_IPS-127.0.0.2}\"\n")
                 executable.chmod(0o755)
             environment = {**os.environ, 'PATH': f"{binaries}:{os.environ['PATH']}"}
             cert, key = create_test_certificate(root)
@@ -117,13 +116,13 @@ main start
 ''', 'test', str(script)]
             cases = [
                 ('::1', None, '::1'),
-                ('2001:db8::25', '', '2001:db8::25'),
-                ('192.0.2.25', None, '192.0.2.25'),
+                ('2001:db8::25', '', '127.0.0.2'),
+                ('192.0.2.25', None, '127.0.0.2'),
                 ('DSH.Example.Test', '127.0.0.1', '127.0.0.1'),
                 ('dsh.example.test', '::1', '::1'),
                 ('203.0.113.25', '127.0.0.1', '127.0.0.1'),
-                ('dsh.example.test', None, None),
-                ('dsh.example.test', '', None),
+                ('dsh.example.test', None, '127.0.0.2'),
+                ('dsh.example.test', '', '127.0.0.2'),
             ] + [('127.0.0.1', invalid, None) for invalid in
                  ('localhost', 'https://127.0.0.1', '127.0.0.1:25228', '[::1]', '999.0.0.1', '::gg', '127.0.0.1/8')]
             for address, listen, expected in cases:
@@ -149,14 +148,30 @@ main start
                         self.assertIn(f'--public-host {host}:25228', proxy)
                         self.assertIn(f'访问地址：https://{host}:25228/', result.stdout)
                         self.assertIn(f'--tls-cert {tls}/fullchain.pem', proxy)
-                    self.assertFalse(list(binaries.glob('called-*')))
+                    self.assertFalse((binaries / 'called-dsh').exists())
+                    self.assertFalse((binaries / 'called-magpie').exists())
                     self.assertFalse(list((root / 'log').glob('*.pid')))
+
+            # Ambiguous/missing automatic candidates and explicit nonlocal IPs fail
+            # before any service starts; explicit values never silently fall back.
+            for listen, candidates, message in [
+                ('', '127.0.0.2 127.0.0.3', '无法唯一确定'),
+                ('', '', '无法唯一确定'),
+                ('192.0.2.25', '127.0.0.2', '无法在本机绑定'),
+            ]:
+                with self.subTest(listen=listen, candidates=candidates):
+                    config.write_text(f"port=25228\nserver_ip=dsh.example.test\nlisten_host='{listen}'\n")
+                    result = subprocess.run(command, env={**environment, 'TEST_HOST_IPS': candidates},
+                                            capture_output=True, text=True, timeout=10)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(message, result.stderr)
+                    self.assertNotIn('SERVICE', result.stdout)
 
     def test_migration_preserves_open_logs_and_legacy_runtime_paths(self):
         with tempfile.TemporaryDirectory(prefix="dsh-runtime-migration-") as temporary:
             root = Path(temporary)
             script = root / "dsh_web_run.sh"
-            shutil.copy2(Path(__file__).with_name(script.name), script)
+            copy_test_launcher(root)
             runtime = root / ".nginx-25228"
             runtime.mkdir()
             (runtime / "nginx.conf").write_text("test config")
@@ -187,7 +202,7 @@ main start
         with tempfile.TemporaryDirectory(prefix="dsh-runtime-conflict-") as temporary:
             root = Path(temporary)
             script = root / "dsh_web_run.sh"
-            shutil.copy2(Path(__file__).with_name(script.name), script)
+            copy_test_launcher(root)
             (root / "log").mkdir()
             (root / "dsh-web.log").write_text("old")
             (root / "log/dsh-web.log").write_text("new")
@@ -204,7 +219,7 @@ main start
         with tempfile.TemporaryDirectory(prefix="dsh-launcher-binary-") as temporary:
             root = Path(temporary)
             script = root / "dsh_web_run.sh"
-            for name in ("dsh_web_run.sh", "dsh_nginx.py"):
+            for name in ("dsh_web_run.sh", "dsh_runtime.py", "dsh_nginx.py"):
                 shutil.copy2(Path(__file__).with_name(name), root / name)
             binaries = root / "bin"
             binaries.mkdir()
@@ -243,7 +258,7 @@ main start
         with tempfile.TemporaryDirectory(prefix='dsh-cert-selection-') as temporary:
             root = Path(temporary)
             script = root / 'dsh_web_run.sh'
-            shutil.copy2(Path(__file__).with_name('dsh_web_run.sh'), script)
+            copy_test_launcher(root)
             shutil.copy2(Path(__file__).with_name('dsh_nginx.py'), root / 'dsh_nginx.py')
             copy_test_nginx(root)
             seed = root / 'seed'
@@ -265,14 +280,14 @@ main start
                     shutil.copy2(cert, directory / 'fullchain.pem')
                     shutil.copy2(key, directory / 'privkey.pem')
                     config.write_text(f'port=25228\nserver_ip={address}\n'
-                                      + ('listen_host=127.0.0.1\n' if address == 'DSH.Example.Test' else '')
+                                      + ('listen_host=127.0.0.1\n' if address in ('DSH.Example.Test', '10.30.0.25') else '')
                                       + 'tls_cert=stale.pem\ntls_key=stale.key\n')
                     result = subprocess.run(command, text=True, capture_output=True, timeout=10)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertIn(f'--tls-cert {directory}/fullchain.pem', result.stdout)
                     self.assertIn(f'--tls-key {directory}/privkey.pem', result.stdout)
             # An unrelated IP directory and stale explicit paths must not be used.
-            config.write_text(f'port=25228\nserver_ip=10.30.0.26\ntls_cert={cert}\ntls_key={key}\n')
+            config.write_text(f'port=25228\nserver_ip=10.30.0.26\nlisten_host=127.0.0.1\ntls_cert={cert}\ntls_key={key}\n')
             result = subprocess.run(command, text=True, capture_output=True, timeout=10)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn(str(root / 'data/tls/10.30.0.26/fullchain.pem'), result.stderr)
@@ -301,7 +316,7 @@ main start
         public_host = f"[{address}]" if ":" in address else address
         with tempfile.TemporaryDirectory(prefix="dsh-launcher-") as temporary:
             root = Path(temporary)
-            for name in ("dsh_web_run.sh", "dsh_nginx.py"):
+            for name in ("dsh_web_run.sh", "dsh_runtime.py", "dsh_nginx.py"):
                 shutil.copy2(Path(__file__).with_name(name), root / name)
             copy_test_nginx(root)
             binaries = root / "bin"
@@ -442,7 +457,7 @@ main start
         with tempfile.TemporaryDirectory(prefix='dsh-pidfd-preflight-') as temporary:
             root = Path(temporary)
             script = root / 'dsh_web_run.sh'
-            shutil.copy2(Path(__file__).with_name(script.name), script)
+            copy_test_launcher(root)
             marker = root / 'started'
             result = subprocess.run(
                 ['bash', '-c', 'source "$1"; process_state() { return 2; }; '
@@ -455,7 +470,7 @@ main start
         with tempfile.TemporaryDirectory(prefix='dsh-start-probes-') as temporary:
             root = Path(temporary)
             script = root / 'dsh_web_run.sh'
-            shutil.copy2(Path(__file__).with_name(script.name), script)
+            copy_test_launcher(root)
             (root / 'dsh_nginx.py').write_text('def require_local_nginx(): pass\n')
             tls = root / 'data/tls/127.0.0.1'
             tls.mkdir(parents=True)
@@ -501,7 +516,7 @@ start
         with tempfile.TemporaryDirectory(prefix='dsh-stop-probe-') as temporary:
             root = Path(temporary)
             script = root / 'dsh_web_run.sh'
-            shutil.copy2(Path(__file__).with_name(script.name), script)
+            copy_test_launcher(root)
             (root / 'data').mkdir()
             config = root / 'data/dsh.conf'
             config.write_text("dsh_token='preserve'\n")
@@ -518,23 +533,12 @@ start
 
 
 class ProcessHelperTests(unittest.TestCase):
-    """Execute the embedded helpers/branches without relying on the /proc namespace."""
+    """Execute the runtime helpers/branches without relying on the /proc namespace."""
 
     def setUp(self):
-        source = Path(__file__).with_name('dsh_web_run.sh').read_text()
-        source = source.split("3<<'PYTHON'\n", 1)[1].split('\nPYTHON', 1)[0]
-        self.tree = ast.parse(source)
-        definitions = [node for node in self.tree.body
-                       if isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef))]
-        self.ns = {}
-        exec(compile(ast.Module(body=definitions, type_ignores=[]), '<helpers>', 'exec'), self.ns)
-
-    def branch(self, operation):
-        outer = next(node for node in self.tree.body if isinstance(node, ast.Try))
-        node = outer.body[1]
-        while node.test.comparators[0].value != operation:
-            node = node.orelse[0]
-        return compile(ast.Module(body=node.body, type_ignores=[]), '<branch>', 'exec')
+        source = Path(__file__).with_name('dsh_runtime.py').read_text()
+        self.ns = {'__name__': 'test_runtime'}
+        exec(compile(source, 'dsh_runtime.py', 'exec'), self.ns)
 
     def test_pidfd_missing_python_wrappers_uses_libc(self):
         libc = mock.Mock()
@@ -630,7 +634,7 @@ class ProcessHelperTests(unittest.TestCase):
                          mock.patch.object(Path, 'resolve', resolve), \
                          mock.patch.object(time, 'sleep', side_effect=lambda _: self.assertFalse(
                              (root / 'identity').exists())) as sleep:
-                        exec(self.branch('record'), self.ns)
+                        self.ns['record_process']()
                     self.assertEqual(sleep.call_args_list, [mock.call(.02), mock.call(.02)])
                     self.assertEqual(json.loads((root / 'identity').read_text())['identity']['argv'], final_argv)
                     with mock.patch.object(Path, 'resolve', return_value=Path('/wrong/interpreter')):
@@ -662,7 +666,7 @@ class ProcessHelperTests(unittest.TestCase):
                 with mock.patch.dict(self.ns, current=mock.Mock(return_value={}),
                                      owned=mock.Mock(return_value={'launch': 'launch'})), \
                      mock.patch.object(sys, 'stdin', stream), mock.patch.object(sys, 'stdout', output):
-                    exec(self.branch('capture'), self.ns)
+                    self.ns['capture_output']()
                 stream.close()
                 self.assertIn("dsh_token='synthetic-secret'", config.read_text())
                 self.assertTrue(ready.exists())
@@ -689,7 +693,7 @@ class ProcessHelperTests(unittest.TestCase):
                      mock.patch.object(sys, 'stdin', stream), mock.patch.object(sys, 'stdout', output), \
                      mock.patch.object(time, 'sleep') as sleep:
                     if final_launch == 'launch':
-                        exec(self.branch('capture'), self.ns)
+                        self.ns['capture_output']()
                         self.assertEqual(sleep.call_count, 3)
                         self.assertIn("dsh_token='valid'", config.read_text())
                         self.assertTrue(ready.exists())
@@ -697,7 +701,7 @@ class ProcessHelperTests(unittest.TestCase):
                         self.assertNotIn('secret', output.getvalue())
                     else:
                         with self.assertRaises(ValueError):
-                            exec(self.branch('capture'), self.ns)
+                            self.ns['capture_output']()
                         self.assertEqual(sleep.call_count, 100)
                         self.assertEqual(config.read_text(), "dsh_token='old'\n")
                         self.assertFalse(ready.exists())
@@ -715,7 +719,7 @@ class ProcessIdentityTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.script = self.root / 'dsh_web_run.sh'
-        shutil.copy2(Path(__file__).with_name(self.script.name), self.script)
+        copy_test_launcher(self.root)
         self.logs = self.root / 'log'
         self.logs.mkdir()
         (self.root / 'data').mkdir()

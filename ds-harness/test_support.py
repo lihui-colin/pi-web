@@ -34,3 +34,9 @@ def create_test_certificate(directory):
         "-keyout", str(key), "-out", str(cert),
     ], check=True, capture_output=True, timeout=15)
     return cert, key
+
+
+def copy_test_launcher(directory):
+    for name in ('dsh_web_run.sh', 'dsh_runtime.py'):
+        shutil.copy2(Path(__file__).with_name(name), Path(directory) / name)
+    return Path(directory) / 'dsh_web_run.sh'

@@ -15,7 +15,7 @@ bash ds-harness/dsh_cert.sh
 
 `server_ip` 填写浏览器访问的 IP 或域名；`port` 默认 `25228`；`dsh_token` 启动时自动更新。访问 `https://<server_ip>:<port>/`，默认地址为 `https://10.30.0.25:25228/`。入口只接受 HTTPS，普通 URL 自动登录，适用于可信网络。
 
-`listen_host` 为 Nginx 本机监听 IP，未填写时使用 `server_ip`，支持 IPv4 和 IPv6，不再取第一块网卡的地址。使用域名或 NAT 公网地址时，须显式配置本机地址，例如 `server_ip=dsh.example.com`、`listen_host=10.30.0.25`。监听地址必须是 IP；要监听所有 IPv4 接口可显式填写 `0.0.0.0`。已有代理的监听地址与新配置不一致时，启动器会拒绝复用并保留现有进程，需安排维护后生效。
+`listen_host` 为 Nginx 本机监听 IP，未填写时优先使用可在本机绑定的 `server_ip`；否则通过 `hostname -I` 检测，只有唯一可绑定 IP 时才自动选择。多网卡或检测失败时明确报错，不取第一块网卡的地址。支持 IPv4 和 IPv6，显式配置的地址会在启动任何服务前检查是否可绑定（使用临时端口探测，不占用服务端口）。也可显式配置本机地址，例如 `server_ip=dsh.example.com`、`listen_host=10.30.0.25`。监听地址必须是 IP；要监听所有 IPv4 接口可显式填写 `0.0.0.0`。已有代理的监听地址与新配置不一致时，启动器会拒绝复用并保留现有进程，需安排维护后生效。
 
 启动器固定读取 `data/tls/<server_ip>/fullchain.pem` 和 `privkey.pem`，忽略旧配置中的 `tls_cert`、`tls_key`。域名目录转为小写，IPv6 冒号替换为下划线，例如 `::1` 对应 `data/tls/__1/`。证书缺失或无效时，在启动服务前退出。
 
@@ -99,6 +99,8 @@ test ! -e ds-harness/data/.agents && cp -a "$HOME/.agents" ds-harness/data/.agen
 确认两份数据复制完成后再启动服务。保留旧目录作为回退副本；直接启动空数据目录不会自动继承旧会话和插件。日常手动执行 `dsh plugin` 或 `magpie dsh` 等涉及 DSH 配置的命令前，也需设置这两个环境变量指向本项目数据目录。
 
 ## 启停与运行文件
+
+`dsh_web_run.sh` 负责启停顺序和启动锁；`dsh_runtime.py` 负责进程身份、token、旧运行文件迁移和启动配置校验；`dsh_nginx.py` 负责代理配置和 Nginx 监督。部署时保留这些文件在同一目录。
 
 重复 `start` 会复用身份匹配且 token 已就绪的进程；代理单独退出后，再次 `start` 会复用 DSH 的实际回环端口。整个 `start/stop` 流程共用 `log/.launcher.lock` 的内核文件锁；已有操作进行中时，新调用立即失败并提示重试。锁在操作结束时自动释放，后台服务和日志读取器不继承锁。锁文件应长期保留，运行中不要删除。不要另外启动一套 `magpie serve` 或 `dsh web`。
 
