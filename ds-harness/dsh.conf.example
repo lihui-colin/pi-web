@@ -1,9 +1,11 @@
-# Copy this file to dsh.conf and update the values for your environment.
+# 安装器会交互创建 data/dsh.conf；也可手动复制本文件到该位置。
 # port 是对外 HTTPS 端口，由 token 反向代理监听；dsh web 只绑定本机回环地址。
-# 访问路径自动生成为 /dsh-{port}/，例如 https://10.30.0.25:25228/dsh-25228/。
+# 访问地址为 https://<server_ip>:<port>/，例如 https://10.30.0.25:25228/。
 port=25228
 server_ip=10.30.0.25
-# 启动时按 server_ip 自动加载 tls/<地址>/fullchain.pem 和 privkey.pem。
+# listen_host 默认使用 server_ip，须为本机 IPv4/IPv6；域名或 NAT 部署请显式指定。
+# listen_host=127.0.0.1
+# 启动时按 server_ip 自动加载 data/tls/<地址>/fullchain.pem 和 privkey.pem。
 # 请先运行 dsh_cert.sh；无需配置 tls_cert / tls_key，旧字段会被忽略。
 # dsh_web_run.sh start 会从启动 URL 提取并安全更新此值。
 dsh_token=''

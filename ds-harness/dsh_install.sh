@@ -3,8 +3,8 @@
 # 适用于 Linux/macOS；需要 Node.js >=24、npm、curl 和 sh。
 # 用法：bash ds-harness/dsh_install.sh [--dry-run] [--upgrade]
 # HTTPS 证书由同目录 dsh_cert.sh 单独生成。
-# 可设置 DSH_HOME 指定数据目录，默认 $HOME/.dsh。
-# 不启动/停止服务，不迁移用户数据，不写入 API Key。
+# 数据固定放在脚本同级 data/.dsh，共享 agent 配置放在 data/.agents。
+# 不启动/停止服务，不迁移 DSH 会话数据，不写入 API Key。
 set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
@@ -19,11 +19,12 @@ while (( $# )); do
                 '用法：bash ds-harness/dsh_install.sh [--dry-run] [--upgrade]' \
                 '前置：Node.js >=24、npm、curl、sh，npm 全局目录需要当前用户可写。' \
                 '默认补装缺失程序和插件；--upgrade 更新 DSH、pnpm、Magpie 和插件。' \
-                'Nginx 及静态依赖安装到本目录 .local/nginx；首次构建需要 cc、make、perl、tar、Python 3。' \
+                'Nginx 及静态依赖安装到本目录 data/.local/nginx；首次构建需要 cc、make、perl、tar、Python 3。' \
                 '不会安装系统包或使用系统 Nginx；已有本地 Nginx 只检查版本 >=1.24 和 HTTP SSL 模块。' \
                 'DSH/第三方插件使用 latest，官方 Codex 插件与 DSH 同版，启用 14 个 bundle。' \
-                'HTTPS 证书请单独运行 bash ds-harness/dsh_cert.sh 创建；本安装器不读取 dsh.conf。' \
-                'DSH_HOME 可指定目标数据目录，默认 ~/.dsh。' \
+                '安装结束时创建 data/dsh.conf：已有配置保留，否则从控制台输入 IP 和端口。' \
+                'HTTPS 证书请单独运行 bash ds-harness/dsh_cert.sh 创建。' \
+                '数据固定放在脚本同级 data/.dsh，共享 agent 配置放在 data/.agents。' \
                 'Magpie 安装最多尝试 3 次；支持 MAGPIE_PROXY 代理及 MAGPIE_MIRROR 镜像前缀。' \
                 '请在新机器或目标 DSH 已停机时安装；本脚本不启停服务。' \
                 '用户数据、模型配置、API Key、magpie 账号需要单独恢复。'
@@ -39,8 +40,8 @@ for bin in node npm curl sh; do
     fi
 done
 node -e 'if (Number(process.versions.node.split(".")[0]) < 24) { console.error("需要 Node.js >=24"); process.exit(1); }'
-export DSH_HOME="${DSH_HOME:-${HOME:?}/.dsh}"
-DSH_HOME="$(node -e 'const p=require("node:path"),o=require("node:os"); let s=process.env.DSH_HOME; if(s==="~")s=o.homedir(); else if(s.startsWith("~/"))s=p.join(o.homedir(),s.slice(2)); console.log(p.resolve(s));')"
+export DSH_HOME="$script_dir/data/.dsh"
+export DSH_AGENTS_HOME="$script_dir/data/.agents"
 # magpie 官方安装器默认把 CLI 放在 ~/.local/bin。
 export PATH="${HOME:?}/.local/bin:$PATH"
 profile_dir="$DSH_HOME/profiles/web"
@@ -51,15 +52,6 @@ run() {
     printf '\n'
     if ! "$dry_run"; then
         "$@"
-    fi
-}
-
-# 本地依赖安装器不使用 PATH 中的系统 Nginx。
-ensure_nginx() {
-    if "$dry_run"; then
-        bash "$script_dir/dsh_nginx_install.sh" --dry-run
-    else
-        bash "$script_dir/dsh_nginx_install.sh"
     fi
 }
 
@@ -92,7 +84,12 @@ install_magpie() (
     exit 1
 )
 
-ensure_nginx
+# 本地依赖安装器不使用 PATH 中的系统 Nginx。
+if "$dry_run"; then
+    bash "$script_dir/dsh_nginx_install.sh" --dry-run
+else
+    bash "$script_dir/dsh_nginx_install.sh"
+fi
 
 printf '目标数据目录：%s\n' "$DSH_HOME"
 printf '%s\n' 'DSH/第三方插件使用 latest，官方 Codex 插件与 DSH 同版；不会启动或重启服务。'
@@ -224,15 +221,55 @@ console.log('已配置 bundle：\n' + pkg.dsh.profile.bundles.join('\n'));
 console.log('插件实际安装版本：\n' + JSON.stringify(pkg.dependencies, null, 2));
 NODE
 
+ensure_config() {
+    local config="$script_dir/data/dsh.conf" address='' listen_port=''
+    if [[ -f "$config" ]]; then
+        printf '保留已有配置：%s\n' "$config"
+        return
+    fi
+    if [[ -e "$config" || -L "$config" ]]; then
+        printf '配置路径不是普通文件：%s\n' "$config" >&2
+        return 1
+    fi
+    # Preserve old deployments without sourcing configuration as shell code.
+    if [[ ! -f "$script_dir/dsh.conf" ]]; then
+        while true; do
+            printf '请输入浏览器访问的服务器 IP（IPv4 或 IPv6）：' >&2
+            IFS= read -r address || { printf '\n未读取到 IP，未创建配置；请交互运行安装器。\n' >&2; return 1; }
+            if node -e 'process.exit(require("node:net").isIP(process.argv[1]) ? 0 : 1)' "$address"; then break; fi
+            printf 'IP 格式无效，请重新输入，不要包含协议或端口。\n' >&2
+        done
+        while true; do
+            printf '请输入 HTTPS 端口 [25228]：' >&2
+            IFS= read -r listen_port || { printf '\n未读取到端口，未创建配置。\n' >&2; return 1; }
+            listen_port="${listen_port:-25228}"
+            if [[ "$listen_port" =~ ^[0-9]{1,5}$ ]] && (( 10#$listen_port >= 1 && 10#$listen_port <= 65535 )); then break; fi
+            printf '端口必须是 1–65535 之间的整数，请重新输入。\n' >&2
+        done
+    fi
+    node - "$config" "$script_dir/dsh.conf" "$address" "$listen_port" <<'CONFIG_WRITE'
+const fs = require('node:fs'), path = require('node:path');
+const [target, legacy, address, port] = process.argv.slice(2);
+fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+const content = address
+  ? `server_ip='${address}'\nport=${Number(port)}\ndsh_token=''\n`
+  : fs.readFileSync(legacy);
+fs.writeFileSync(target, content, { flag: 'wx', mode: 0o600 });
+console.log(`${address ? '已创建配置' : '已保留旧配置副本'}：${target}`);
+CONFIG_WRITE
+}
+
 if "$dry_run"; then
+    printf '%s\n' '预览：安装结束后保留 data/dsh.conf；若不存在则复制旧配置或提示输入 IP 和端口，不在预览时读取输入。'
     printf '%s\n' '预览完成：node 步骤将配置 14 个 bundle；未安装程序或修改文件。'
 else
     for bin in dsh pnpm magpie; do run "$bin" --version; done
+    ensure_config
     printf '%s\n' \
         '安装完成，未启动或重启任何服务。' \
         '请另外恢复 DSH 用户数据、模型配置、magpie 账号与密钥、共享 Skills 和项目文件。' \
         'magpie 支持 magpie backup / magpie restore 迁移加密备份。' \
-        'HTTPS 证书请另行运行 bash ds-harness/dsh_cert.sh，启动时按 server_ip 自动选择 tls/<地址>/。' \
+        'HTTPS 证书请另行运行 bash ds-harness/dsh_cert.sh，启动时按 server_ip 自动选择 data/tls/<地址>/。' \
         '配置完成后可运行 magpie serve，并使用项目 HTTPS 启动脚本启动 DSH。' \
         '直接启动 dsh web 时，请传 --tls-cert <配置的证书路径> --tls-key <配置的私钥路径>。' \
         '客户端需信任本地 CA；网页语音还需要麦克风权限及语音服务配置。' \

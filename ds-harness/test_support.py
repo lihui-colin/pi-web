@@ -8,7 +8,7 @@ import unittest
 
 
 def local_nginx():
-    prefix = Path(__file__).resolve().parent / ".local/nginx"
+    prefix = Path(__file__).resolve().parent / "data/.local/nginx"
     binary = prefix / "sbin/nginx"
     if not binary.is_file() or not os.access(binary, os.X_OK):
         return None
@@ -20,7 +20,7 @@ def copy_test_nginx(directory):
     source = local_nginx()
     if source is None:
         raise unittest.SkipTest("run dsh_nginx_install.sh to install the project-local Nginx")
-    destination = Path(directory) / ".local/nginx/sbin/nginx"
+    destination = Path(directory) / "data/.local/nginx/sbin/nginx"
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source, destination)
     return destination

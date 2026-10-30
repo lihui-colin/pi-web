@@ -7,11 +7,14 @@ configuration and forwards termination signals; it never handles browser traffic
 
 import argparse
 import base64
+import ctypes
+import errno
 import hashlib
 import ipaddress
 import os
 import re
 import signal
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -19,7 +22,7 @@ from urllib.parse import urlsplit
 
 
 def require_local_nginx():
-    prefix = Path(__file__).resolve().parent / ".local/nginx"
+    prefix = Path(__file__).resolve().parent / "data/.local/nginx"
     nginx = prefix / "sbin/nginx"
     install = "run dsh_nginx_install.sh to install the project-local Nginx"
     if not nginx.is_file() or not os.access(nginx, os.X_OK):
@@ -28,6 +31,16 @@ def require_local_nginx():
     if not resolved.is_relative_to(prefix):
         raise ValueError(f"project-local Nginx resolves outside its installation directory: {nginx}; {install}")
     nginx = resolved
+    if nginx.stat().st_mode & (stat.S_ISUID | stat.S_ISGID):
+        raise ValueError("project-local Nginx must not have set-ID bits: exec would clear its parent-death guard")
+    try:
+        capabilities = os.getxattr(nginx, "security.capability")
+    except OSError as error:
+        if error.errno not in {errno.ENODATA, errno.ENOTSUP}:
+            raise
+        capabilities = b""
+    if capabilities:
+        raise ValueError("project-local Nginx must not have file capabilities: exec would clear its parent-death guard")
     try:
         version = subprocess.run([str(nginx), "-v"], capture_output=True, text=True)
     except OSError as error:
@@ -36,6 +49,28 @@ def require_local_nginx():
     if version.returncode or not match or tuple(map(int, match.groups())) < (1, 24, 0):
         raise ValueError(f"project-local Nginx 1.24 or newer is required: {nginx}; {install}")
     return str(nginx)
+
+
+def parent_death_guard():
+    """Prepare the single-threaded supervisor's Linux child lifetime guard."""
+    if not sys.platform.startswith("linux"):
+        raise ValueError("Nginx supervision requires Linux parent-death signals")
+    parent = os.getpid()
+    libc = ctypes.CDLL(None, use_errno=True)
+    prctl = libc.prctl
+    prctl.argtypes = [ctypes.c_int] + [ctypes.c_ulong] * 4
+    prctl.restype = ctypes.c_int
+
+    def guard():
+        # Unprivileged exec preserves this setting; Nginx TERM stops its workers.
+        if prctl(1, signal.SIGTERM, 0, 0, 0) != 0:
+            error = ctypes.get_errno()
+            raise OSError(error, os.strerror(error))
+        # The parent may have died between fork and registering the signal.
+        if os.getppid() != parent:
+            os._exit(1)
+
+    return guard
 
 
 def read_token(config_path):
@@ -93,6 +128,7 @@ def render_config(listen, upstream, token, public_host, tls_cert, tls_key, runti
         if cookie_prefix else ""
     )
 
+    # Normal locations inherit server headers; login stages override the whole set.
     def headers(cookie="$dsh_request_cookie", *, login=False):
         return f'''        proxy_set_header Host {quote(public_host)};
         proxy_set_header X-Forwarded-Host {quote(public_host)};
@@ -182,26 +218,16 @@ http {{
         proxy_next_upstream off;
         proxy_redirect off;
         proxy_cookie_flags ~^dsh-auth- secure;
-        recursive_error_pages on;
+{headers()}        recursive_error_pages on;
         set $dsh_launch_url "http://dsh_backend/?token={token}";
         set $dsh_root_url "http://dsh_backend/";
 
-        location = / {{
-            error_page 418 = @page;
-            if ($dsh_auto_login) {{ return 418; }}
-{headers()}            proxy_pass http://dsh_backend;
-        }}
-        location = /index.html {{
-            error_page 418 = @page;
-            if ($dsh_auto_login) {{ return 418; }}
-{headers()}            proxy_pass http://dsh_backend;
-        }}
         location @page {{
             error_page 419 = @login;
             error_page 401 = @login;
             if ($dsh_request_cookie = "") {{ return 419; }}
             proxy_intercept_errors on;
-{headers()}            proxy_pass http://dsh_backend;
+            proxy_pass http://dsh_backend;
         }}
         location @login {{
             proxy_pass_request_body off;
@@ -223,10 +249,12 @@ http {{
 {headers('$dsh_login_pair', login=True)}            proxy_pass $dsh_root_url;
         }}
         location = /connect {{
-{headers()}            proxy_pass http://dsh_backend$dsh_connect_uri;
+            proxy_pass http://dsh_backend$dsh_connect_uri;
         }}
         location / {{
-{headers()}            proxy_pass http://dsh_backend;
+            error_page 418 = @page;
+            if ($dsh_auto_login) {{ return 418; }}
+            proxy_pass http://dsh_backend;
         }}
     }}
 }}
@@ -244,11 +272,17 @@ def main():
     parser.add_argument("--tls-cert", required=True, type=Path)
     parser.add_argument("--tls-key", required=True, type=Path)
     args = parser.parse_args()
-    runtime = args.config.resolve().parent / f".nginx-{args.listen_port}"
+    config_path = args.config.resolve()
+    script_dir = Path(__file__).resolve().parent
+    config_root = script_dir if config_path == script_dir / 'data/dsh.conf' else config_path.parent
+    logs = config_root / "log"
+    runtime = logs / f".nginx-{args.listen_port}"
     try:
         nginx = require_local_nginx()
         # Launch token and runtime files are private, including temp directories.
         os.umask(0o077)
+        logs.mkdir(mode=0o700, exist_ok=True)
+        logs.chmod(0o700)
         runtime.mkdir(mode=0o700, exist_ok=True)
         runtime.chmod(0o700)
         config = runtime / "nginx.conf"
@@ -266,11 +300,13 @@ def main():
 
         command = [nginx, "-p", str(runtime) + "/", "-c", str(config), "-e", "stderr"]
         try:
-            checked = subprocess.run(command + ["-t"], capture_output=True, text=True)
+            guard = parent_death_guard()
+            checked = subprocess.run(command + ["-t"], capture_output=True, text=True, preexec_fn=guard)
             if checked.returncode:
                 print(diagnostic(checked.stderr), file=sys.stderr, end="")
                 return 1
-            child = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+            child = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                     text=True, preexec_fn=guard)
             for signum in (signal.SIGTERM, signal.SIGINT):
                 signal.signal(signum, lambda *_: child.terminate())
             try:
@@ -285,7 +321,7 @@ def main():
         finally:
             # This exact file was generated above, inside the private instance directory.
             config.unlink(missing_ok=True)
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
         print(f"dsh nginx: {error}", file=sys.stderr)
         return 1
 

@@ -1,3 +1,7 @@
+# 日志、PID、token 捕获标记和 Nginx 临时运行文件。
+/log/
+# DSH 会话、配置、缓存及共享 agent 配置。
+/data/
 dsh.conf
 *.log
 *.pid
@@ -7,6 +11,6 @@ __pycache__/
 # 证书及私钥只保留本地，不提交代码库。
 /tls/
 # Nginx 配置含进程启动 token，运行文件仅保留本地。
-/.nginx-*/
+/.nginx-*
 # 本地依赖和构建缓存保留在持久卷，不提交二进制。
 /.local/

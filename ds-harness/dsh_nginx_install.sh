@@ -4,20 +4,30 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-local_root="$script_dir/.local"
+local_root="$script_dir/data/.local"
 prefix="$local_root/nginx"
 dry_run=false
 case "${1:-}" in
     --dry-run) dry_run=true ;;
     -h|--help)
         printf '%s\n' '用法：bash ds-harness/dsh_nginx_install.sh [--dry-run]' \
-            '安装到脚本目录下 .local/nginx；不使用 sudo、APT、Homebrew 或系统 Nginx。' \
+            '安装到脚本目录下 data/.local/nginx；不使用 sudo、APT、Homebrew 或系统 Nginx。' \
             '首次构建需要 cc、make、perl、curl、tar、Python 3；DSH_NGINX_BUILD_JOBS 默认 4。'
         exit 0 ;;
     '') ;;
     *) printf '未知参数：%s\n' "$1" >&2; exit 2 ;;
 esac
 (( $# <= 1 )) || { printf '参数过多。\n' >&2; exit 2; }
+
+# Pinned upstream release archives. SHA-256 is verified before extraction.
+# https://nginx.org/en/download.html (release signature verified at pin time)
+# https://openssl-library.org/source/ ; https://github.com/PCRE2Project/pcre2/releases ; https://zlib.net/
+sources=(
+    'nginx-1.30.6|https://nginx.org/download/nginx-1.30.6.tar.gz|3cf46f5ed7504d460125866b7bea99fb357f31d887e2e63b35503310e9b8b6c8'
+    'openssl-3.5.9|https://github.com/openssl/openssl/releases/download/openssl-3.5.9/openssl-3.5.9.tar.gz|603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a'
+    'pcre2-10.49|https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.49/pcre2-10.49.tar.gz|929f0b20e62879252a15886b06c89f1edef61a363cbd5826fb041080a5e557ae'
+    'zlib-1.3.2|https://zlib.net/zlib-1.3.2.tar.gz|bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16'
+)
 
 validate_nginx() {
     local details major minor
@@ -34,12 +44,44 @@ validate_nginx() {
     fi
 }
 
-if [[ -L "$local_root" || -L "$prefix/sbin" ]]; then
+# Remove only known installer outputs; rm receives no trailing slash and never follows links.
+prune_installation() {
+    local install_root="$1" prune_cache="${2:-false}" cache entry name
+    if "$dry_run"; then
+        printf '%s\n' '将清理默认 conf/html/logs、sources.txt 和已知下载缓存；保留 Nginx 二进制及 licenses。'
+        return
+    fi
+    if [[ ( "$install_root" != "$prefix" && "$install_root" != "${build_dir:-}/stage$prefix" ) ||
+          -L "$local_root" || -L "$install_root" ||
+          "$(cd "$install_root" && pwd -P)" != "$install_root" ]]; then
+        printf '拒绝清理非预期的 Nginx 安装路径：%s\n' "$install_root" >&2
+        return 1
+    fi
+    rm -rf -- "$install_root/conf" "$install_root/html" "$install_root/logs" "$install_root/sources.txt"
+    if ! "$prune_cache"; then return; fi
+    cache="$local_root/downloads"
+    if [[ -L "$cache" ]]; then
+        rm -f -- "$cache"
+        return
+    fi
+    if [[ ! -d "$cache" ]]; then return; fi
+    local cache_files=("$cache/arut.key" "$cache/pluknet.key")
+    for entry in "${sources[@]}"; do
+        name="${entry%%|*}"
+        cache_files+=("$cache/$name.tar.gz" "$cache/$name.tar.gz.asc" "$cache/$name.tar.gz.sha256")
+    done
+    rm -f -- "${cache_files[@]}"
+    # A shared/unknown file keeps the directory in place.
+    rmdir -- "$cache" 2>/dev/null || true
+}
+
+if [[ -L "$script_dir/data" || -L "$local_root" || -L "$prefix/sbin" ]]; then
     printf '本地 Nginx 安装目录不能通过符号链接指向其他位置：%s\n' "$prefix" >&2
     exit 1
 fi
 if [[ -x "$prefix/sbin/nginx" && ! -L "$prefix" && ! -L "$prefix/sbin/nginx" ]]; then
     validate_nginx "$prefix/sbin/nginx"
+    prune_installation "$prefix" true
     printf '复用项目 Nginx：%s\n' "$prefix/sbin/nginx"
     exit 0
 fi
@@ -48,19 +90,11 @@ if [[ -e "$prefix" || -L "$prefix" ]]; then
     exit 1
 fi
 
-# Pinned upstream release archives. SHA-256 is verified before extraction.
-# https://nginx.org/en/download.html (release signature verified at pin time)
-# https://openssl-library.org/source/ ; https://github.com/PCRE2Project/pcre2/releases ; https://zlib.net/
-sources=(
-    'nginx-1.30.6|https://nginx.org/download/nginx-1.30.6.tar.gz|3cf46f5ed7504d460125866b7bea99fb357f31d887e2e63b35503310e9b8b6c8'
-    'openssl-3.5.9|https://github.com/openssl/openssl/releases/download/openssl-3.5.9/openssl-3.5.9.tar.gz|603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a'
-    'pcre2-10.49|https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.49/pcre2-10.49.tar.gz|929f0b20e62879252a15886b06c89f1edef61a363cbd5826fb041080a5e557ae'
-    'zlib-1.3.2|https://zlib.net/zlib-1.3.2.tar.gz|bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16'
-)
 if "$dry_run"; then
     printf '将从官方源码构建 Nginx 1.30.6，安装到：%s\n' "$prefix"
     printf '%s\n' 'OpenSSL 3.5.9、PCRE2 10.49、zlib 1.3.2 静态链接；校验固定 SHA-256。' \
-        '不修改系统目录、不安装系统包、不启动服务；已有本地 Nginx 不自动升级。'
+        '不修改系统目录、不安装系统包、不启动服务；已有本地 Nginx 不自动升级。' \
+        '安装后仅保留 Nginx 二进制及 licenses；清理默认资源和已知下载缓存。'
     exit 0
 fi
 for command in cc make perl curl tar python3; do
@@ -68,6 +102,10 @@ for command in cc make perl curl tar python3; do
 done
 jobs="${DSH_NGINX_BUILD_JOBS:-4}"
 [[ "$jobs" =~ ^[1-9][0-9]*$ ]] || { printf 'DSH_NGINX_BUILD_JOBS 必须是正整数。\n' >&2; exit 2; }
+if [[ -L "$local_root/downloads" ]]; then
+    printf '下载缓存目录不能是符号链接：%s\n' "$local_root/downloads" >&2
+    exit 1
+fi
 mkdir -p "$local_root/downloads"
 local_root="$(cd "$local_root" && pwd -P)"
 prefix="$local_root/nginx"
@@ -119,7 +157,7 @@ cp "$build_dir/nginx-1.30.6/LICENSE" "$staged/licenses/nginx"
 cp "$build_dir/openssl-3.5.9/LICENSE.txt" "$staged/licenses/openssl"
 cp "$build_dir/pcre2-10.49/LICENCE.md" "$staged/licenses/pcre2"
 cp "$build_dir/zlib-1.3.2/LICENSE" "$staged/licenses/zlib"
-printf '%s\n' "${sources[@]}" >"$staged/sources.txt"
+prune_installation "$staged"
 # Publish a complete installation; rename cannot merge into an existing nonempty directory.
 python3 - "$staged" "$prefix" <<'PUBLISH'
 import os, sys
@@ -131,4 +169,5 @@ if target.exists() or target.is_symlink():
     sys.exit(f"安装目录已由另一进程创建：{target}")
 os.rename(source, target)
 PUBLISH
+prune_installation "$prefix" true
 printf 'Nginx 已安装：%s\n' "$prefix/sbin/nginx"

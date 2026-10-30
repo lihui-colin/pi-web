@@ -53,11 +53,11 @@ class InstallPlanTests(unittest.TestCase):
             command = bins / name
             command.write_text('#!/bin/sh\necho 0.2.1-rc.2\n')
             command.chmod(0o755)
-        write_executable(self.project / '.local/nginx/sbin/nginx', NGINX_STUB)
+        write_executable(self.project / 'data/.local/nginx/sbin/nginx', NGINX_STUB)
         for name in ('nginx', 'npm', 'curl', 'sudo', 'apt-get', 'brew', 'systemctl', 'service'):
             write_executable(bins / name, '#!/bin/sh\necho "unexpected command: $0" >&2\nexit 97\n')
-        self.config = self.root / 'dsh.conf'
-        self.profile = self.root / 'data/profiles/web'
+        self.config = self.project / 'data/dsh.conf'
+        self.profile = self.project / 'data/.dsh/profiles/web'
         self.profile.mkdir(parents=True)
         (self.profile / 'package.json').write_text(json.dumps({'dependencies': {n: '0.2.1-rc.2' for n in NAMES}}))
         for name in NAMES:
@@ -74,7 +74,9 @@ class InstallPlanTests(unittest.TestCase):
 
     def test_existing_install_skipped(self):
         output = self.run_plan()
-        self.assertIn('复用项目 Nginx：' + str(self.project / '.local/nginx/sbin/nginx'), output)
+        self.assertIn('目标数据目录：' + str(self.project / 'data/.dsh'), output)
+        self.assertFalse((self.root / 'data').exists())
+        self.assertIn('复用项目 Nginx：' + str(self.project / 'data/.local/nginx/sbin/nginx'), output)
         self.assertNotIn('+ npm install', output)
         self.assertNotIn('+ curl', output)
         self.assertNotIn('+ dsh plugin', output)
@@ -111,15 +113,55 @@ class InstallPlanTests(unittest.TestCase):
         self.assertNotIn('dsh-file-transfer', output)
 
 
-    def test_install_without_config_does_not_create_certificates(self):
-        self.assertFalse(self.config.exists())
-        result = subprocess.run(['bash', str(self.script)], cwd=self.root, env=self.env, text=True, capture_output=True, timeout=15)
+    def install(self, answers=''):
+        return subprocess.run(['bash', str(self.script)], cwd=self.root, env=self.env,
+                              input=answers, text=True, capture_output=True, timeout=15)
+
+    def test_install_creates_config_without_certificates(self):
+        result = self.install('10.30.0.25\n25228\n')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertFalse(self.config.exists())
-        self.assertFalse((self.root / 'tls').exists())
-        self.assertNotIn('openssl', result.stdout)
+        self.assertEqual(self.config.read_text(), "server_ip='10.30.0.25'\nport=25228\ndsh_token=''\n")
+        self.assertEqual(self.config.stat().st_mode & 0o777, 0o600)
         self.assertFalse(list(self.root.rglob('*.pem')))
         self.assertFalse(list(self.root.rglob('*.crt')))
+
+    def test_invalid_answers_are_retried_and_ipv6_default_port_supported(self):
+        result = self.install('https://host\n::1\n0\n65536\nabc\n\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("server_ip='::1'\nport=25228\n", self.config.read_text())
+        self.assertIn('IP 格式无效', result.stderr)
+        self.assertEqual(result.stderr.count('端口必须'), 3)
+
+    def test_existing_config_is_preserved_without_input(self):
+        original = "server_ip=127.0.0.1\nport=12345\ndsh_token='keep'\n"
+        self.config.write_text(original)
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.config.read_text(), original)
+        self.assertNotIn('请输入', result.stderr)
+
+    def test_legacy_config_is_copied_without_overwrite_or_input(self):
+        legacy = self.project / 'dsh.conf'
+        original = "server_ip=127.0.0.1\nport=12345\n"
+        legacy.write_text(original)
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.config.read_text(), original)
+        self.assertEqual(legacy.read_text(), original)
+        self.assertEqual(self.config.stat().st_mode & 0o777, 0o600)
+        self.assertNotIn('请输入', result.stderr)
+
+    def test_missing_input_does_not_create_partial_config(self):
+        for answers in ('', '127.0.0.1\n'):
+            with self.subTest(answers=answers):
+                result = self.install(answers)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(self.config.exists())
+
+    def test_dry_run_never_prompts_or_creates_config(self):
+        output = self.run_plan()
+        self.assertFalse(self.config.exists())
+        self.assertIn('不在预览时读取输入', output)
 
     def test_certificate_options_rejected(self):
         for option in ['--cert-only', '--config', '--tls-dir', '--tls-host']:
@@ -136,7 +178,7 @@ class NginxInstallTests(unittest.TestCase):
         self.root = Path(self.tmp.name).resolve()
         self.project = copy_installers(self.root)
         self.script = self.project / NGINX_SCRIPT.name
-        self.local = self.project / '.local'
+        self.local = self.project / 'data/.local'
         self.prefix = self.local / 'nginx'
         self.bins = self.root / 'bin'
         self.bins.mkdir()
@@ -151,7 +193,7 @@ class NginxInstallTests(unittest.TestCase):
         for name in ('BASH_ENV', 'ENV'):
             self.env.pop(name, None)
         # Only these real tools are reachable; tar, SHA verification and rename stay real.
-        for name in ('bash', 'sh', 'dirname', 'mkdir', 'mktemp', 'mv', 'rm', 'cp', 'tar', 'gzip'):
+        for name in ('bash', 'sh', 'dirname', 'mkdir', 'mktemp', 'mv', 'rm', 'rmdir', 'cp', 'tar', 'gzip'):
             executable = shutil.which(name)
             self.assertIsNotNone(executable, f'missing test prerequisite: {name}')
             (self.bins / name).symlink_to(executable)
@@ -176,7 +218,7 @@ assert args[-2] == '-o', args
 archive = root / 'archives' / Path(urlparse(args[-3]).path).name
 assert archive.is_file(), archive
 output = Path(args[-1])
-assert output.parent.resolve().is_relative_to(root / 'project/.local'), output
+assert output.parent.resolve().is_relative_to(root / 'project/data/.local'), output
 if os.environ['TEST_DOWNLOAD'] == 'fail':
     output.write_bytes(b'incomplete download')
     sys.exit(22)
@@ -190,7 +232,7 @@ from pathlib import Path
 root = Path(os.environ['CASE_ROOT'])
 args = sys.argv[1:]
 prefix = Path('.fixture-prefix').read_text()
-assert Path(prefix) == root / 'project/.local/nginx', prefix
+assert Path(prefix) == root / 'project/data/.local/nginx', prefix
 assert not Path(prefix).exists(), 'published before staging completed'
 def record(event):
     with (root / 'calls.jsonl').open('a') as log:
@@ -215,6 +257,8 @@ if os.environ['TEST_FAIL_PHASE'] == 'install':
 (staged / 'conf/nginx.conf').write_text('fixture configuration\n')
 (staged / 'html').mkdir()
 (staged / 'html/index.html').write_text('fixture welcome page\n')
+(staged / 'logs').mkdir()
+(staged / 'logs/error.log').write_text('fixture log\n')
 record({'command': 'stage', 'path': str(staged), 'inode': staged.stat().st_ino,
         'device': staged.stat().st_dev})
 if os.environ['TEST_CONCURRENT']:
@@ -230,7 +274,7 @@ with (root / 'calls.jsonl').open('a') as log:
     log.write(json.dumps({'command': 'configure', 'args': args}) + '\n')
 options = dict(arg.split('=', 1) for arg in args if '=' in arg)
 prefix = Path(options['--prefix'])
-assert prefix == root / 'project/.local/nginx', prefix
+assert prefix == root / 'project/data/.local/nginx', prefix
 assert not prefix.exists(), 'published before configure'
 assert '--with-http_ssl_module' in args, args
 assert '--without-http_auth_basic_module' in args, args
@@ -282,12 +326,13 @@ Path('.fixture-prefix').write_text(str(prefix))
         calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
         return [call for call in calls if call['command'] == command] if command else calls
 
-    def snapshot(self):
+    def snapshot(self, root=None):
+        root = self.root if root is None else root
         result = {}
-        for path in self.root.rglob('*'):
+        for path in root.rglob('*'):
             stat = path.lstat()
             data = os.readlink(path) if path.is_symlink() else path.read_bytes() if path.is_file() else None
-            result[str(path.relative_to(self.root))] = (stat.st_mode, stat.st_mtime_ns, data)
+            result[str(path.relative_to(root))] = (stat.st_mode, stat.st_mtime_ns, data)
         return result
 
     def run_nginx(self, *args, **overrides):
@@ -305,11 +350,10 @@ Path('.fixture-prefix').write_text(str(prefix))
 
     def assert_complete_install(self):
         self.assertTrue(os.access(self.prefix / 'sbin/nginx', os.X_OK))
-        self.assertEqual((self.prefix / 'conf/nginx.conf').read_text(), 'fixture configuration\n')
-        self.assertEqual((self.prefix / 'html/index.html').read_text(), 'fixture welcome page\n')
+        self.assertEqual(sorted(path.name for path in self.prefix.iterdir()), ['licenses', 'sbin'])
+        self.assertFalse((self.local / 'downloads').exists())
         for name, content in self.licenses.items():
             self.assertEqual((self.prefix / 'licenses' / name).read_bytes(), content)
-        self.assertEqual((self.prefix / 'sources.txt').read_text().splitlines(), self.sources)
         stage, = self.calls('stage')
         self.assertEqual((self.prefix.stat().st_dev, self.prefix.stat().st_ino),
                          (stage['device'], stage['inode']), 'installation was not renamed from staging')
@@ -336,8 +380,108 @@ Path('.fixture-prefix').write_text(str(prefix))
                 self.assertEqual(self.calls(), [])
                 self.assertEqual(self.snapshot(), before)
 
-    def test_existing_incompatible_nginx_is_preserved(self):
+    def seed_existing_install(self):
         write_executable(self.prefix / 'sbin/nginx', NGINX_STUB)
+        (self.prefix / 'licenses').mkdir()
+        for name, content in self.licenses.items():
+            (self.prefix / 'licenses' / name).write_bytes(content)
+        for name in ('conf', 'html', 'logs'):
+            (self.prefix / name).mkdir()
+            (self.prefix / name / 'default-file').write_text('default installer output')
+        (self.prefix / 'sources.txt').write_text('\n'.join(self.sources) + '\n')
+        cache = self.local / 'downloads'
+        cache.mkdir()
+        for archive in self.archives.iterdir():
+            shutil.copy2(archive, cache / archive.name)
+            for suffix in ('.asc', '.sha256'):
+                (cache / (archive.name + suffix)).write_text('fixture source verification')
+        for name in ('arut.key', 'pluknet.key'):
+            (cache / name).write_text('fixture signing key')
+        return cache
+
+    def test_existing_install_prunes_known_outputs_and_keeps_unknown_files(self):
+        cache = self.seed_existing_install()
+        (self.prefix / 'custom').mkdir()
+        (self.prefix / 'custom/keep.txt').write_text('custom installation data')
+        (self.local / 'keep.txt').write_text('other local data')
+        (cache / 'unrelated.tar.gz').write_text('other download')
+        binary = (self.prefix / 'sbin/nginx').read_bytes()
+        result = self.run_nginx()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('复用项目 Nginx：', result.stdout)
+        self.assertEqual(sorted(path.name for path in self.prefix.iterdir()), ['custom', 'licenses', 'sbin'])
+        self.assertEqual((self.prefix / 'sbin/nginx').read_bytes(), binary)
+        for name, content in self.licenses.items():
+            self.assertEqual((self.prefix / 'licenses' / name).read_bytes(), content)
+        self.assertEqual((self.prefix / 'custom/keep.txt').read_text(), 'custom installation data')
+        self.assertEqual((self.local / 'keep.txt').read_text(), 'other local data')
+        self.assertEqual([path.name for path in cache.iterdir()], ['unrelated.tar.gz'])
+        self.assertEqual((cache / 'unrelated.tar.gz').read_text(), 'other download')
+        self.assertEqual(self.calls(), [])
+
+    def test_existing_install_dry_run_preserves_outputs_and_cache(self):
+        self.seed_existing_install()
+        before = self.snapshot()
+        result = self.run_nginx('--dry-run')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('将清理默认 conf/html/logs', result.stdout)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.calls(), [])
+
+    def test_cleanup_unlinks_outputs_without_following_external_symlinks(self):
+        write_executable(self.prefix / 'sbin/nginx', NGINX_STUB)
+        outside = self.root / 'outside'
+        outside.mkdir()
+        (outside / 'keep.txt').write_text('outside installation')
+        before = self.snapshot(outside)
+        for name in ('conf', 'html'):
+            (self.prefix / name).symlink_to(outside)
+        (self.prefix / 'logs').mkdir()
+        (self.prefix / 'logs/external').symlink_to(outside)
+        (self.prefix / 'sources.txt').symlink_to(outside / 'keep.txt')
+        cache = self.local / 'downloads'
+        cache.mkdir()
+        archive = self.sources[0].split('|', 1)[0] + '.tar.gz'
+        for name in (archive, archive + '.asc', archive + '.sha256', 'arut.key', 'pluknet.key'):
+            (cache / name).symlink_to(outside / 'keep.txt')
+        result = self.run_nginx()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.snapshot(outside), before)
+        self.assertEqual([path.name for path in self.prefix.iterdir()], ['sbin'])
+        self.assertFalse(cache.exists())
+        self.assertEqual(self.calls(), [])
+
+    def test_existing_install_unlinks_download_directory_symlink(self):
+        write_executable(self.prefix / 'sbin/nginx', NGINX_STUB)
+        outside = self.root / 'outside'
+        outside.mkdir()
+        (outside / 'arut.key').write_text('external key')
+        (outside / 'keep.txt').write_text('external data')
+        before = self.snapshot(outside)
+        cache = self.local / 'downloads'
+        cache.symlink_to(outside)
+        result = self.run_nginx()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(cache.exists())
+        self.assertFalse(cache.is_symlink())
+        self.assertEqual(self.snapshot(outside), before)
+        self.assertEqual(self.calls(), [])
+
+    def test_new_install_rejects_download_directory_symlink_before_writes(self):
+        outside = self.root / 'outside'
+        outside.mkdir()
+        (outside / 'keep.txt').write_text('external data')
+        self.local.mkdir(parents=True)
+        (self.local / 'downloads').symlink_to(outside)
+        before = self.snapshot()
+        result = self.run_nginx()
+        self.assert_not_published(result)
+        self.assertIn('下载缓存目录不能是符号链接', result.stderr)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.calls(), [])
+
+    def test_existing_incompatible_nginx_is_preserved(self):
+        self.seed_existing_install()
         before = self.snapshot()
         cases = [({'TEST_NGINX_VERSION': '1.22.1'}, '需要 Nginx >=1.24'),
                  ({'TEST_NGINX_SSL': ''}, '缺少 HTTP SSL 模块'),
@@ -354,7 +498,9 @@ Path('.fixture-prefix').write_text(str(prefix))
     def test_external_symlinks_are_rejected_without_changes(self):
         outside = self.root / 'outside'
         write_executable(outside / 'nginx/sbin/nginx', NGINX_STUB)
-        links = [(self.local, outside),
+        write_executable(self.root / 'outside-data/.local/nginx/sbin/nginx', NGINX_STUB)
+        links = [(self.project / 'data', self.root / 'outside-data'),
+                 (self.local, outside),
                  (self.prefix, outside / 'nginx'),
                  (self.prefix / 'sbin', outside / 'nginx/sbin'),
                  (self.prefix / 'sbin/nginx', outside / 'nginx/sbin/nginx')]
@@ -452,8 +598,6 @@ Path('.fixture-prefix').write_text(str(prefix))
         self.assertEqual([call['command'] for call in self.calls()],
                          ['curl'] * 4 + ['configure', 'make', 'make', 'stage'])
         self.assertEqual(self.calls('make')[0]['args'], ['-j', '2'])
-        for fixture in self.archives.iterdir():
-            self.assertEqual((self.local / 'downloads' / fixture.name).read_bytes(), fixture.read_bytes())
 
     def test_concurrent_installation_is_preserved(self):
         result = self.run_nginx(TEST_CONCURRENT='1')

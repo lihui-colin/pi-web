@@ -18,7 +18,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 
-from dsh_nginx import cookie_name, render_config
+from unittest import mock
+
+from dsh_nginx import cookie_name, parent_death_guard, render_config, require_local_nginx
 from test_support import create_test_certificate, local_nginx
 
 PAGE = b"<!doctype html><title>DeepSeek Harness</title>"
@@ -31,14 +33,34 @@ NGINX = local_nginx()
 
 
 class NginxBinaryTests(unittest.TestCase):
+    def test_privileged_binary_is_rejected_before_execution(self):
+        with tempfile.TemporaryDirectory(prefix="dsh-nginx-privileged-") as temporary:
+            root = Path(temporary)
+            binary = root / 'data/.local/nginx/sbin/nginx'
+            binary.parent.mkdir(parents=True)
+            binary.write_text('#!/bin/sh\nexit 99\n')
+            with mock.patch('dsh_nginx.__file__', str(root / 'dsh_nginx.py')), \
+                    mock.patch('dsh_nginx.subprocess.run') as execute:
+                for mode in (0o4755, 0o2755):
+                    with self.subTest(mode=oct(mode)):
+                        binary.chmod(mode)
+                        with self.assertRaisesRegex(ValueError, 'set-ID'):
+                            require_local_nginx()
+                binary.chmod(0o755)
+                with mock.patch('dsh_nginx.os.getxattr', return_value=b'file-capability'):
+                    with self.assertRaisesRegex(ValueError, 'file capabilities'):
+                        require_local_nginx()
+                execute.assert_not_called()
+
     def test_local_binary_cannot_escape_installation_through_symlinks(self):
-        for component in (".local", ".local/nginx", ".local/nginx/sbin", ".local/nginx/sbin/nginx"):
+        for component in ("data", "data/.local", "data/.local/nginx",
+                          "data/.local/nginx/sbin", "data/.local/nginx/sbin/nginx"):
             with self.subTest(component=component), tempfile.TemporaryDirectory(prefix="dsh-nginx-link-") as temporary:
                 root = Path(temporary) / "project"
                 root.mkdir()
                 shutil.copy2(Path(__file__).with_name("dsh_nginx.py"), root / "dsh_nginx.py")
                 outside = Path(temporary) / "outside"
-                binary = outside / "nginx/sbin/nginx"
+                binary = outside / ".local/nginx/sbin/nginx"
                 binary.parent.mkdir(parents=True)
                 marker = outside / "executed"
                 binary.write_text(f"#!{sys.executable}\nfrom pathlib import Path\n"
@@ -61,7 +83,7 @@ class NginxBinaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="dsh-nginx-local-link-") as temporary:
             root = Path(temporary)
             shutil.copy2(Path(__file__).with_name("dsh_nginx.py"), root / "dsh_nginx.py")
-            binary = root / ".local/nginx/sbin/nginx-versioned"
+            binary = root / "data/.local/nginx/sbin/nginx-versioned"
             binary.parent.mkdir(parents=True)
             binary.write_text("#!/bin/sh\nprintf 'nginx/1.30.0' >&2\n")
             binary.chmod(0o700)
@@ -84,7 +106,7 @@ class NginxBinaryTests(unittest.TestCase):
             fallback.write_text("#!/bin/sh\nprintf 'PATH nginx must not run' >&2\nexit 99\n")
             fallback.chmod(0o755)
             environment = {**os.environ, "PATH": f"{binaries}:{os.environ['PATH']}"}
-            local = root / ".local/nginx/sbin/nginx"
+            local = root / "data/.local/nginx/sbin/nginx"
             local.parent.mkdir(parents=True)
             with socket.socket() as reservation:
                 reservation.bind(("127.0.0.1", 0))
@@ -115,7 +137,90 @@ class NginxBinaryTests(unittest.TestCase):
                     self.assertIn("dsh_nginx_install.sh", result.stderr)
                     self.assertNotIn("PATH nginx must not run", result.stderr)
                     self.assertNotIn("absent.conf", result.stderr)
-                    self.assertFalse((root / f".nginx-{port}").exists())
+                    self.assertFalse((root / "log").exists())
+
+
+@unittest.skipUnless(sys.platform.startswith("linux"), "Linux parent-death signals")
+class SupervisorTests(unittest.TestCase):
+    def test_child_exits_if_parent_changed_before_signal_registration(self):
+        with mock.patch("dsh_nginx.os.getpid", return_value=-1):
+            guard = parent_death_guard()
+        result = subprocess.run([sys.executable, "-c", "print('must not execute')"],
+                                preexec_fn=guard, capture_output=True, timeout=WAIT)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, b"")
+
+    @unittest.skipUnless(NGINX, "install the project-local Nginx")
+    def test_supervisor_death_releases_master_workers_and_listener(self):
+        def identity(pid):
+            try:
+                fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+                return fields[19] if fields[0] != "Z" else None
+            except FileNotFoundError:
+                return None
+
+        with tempfile.TemporaryDirectory(prefix="dsh-supervisor-death-") as temporary:
+            root = Path(temporary)
+            cert, key = create_test_certificate(root)
+            config = root / "dsh.conf"
+            config.write_text("dsh_token='test-supervisor-token'\n")
+            with socket.socket() as reservation:
+                reservation.bind(("127.0.0.1", 0))
+                port = reservation.getsockname()[1]
+            runtime = root / "log" / f".nginx-{port}"
+            command = [sys.executable, "-B", str(Path(__file__).with_name("dsh_nginx.py")),
+                       "--listen-host", "127.0.0.1", "--listen-port", str(port),
+                       "--upstream-host", "127.0.0.1", "--upstream-port", "1",
+                       "--public-host", f"localhost:{port}", "--config", str(config),
+                       "--tls-cert", str(cert), "--tls-key", str(key)]
+            # Reuse the same port after each termination to exercise recovery too.
+            for termination in (signal.SIGKILL, signal.SIGTERM):
+                with self.subTest(signal=termination), (root / "diagnostics").open("w") as diagnostics:
+                    process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=diagnostics)
+                    owned = {}
+                    try:
+                        deadline = time.monotonic() + WAIT
+                        while True:
+                            self.assertIsNone(process.poll(), "supervisor failed before readiness")
+                            try:
+                                pid = int((runtime / "nginx.pid").read_text().strip())
+                                if str(runtime).encode() not in Path(f"/proc/{pid}/cmdline").read_bytes():
+                                    raise OSError("waiting for test-owned Nginx master")
+                                owned[pid] = identity(pid)
+                                with socket.create_connection(("127.0.0.1", port), timeout=.2) as raw:
+                                    with ssl.create_default_context(cafile=str(cert)).wrap_socket(
+                                            raw, server_hostname="localhost"):
+                                        pass
+                                break
+                            except (OSError, ValueError):
+                                if time.monotonic() >= deadline:
+                                    self.fail("isolated Nginx did not become ready")
+                                time.sleep(.02)
+                        workers = Path(f"/proc/{pid}/task/{pid}/children").read_text().split()
+                        self.assertTrue(workers, "test must observe a real Nginx worker")
+                        owned = {value: identity(value) for value in [pid, *map(int, workers)]}
+                        self.assertTrue(all(owned.values()))
+                        process.send_signal(termination)
+                        process.wait(timeout=WAIT)
+                        deadline = time.monotonic() + WAIT
+                        while any(identity(pid) == stamp for pid, stamp in owned.items()):
+                            if time.monotonic() >= deadline:
+                                self.fail("Nginx survived its supervisor")
+                            time.sleep(.02)
+                        with socket.socket() as probe:
+                            probe.settimeout(.2)
+                            self.assertNotEqual(probe.connect_ex(("127.0.0.1", port)), 0)
+                    finally:
+                        if process.poll() is None:
+                            process.terminate()
+                            process.wait(timeout=WAIT)
+                        # Only test-owned processes with their original birth identity.
+                        for pid, stamp in owned.items():
+                            if stamp is not None and identity(pid) == stamp:
+                                try:
+                                    os.kill(pid, signal.SIGTERM)
+                                except ProcessLookupError:
+                                    pass
 
 
 def reply(handler, status=200, headers=(), body=b"ok"):
@@ -326,6 +431,7 @@ class NginxProxyTests(unittest.TestCase):
         cases = [("GET", path, None) for path in (
             "/?token=invalid", "/?token=", "/?token", "/?t%6fken=invalid",
             "/?token=one&token=two", "/index.html?token=invalid", "/api/call",
+            "/index.html/extra", "/index.htmlx", "/nested/index.html",
         )] + [("HEAD", "/", None), ("POST", "/", b"write"), ("GET", "/", b"body")]
         for method, path, payload in cases:
             with self.subTest(method=method, path=path), self.fixture([(401, [], b"unauthorized")]) as fixture:
