@@ -3,11 +3,12 @@ set -Eeuo pipefail
 umask 077
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-export PASEO_HOME="$ROOT/data"
+DATA="$ROOT/data"
+export PASEO_HOME="$DATA/.paseo"
 PASEO="$ROOT/runtime/bin/paseo"
 
 usage() {
-  printf '用法：%s start [--proxy|--no-proxy]\n      %s {stop|status|set-password|reload-proxy}\n' "$0" "$0"
+  printf '用法：%s start [--proxy|--no-proxy]\n      %s {stop|status|set-password|reload-proxy|migrate-home}\n' "$0" "$0"
 }
 ACTION="${1:-}"
 MODE=proxy
@@ -21,7 +22,7 @@ case "$ACTION" in
       *) usage >&2; exit 2 ;;
     esac
     ;;
-  stop|status|set-password|reload-proxy)
+  stop|status|set-password|reload-proxy|migrate-home)
     [[ $# -eq 1 ]] || { usage >&2; exit 2; }
     ;;
   *) usage >&2; exit 2 ;;
@@ -33,11 +34,34 @@ if [[ ! -x "$PASEO" ]]; then
 fi
 
 NGINX="$ROOT/runtime/nginx/sbin/nginx"
-NGINX_CONF="$PASEO_HOME/nginx.conf"
-NGINX_RUN="$PASEO_HOME/nginx"
+NGINX_CONF="$DATA/nginx.conf"
+NGINX_RUN="$DATA/nginx"
+if [[ "$ACTION" == migrate-home ]]; then
+  exec python3 "$ROOT/paseo-migrate-home.py" launch "$ROOT"
+fi
+
 mkdir -p "$NGINX_RUN"
-exec 9>"$PASEO_HOME/service.lock"
+# The detached migration worker passes its locked descriptor to lifecycle commands.
+if [[ -n "${PASEO_MAINTENANCE_HOME:-}" && "$(readlink /proc/self/fd/9)" == "$DATA/service.lock" ]]; then
+  [[ "$PASEO_MAINTENANCE_HOME" == "$DATA" || "$PASEO_MAINTENANCE_HOME" == "$DATA/.paseo" ]] || {
+    printf '无效的维护进程锁或数据目录。\n' >&2; exit 1;
+  }
+  export PASEO_HOME="$PASEO_MAINTENANCE_HOME"
+else
+  # Older daemon launches may have inherited this marker without its lock descriptor.
+  unset PASEO_MAINTENANCE_HOME
+  exec 9>"$DATA/service.lock"
+fi
 flock -x 9
+
+if [[ -z "${PASEO_MAINTENANCE_HOME:-}" && -f "$DATA/config.json" ]]; then
+  case "$ACTION" in
+    status|stop) export PASEO_HOME="$DATA" ;;
+    start|set-password)
+      printf '旧数据尚未迁移，请在无运行任务时执行：%s migrate-home\n' "$0" >&2
+      exit 1 ;;
+  esac
+fi
 
 nginx_running() {
   [[ -f "$NGINX_RUN/nginx.pid" ]] || return 1
@@ -48,14 +72,28 @@ nginx_running() {
 nginx_cmd() {
   "$NGINX" -p "$NGINX_RUN/" -c "$NGINX_CONF" -e "$NGINX_RUN/error.log" "$@" 9>&-
 }
+if [[ -z "${PASEO_MAINTENANCE_HOME:-}" && -f "$DATA/home-migration.json" &&
+      ( "$ACTION" == start || "$ACTION" == set-password ) ]]; then
+  node - "$DATA/home-migration.json" <<'NODE'
+const fs = require('node:fs');
+const { phase } = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+if (!['complete', 'rolled-back'].includes(phase)) {
+  console.error('数据迁移未完成，请先检查 data/home-migration.json 和迁移日志。');
+  process.exit(1);
+}
+NODE
+fi
+
+# Maintenance context is local to this script, never part of the daemon environment.
+unset PASEO_MAINTENANCE_HOME
 case "$1" in
   start)
-    ENDPOINT="$(node "$ROOT/paseo-config.cjs" endpoint "$PASEO_HOME" "$MODE")"
+    ENDPOINT="$(node "$ROOT/paseo-config.cjs" endpoint "$DATA" "$MODE")"
     mapfile -t ENDPOINT_FIELDS <<< "$ENDPOINT"
     URL="${ENDPOINT_FIELDS[1]}"
     CA_CERT="${ENDPOINT_FIELDS[2]}"
     if [[ "$MODE" == proxy ]]; then
-      node "$ROOT/paseo-config.cjs" proxy "$PASEO_HOME"
+      node "$ROOT/paseo-config.cjs" proxy "$DATA"
       [[ -x "$NGINX" ]] || { printf '请先运行 install.sh 安装 Nginx。\n' >&2; exit 1; }
       mkdir -p "$NGINX_RUN"/{body,proxy,fastcgi,uwsgi,scgi}
       nginx_cmd -t
@@ -67,7 +105,9 @@ case "$1" in
     fi
     # 读取实际运行状态，禁止隐式重启或改写运行中实例的监听设置。
     STATE="$("$PASEO" daemon status --home "$PASEO_HOME" --json 9>&-)"
-    node "$ROOT/paseo-config.cjs" prepare "$PASEO_HOME" "$MODE" "$STATE"
+    if [[ "$PASEO_HOME" == "$DATA/.paseo" ]]; then
+      node "$ROOT/paseo-config.cjs" prepare "$DATA" "$MODE" "$STATE"
+    fi
     "$PASEO" daemon start --home "$PASEO_HOME" 9>&-
     if [[ "$MODE" == proxy ]]; then
       if ! nginx_running; then nginx_cmd; fi
@@ -99,7 +139,7 @@ case "$1" in
     if nginx_running; then printf 'nginx: running (HTTPS)\n'; else printf 'nginx: stopped\n'; fi
     ;;
   reload-proxy)
-    node "$ROOT/paseo-config.cjs" proxy "$PASEO_HOME"
+    node "$ROOT/paseo-config.cjs" proxy "$DATA"
     nginx_cmd -t
     nginx_running || { printf 'Nginx 未运行。\n' >&2; exit 1; }
     nginx_cmd -s reload

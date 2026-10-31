@@ -9,7 +9,8 @@ function fixture(t, config = { ip: '10.30.0.25', port: 25227 }) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'paseo-config-'));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   fs.writeFileSync(path.join(home, 'paseo.conf'), JSON.stringify(config));
-  fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({
+  fs.mkdirSync(path.join(home, '.paseo'), { mode: 0o700 });
+  fs.writeFileSync(path.join(home, '.paseo', 'config.json'), JSON.stringify({
     version: 1, daemon: { relay: { enabled: false } }, agents: { providers: { pi: { enabled: true } } },
   }));
   return home;
@@ -41,21 +42,21 @@ test('prepare preserves provider settings and the two-field user configuration',
   const home = fixture(t);
   const before = fs.readFileSync(path.join(home, 'paseo.conf'), 'utf8');
   prepare(home, 'proxy', { localDaemon: 'stopped' });
-  const official = JSON.parse(fs.readFileSync(path.join(home, 'config.json'), 'utf8'));
+  const official = JSON.parse(fs.readFileSync(path.join(home, '.paseo', 'config.json'), 'utf8'));
   assert.equal(official.agents.providers.pi.enabled, true);
   assert.equal(official.daemon.relay.enabled, false);
   assert.equal(official.daemon.listen, '127.0.0.1:25226');
   assert.equal(official.features.webUi.enabled, true);
   assert.equal(fs.readFileSync(path.join(home, 'paseo.conf'), 'utf8'), before);
-  assert.equal(fs.statSync(path.join(home, 'config.json')).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(path.join(home, '.paseo', 'config.json')).mode & 0o777, 0o600);
 });
 
 test('running mode mismatch and unknown state cannot rewrite official configuration', t => {
   const home = fixture(t);
-  const before = fs.readFileSync(path.join(home, 'config.json'), 'utf8');
+  const before = fs.readFileSync(path.join(home, '.paseo', 'config.json'), 'utf8');
   assert.throws(() => prepare(home, 'proxy', { localDaemon: 'running', listen: '0.0.0.0:25227' }));
   assert.throws(() => prepare(home, 'proxy', { localDaemon: 'unknown' }));
-  assert.equal(fs.readFileSync(path.join(home, 'config.json'), 'utf8'), before);
+  assert.equal(fs.readFileSync(path.join(home, '.paseo', 'config.json'), 'utf8'), before);
 });
 
 test('proxy configuration uses local certificates, configured port, and intact Nginx variables', t => {

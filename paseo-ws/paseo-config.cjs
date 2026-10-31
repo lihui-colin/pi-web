@@ -3,8 +3,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const net = require('node:net');
 
-function endpoint(home, mode) {
-  const config = JSON.parse(fs.readFileSync(path.join(home, 'paseo.conf'), 'utf8'));
+function endpoint(data, mode) {
+  const config = JSON.parse(fs.readFileSync(path.join(data, 'paseo.conf'), 'utf8'));
   const { ip, port } = config;
   if (Object.keys(config).some(key => !['ip', 'port'].includes(key)) ||
       typeof ip !== 'string' || !net.isIP(ip) ||
@@ -35,15 +35,15 @@ function writeJson(file, value) {
   }
 }
 
-function prepare(home, mode, state) {
-  const target = endpoint(home, mode);
+function prepare(data, mode, state) {
+  const target = endpoint(data, mode);
   if (state.localDaemon === 'running' && state.listen !== target.listen) {
     throw new Error('服务正在使用其他监听设置，请先 stop，再按目标设置 start。');
   }
   if (!['running', 'stopped'].includes(state.localDaemon)) {
     throw new Error(`无法确认服务已停止：${state.localDaemon}，请检查 status。`);
   }
-  const file = path.join(home, 'config.json');
+  const file = path.join(data, '.paseo', 'config.json');
   if (fs.lstatSync(file).isSymbolicLink()) throw new Error('config.json 必须是独立文件，不能链接至 paseo.conf。');
   const config = JSON.parse(fs.readFileSync(file, 'utf8'));
   config.daemon ??= {};
@@ -55,11 +55,11 @@ function prepare(home, mode, state) {
   writeJson(file, config);
 }
 
-function renderProxy(home) {
-  const target = endpoint(home, 'proxy');
+function renderProxy(data) {
+  const target = endpoint(data, 'proxy');
   // The template contains Nginx variables; only replace these explicit placeholders.
   const values = {
-    PASEO_DATA: path.resolve(home), PASEO_LISTEN: target.proxyListen,
+    PASEO_DATA: path.resolve(data), PASEO_LISTEN: target.proxyListen,
     PASEO_IP: target.ip, PASEO_TLS_NAME: target.tlsName,
   };
   return fs.readFileSync(path.join(__dirname, 'nginx.conf.template'), 'utf8')
@@ -68,14 +68,14 @@ function renderProxy(home) {
 
 if (require.main === module) {
   try {
-    const [action, home, mode = 'proxy', rawState] = process.argv.slice(2);
+    const [action, data, mode = 'proxy', rawState] = process.argv.slice(2);
     if (action === 'endpoint') {
-      const value = endpoint(home, mode);
-      console.log([value.listen, value.url, path.join(home, 'tls', value.tlsName, 'fullchain.pem')].join('\n'));
+      const value = endpoint(data, mode);
+      console.log([value.listen, value.url, path.join(data, 'tls', value.tlsName, 'fullchain.pem')].join('\n'));
     } else if (action === 'prepare') {
-      prepare(home, mode, JSON.parse(rawState));
+      prepare(data, mode, JSON.parse(rawState));
     } else if (action === 'proxy') {
-      fs.writeFileSync(path.join(home, 'nginx.conf'), renderProxy(home), { mode: 0o600 });
+      fs.writeFileSync(path.join(data, 'nginx.conf'), renderProxy(data), { mode: 0o600 });
     } else throw new Error('未知配置操作。');
   } catch (error) {
     console.error(error.message);

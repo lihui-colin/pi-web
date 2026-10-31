@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/getpaseo/paseo",
+  "tag": "v0.14.0",
+  "commit": "8c6de842a3157530c26a7a94c78a3d647fb96ce9",
+  "package": "@getpaseo/server",
+  "version": "0.14.0"
+}
