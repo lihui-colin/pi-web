@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "daemon": {
+    "listen": "127.0.0.1:25226",
+    "hostnames": ["localhost"],
+    "trustedProxies": ["loopback"],
+    "relay": { "enabled": false }
+  },
+  "features": {
+    "webUi": { "enabled": true }
+  }
+}

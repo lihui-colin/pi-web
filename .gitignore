@@ -3,3 +3,8 @@
 /pi-web.conf
 /.pi-web
 /.codegraph
+
+# Paseo instance state and installed dependencies
+/paseo-ws/data/
+/paseo-ws/runtime/
+/paseo-ws/.npm-cache/

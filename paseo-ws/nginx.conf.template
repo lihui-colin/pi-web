@@ -1,0 +1,46 @@
+worker_processes 2;
+worker_shutdown_timeout 5s;
+pid @PASEO_DATA@/nginx/nginx.pid;
+error_log @PASEO_DATA@/nginx/error.log warn;
+events { worker_connections 1024; }
+http {
+    log_format paseo_diagnostic escape=json '{"time":"$time_iso8601","client":"$remote_addr","uri":"$uri","status":$status,"upstream":"$upstream_status","connect":"$upstream_connect_time","header":"$upstream_header_time","ua":"$http_user_agent"}';
+    access_log @PASEO_DATA@/nginx/access-diagnostic.log paseo_diagnostic;
+    client_body_temp_path @PASEO_DATA@/nginx/body;
+    proxy_temp_path @PASEO_DATA@/nginx/proxy;
+    fastcgi_temp_path @PASEO_DATA@/nginx/fastcgi;
+    uwsgi_temp_path @PASEO_DATA@/nginx/uwsgi;
+    scgi_temp_path @PASEO_DATA@/nginx/scgi;
+    map $http_upgrade $paseo_connection { default upgrade; "" close; }
+    server {
+        listen @PASEO_LISTEN@ ssl;
+        server_name @PASEO_IP@;
+        ssl_certificate @PASEO_DATA@/tls/@PASEO_TLS_NAME@/fullchain.pem;
+        ssl_certificate_key @PASEO_DATA@/tls/@PASEO_TLS_NAME@/privkey.pem;
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_session_cache shared:PASEO_TLS:10m;
+        ssl_session_tickets off;
+        client_max_body_size 100m;
+        location = /_paseo-check {
+            alias @PASEO_DATA@/connection-check.html;
+            default_type text/html;
+            add_header Cache-Control no-store;
+        }
+        location ^~ /_paseo-check/report/ { return 204; }
+        location / {
+            proxy_pass http://127.0.0.1:25226;
+            proxy_http_version 1.1;
+            proxy_set_header Host $http_host;
+            proxy_set_header X-Forwarded-Host $http_host;
+            proxy_set_header X-Forwarded-Proto https;
+            proxy_set_header X-Forwarded-For $remote_addr;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection $paseo_connection;
+            proxy_buffering off;
+            proxy_request_buffering off;
+            proxy_connect_timeout 5s;
+            proxy_read_timeout 3600s;
+            proxy_send_timeout 3600s;
+        }
+    }
+}
