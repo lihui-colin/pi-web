@@ -8,12 +8,12 @@ Usage: sh scripts/sync.sh [--local]
 Reuse the cached upstream commit in patches/base-commit (fetch only if missing),
 then apply
 patches/*.patch in a new release directory. Print that directory on stdout.
-Downloads are cached in <repo>/data/pi-web-upstream.git.
+Downloads are cached in <pi-web>/data/pi-web-upstream.git.
 With --local, require that commit in this cache without fetching.
 Neither mode updates main or pushes to any remote.
 
 PI_WEB_UPSTREAM_URL  Official upstream URL override
-PI_WEB_INSTALL_ROOT  Release parent (default: <repo>/data/pi-web-releases)
+PI_WEB_INSTALL_ROOT  Release parent (default: <pi-web>/data/pi-web-releases)
 HELP
 }
 case "$#:${1:-}" in
@@ -24,7 +24,8 @@ case "$#:${1:-}" in
 esac
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-source_repo=$(git -C "$script_dir" rev-parse --show-toplevel)
+# Resolve the Pi Web component root, which may be nested in a larger Git repo.
+source_repo=$(CDPATH= cd -- "$script_dir/.." && pwd)
 upstream_url=${PI_WEB_UPSTREAM_URL:-https://github.com/jmfederico/pi-web.git}
 install_root=${PI_WEB_INSTALL_ROOT:-$source_repo/data/pi-web-releases}
 cache_repo="$source_repo/data/pi-web-upstream.git"

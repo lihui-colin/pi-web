@@ -1,5 +1,7 @@
 # Codex Panel 实施计划与记录
 
+路径说明：本文保留历史计划、命令和验证记录。其中补丁维护侧的 `scripts/`、`patches/`、`tests/`、`data/` 等路径现以仓库内的 `pi-web/` 为根；复用这些命令前，从 Git 仓库根目录先执行 `cd pi-web`。生成源码中的 `src/`、`pi-web-plugins/` 及 npm 命令仍以独立 release/维护目录为基准。当前操作步骤见 [安装与同步](usage.md)。
+
 ## 1. 任务目标与范围
 
 原始需求：在 Terminal 这个 Panel 右边增加一个新 Panel，用于支持 Codex。

@@ -1,5 +1,7 @@
 # Codex App Server WebUI 接入架构与实现
 
+路径说明：本文是外部参考项目的历史架构记录，源码路径和命令以该参考项目为基准，不是本仓库的部署指导。Pi Web 本地操作见 [安装与同步](usage.md)，须从 Git 仓库根目录先执行 `cd pi-web`。
+
 > 参考项目：[lezi-fun/codex-webui](https://github.com/lezi-fun/codex-webui)（main 分支，2026-10-16 检视）。本文聚焦 **Codex 接入**，不展开 WebUI 视觉设计。该项目为非官方实现。
 
 ## 1. 架构概述

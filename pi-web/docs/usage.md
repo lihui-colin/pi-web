@@ -1,5 +1,13 @@
 # 安装与同步
 
+本文的脚本、补丁、测试和数据路径以 **Pi Web 根目录（仓库内的 `pi-web/`）** 为基准。在 Git 仓库根目录先执行：
+
+```bash
+cd pi-web
+```
+
+下文各操作从该目录开始；明确切换到生成的 release 或独立维护工作区时，以该工作区为准。`/补丁工作区` 表示本仓库内 `pi-web/` 的绝对路径，不是 Git 仓库根目录。迁移后的兼容软链接及保留要求见 [目录迁移说明](../README.md#目录迁移与兼容链接)。
+
 ## 分支约定
 
 `main` 是可独立维护的纯上游分支，安装和同步脚本不更新或依赖它。`terminal-patch` 是独立根提交开始的补丁分支，只保存定制维护所需的文件。不要将这两个分支相互 merge 或 rebase；通过应用 `.patch` 文件组合代码。
@@ -30,7 +38,7 @@
 sh scripts/install.sh
 ```
 
-`install.sh` 首先检查 `data/pi-web.conf`，不存在时从根目录 `pi-web.conf.example` 创建，已有配置保持不变。随后执行：
+`install.sh` 首先检查 `data/pi-web.conf`，不存在时从 Pi Web 根目录的 `pi-web.conf.example` 创建，已有配置保持不变。随后执行：
 
 1. 创建独立安装仓库，以 detached HEAD 检出 `patches/base-commit` 指定的提交（先由 sync.sh 同步至 data/pi-web-upstream.git），按文件名顺序应用当前工作区 `patches/*.patch`，使用 Git 三方合并。
 2. 在生成目录的 `.npmrc` 中配置 node-pty/esbuild 的安装脚本权限，安装依赖。
@@ -45,6 +53,8 @@ sh scripts/install.sh
 构建成功后，全局命令指向新的独立安装目录，因此不要删除正在使用的 release 目录。全局前缀需可写；使用 nvm 时替换的是当前 Node 环境中的安装。如果 `command -v pi-web` 与脚本输出的命令路径不同，请检查 PATH 中是否有其他安装抢先匹配。
 
 已运行的进程需要手动重启。如果自己的启动脚本或服务配置写死了旧 release 的绝对路径，还需要将其改为新的路径。模型提供商认证和启动配置由使用者单独管理；已有 Pi Agent 的升级使用 `update --pi-only`。
+
+`sync.sh` 从脚本所在目录的上一层确定 Pi Web 项目根目录（即仓库内的 `pi-web/`），不使用 Git 仓库顶层作为项目根目录。因此 `patches/` 和 `data/` 均相对 Pi Web 根目录解析，与调用者的当前工作目录无关。
 
 `sync.sh` 先检查 `data/pi-web-upstream.git`，已有指定提交时跳过远端下载，可离线准备源码；缺失时才按 commit ID 从官方仓库获取基线，可通过 `PI_WEB_UPSTREAM_URL` 改变上游仓库地址，但不能覆盖基线版本。它不拉取最新 `main`、不修改任何分支、不推送远端，也不要求配置 `origin`。`sync.sh --local` 只使用 `data/pi-web-upstream.git` 缓存中的同一提交，缺失时明确报错。两种脚本都不会自动提交或推送 `terminal-patch` 的修改，安装前应审查补丁工作区并提交要共享的修改。
 
@@ -117,6 +127,12 @@ sh scripts/install.sh
 ```
 
 更新基线时，应验证补丁在新提交上的测试和构建，再同时提交 `patches/base-commit` 和补丁。仅运行 `sync.sh` 不会升级基线，安装始终可复现同一组上游源码与补丁。
+
+若从 **Git 仓库根目录** 运行补丁仓库测试，使用以下命令（与上面在 Pi Web 根目录执行的测试等价）：
+
+```bash
+node --test pi-web/tests/*.test.mjs
+```
 
 ## 运行脚本更新
 

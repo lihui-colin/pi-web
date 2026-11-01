@@ -28,7 +28,7 @@ project_root="$(cd "$(dirname "$script_file")/.." && pwd)"
 config_file="$project_root/data/pi-web.conf"
 # Service settings come only from the local config, not the calling shell.
 unset PI_WEB_PORT PI_WEB_HOST PI_WEB_PASSWORD PI_WEB_DATA_DIR PI_WEB_RUN_DIR PI_WEB_VOICE_INPUT_ENABLED \
-    PI_WEB_SESSIOND_SOCKET PI_WEB_SESSIOND_PORT PI_WEB_SESSIOND_URL
+    PI_WEB_SESSIOND_SOCKET PI_WEB_SESSIOND_PORT PI_WEB_SESSIOND_URL PI_WEB_PI_PACKAGE_DIR
 if [[ -f "$config_file" ]]; then
     set -a
     source "$config_file"
@@ -248,6 +248,11 @@ is_instance_process() {
     [[ $matched -eq 1 ]] || return 1
     while IFS= read -r -d '' entry; do
         [[ "$entry" == "PI_WEB_RUN_DIR=$log_dir" ]] && return 0
+        # A live process may still name the compatibility symlink after migration.
+        if [[ "$entry" == PI_WEB_RUN_DIR=/* && -d "$log_dir" &&
+              "${entry#PI_WEB_RUN_DIR=}" -ef "$log_dir" ]]; then
+            return 0
+        fi
     done < "/proc/$pid/environ"
     return 1
 }

@@ -1,11 +1,13 @@
 # Codex 插件使用说明
 
+本文的 `scripts/`、`data/` 等部署路径以 Pi Web 根目录（仓库内的 `pi-web/`）为基准；从 Git 仓库根目录操作前先执行 `cd pi-web`。工作区文件及上传目录则以所选工作区为基准，不随部署目录约定改变。迁移后的旧路径兼容要求见 [目录迁移说明](../README.md#目录迁移与兼容链接)。
+
 Codex 作为独立的 `pi-web.codex` 插件运行，入口位于 Workspace 工具栏的 Terminal 之后。命令面板也可搜索 **Go to Codex**。插件通过宿主工作区接口通信，沿用机器路由、鉴权和布局；Codex 会话与 Pi 聊天独立。
 
 ## 安装和启动
 
 1. 在工作区所在机器安装 Codex CLI，并运行 `codex login` 完成登录。确保启动 `pi-web-sessiond` 的环境可以找到 `codex`，可先执行 `codex --version`。
-2. 在本补丁仓库执行 `sh scripts/sync.sh`，然后执行 `sh scripts/install.sh`。
+2. 在本补丁仓库根目录先执行 `cd pi-web`（已在 Pi Web 根目录则跳过），执行 `sh scripts/sync.sh`，然后执行 `sh scripts/install.sh`。
 3. 手动重启 sessiond 和 Web 服务。例如使用本仓库管理脚本的实例执行：
 
    ```bash

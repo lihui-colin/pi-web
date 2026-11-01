@@ -1,10 +1,12 @@
-/data
 /.serena
-/pi-web.conf
-/.pi-web
 /.codegraph
+/pi-web/data/
+/pi-web/.pi-web/
+/pi-web/pi-web.conf
+/pi-web/.pnpm-store/
 
 # Paseo instance state and installed dependencies
 /paseo-ws/data/
+/paseo-ws/log/
 /paseo-ws/runtime/
 /paseo-ws/.npm-cache/

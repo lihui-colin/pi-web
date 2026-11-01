@@ -19,14 +19,14 @@ function fixture({ conflict = false, failure = '', agent = true, agentVersion = 
   const root = mkdtempSync(join(tmpdir(), 'pi-web patch test '));
   roots.push(root);
   const upstream = join(root, 'upstream');
-  const source = join(root, 'patch-source');
+  const source = join(root, 'patch-source', 'pi-web');
   const origin = join(root, 'origin.git');
   const bin = join(root, 'bin');
   const releases = join(source, 'data/pi-web-releases');
   const log = join(root, 'calls.log');
   const prefix = join(root, 'global');
   const proxyLog = join(root, 'proxy-env.log');
-  for (const dir of [upstream, source, bin]) mkdirSync(dir);
+  for (const dir of [upstream, source, bin]) mkdirSync(dir, { recursive: true });
   writeFileSync(log, '');
   git(upstream, 'init', '-b', 'main');
   const original = Array.from({ length: 20 }, (_, i) => `line ${i}`).join('\n') + '\n';
@@ -45,7 +45,7 @@ function fixture({ conflict = false, failure = '', agent = true, agentVersion = 
   writeFileSync(join(upstream, 'app.txt'), original.replace(conflict ? 'line 0\n' : 'line 19\n', 'new upstream\n'));
   git(upstream, 'commit', '-am', 'upstream update');
   git(root, 'init', '--bare', origin);
-  git(source, 'init', '-b', 'terminal-patch');
+  git(dirname(source), 'init', '-b', 'terminal-patch');
   mkdirSync(join(source, 'patches'));
   writeFileSync(join(source, 'patches', '0001-layout.patch'), patch);
   writeFileSync(join(source, 'patches', 'base-commit'), (conflict ? git(upstream, 'rev-parse', 'HEAD') : baseCommit) + '\n');
@@ -80,7 +80,7 @@ if [ "$1" = install ] || [ "$1" = prefix ]; then
 fi
 `);
   writeFileSync(join(bin, 'node'), `#!/bin/sh
-if [ "$1" = '-e' ]; then exec "$REAL_NODE" "$@"; fi
+if [ "$1" = '-e' ] || [ "$1" = '--input-type=commonjs' ]; then exec "$REAL_NODE" "$@"; fi
 if [ "$1" = '--version' ]; then echo v22.19.0; exit 0; fi
 if [ "$1" = '--no-experimental-webstorage' ]; then exit 0; fi
 printf 'node %s\n' "$*" >> "$TEST_LOG"
@@ -92,7 +92,7 @@ printf 'installed %s\n' "$PWD" >> "$TEST_LOG"
   const run = (script = 'install.sh', args = [], runFailure = failure) => spawnSync('sh', [join(source, 'scripts', script), ...args], {
     cwd: root, encoding: 'utf8', env: { ...process.env, PATH: `${bin}:/usr/bin:/bin`, TEST_BIN: bin, PI_VERSION: agentVersion, PI_WEB_UPSTREAM_URL: upstream, PI_WEB_INSTALL_ROOT: '', PI_WEB_TEST_MAX_WORKERS: maxWorkers, PI_WEB_TEST_TIMEOUT_MS: testTimeout, TEST_LOG: log, TEST_FAILURE: runFailure, TEST_PREFIX: prefix, REAL_NODE: process.execPath, REAL_NPM: realpathSync(npm), TEST_PROXY_LOG: proxyLog, ...proxyEnv },
   });
-  return { source, upstream, origin, log, releases, prefix, run, baseCommit, proxyLog };
+  return { source, upstream, origin, log, releases, prefix, run, baseCommit, proxyLog, bin };
 }
 
 function prepareLocalMain(f) {
@@ -497,7 +497,7 @@ test('sync and install reuse the cached baseline without fetching upstream', () 
   assert.match(first.stderr, /Fetching pinned upstream commit/);
   const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
   // Fail any Git command referencing the upstream; local cache fetches still work.
-  writeFileSync(join(f.source, '../bin/git'), `#!/bin/sh
+  writeFileSync(join(f.bin, 'git'), `#!/bin/sh
 for arg do
   if [ "$arg" = "$PI_WEB_UPSTREAM_URL" ]; then echo 'Unexpected upstream access' >&2; exit 97; fi
 done

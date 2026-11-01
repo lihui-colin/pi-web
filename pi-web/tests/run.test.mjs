@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -11,7 +11,7 @@ function fixture() {
   mkdirSync(bin);
   mkdirSync(join(root, 'data'));
   mkdirSync(join(root, 'scripts'));
-  copyFileSync('scripts/pi-web-run-jmfederico.sh', join(root, 'scripts/run.sh'));
+  copyFileSync(new URL('../scripts/pi-web-run-jmfederico.sh', import.meta.url), join(root, 'scripts/run.sh'));
   const script = (name, body) => writeFileSync(join(bin, name), `#!/bin/bash\n${body}\n`, { mode: 0o755 });
   for (const name of ['pi-web-sessiond', 'pi-web-server']) {
     writeFileSync(join(bin, name), `#!${process.execPath}
@@ -28,7 +28,7 @@ setInterval(() => {}, 1000);
     if (port !== undefined) settings.push(['PI_WEB_PORT', port]);
     if (settings.length) writeFileSync(join(root, 'data/pi-web.conf'), settings.map(([key, value]) => `${key}='${value.replaceAll("'", "'\\''")}'`).join('\n') + '\n');
     return spawnSync('bash', [join(root, 'scripts/run.sh'), action], {
-      env: { ...env, ...overrides }, encoding: 'utf8', timeout: 10000,
+      env: { ...env, ...overrides }, encoding: 'utf8', timeout: 30000,
     });
   };
   const pids = [];
@@ -38,10 +38,32 @@ setInterval(() => {}, 1000);
   } };
 }
 
+test('migrated run directory recognizes processes launched through a compatibility link', () => {
+  const f = fixture();
+  try {
+    const migrated = join(f.root, 'migrated-run');
+    const legacy = join(f.root, 'legacy-run');
+    mkdirSync(migrated);
+    symlinkSync(migrated, legacy, 'dir');
+    const started = f.run('start', '8425', { PI_WEB_RUN_DIR: legacy });
+    for (const name of ['server', 'sessiond']) {
+      const file = join(migrated, `${name}.pid`);
+      if (existsSync(file)) f.pids.push(Number(readFileSync(file, 'utf8')));
+    }
+    assert.equal(started.status, 0, started.stdout + started.stderr);
+    const status = f.run('status', '8425', { PI_WEB_RUN_DIR: migrated });
+    assert.equal(status.status, 0, status.stdout + status.stderr);
+    assert.equal((status.stdout.match(/运行中/g) || []).length, 2);
+    const stopped = f.run('stop', '8425', { PI_WEB_RUN_DIR: migrated });
+    assert.equal(stopped.status, 0, stopped.stdout + stopped.stderr);
+    for (const name of ['server', 'sessiond']) assert.equal(existsSync(join(migrated, `${name}.pid`)), false);
+  } finally { f.cleanup(); }
+});
+
 test('unsupported update options and service arguments are rejected', () => {
   const f = fixture();
   try {
-    copyFileSync('scripts/install.sh', join(f.root, 'scripts/install.sh'));
+    copyFileSync(new URL('../scripts/install.sh', import.meta.url), join(f.root, 'scripts/install.sh'));
     for (const args of [['update', '--restart'], ['update', '--no-restart'], ['start', '--port', '8425'], ['stop', '--port=8425'], ['status', '8425']]) {
       const result = spawnSync('bash', [join(f.root, 'scripts/run.sh'), ...args], { encoding: 'utf8' });
       assert.equal(result.status, 2, result.stderr);

@@ -15,7 +15,7 @@ install (default): Run sync.sh to reuse or fetch patches/base-commit and apply p
   Installs Pi Agent if missing; preserves an existing Agent.
   Does not manage services. No options accepted.
 
-PI_WEB_INSTALL_ROOT  Local release parent (default: <repo>/data/pi-web-releases)
+PI_WEB_INSTALL_ROOT  Local release parent (default: <pi-web>/data/pi-web-releases)
 PI_VERSION          Pi Agent bootstrap target for install (default: latest)
 PI_WEB_TEST_MAX_WORKERS  Maximum parallel test workers (default: 4)
 PI_WEB_TEST_TIMEOUT_MS   Per-test timeout in milliseconds (default: 30000)
@@ -62,6 +62,15 @@ install_local() (
       NO_PROXY="$test_no_proxy" no_proxy="$test_no_proxy" npm test "${test_args[@]}"
     fi
     npm run build
+    # TypeScript recreates bin entries without execute bits. Explicitly restore
+    # them even when npm reuses an existing global link to this release.
+    node --input-type=commonjs -e '
+      const fs = require("node:fs");
+      const { bin } = JSON.parse(fs.readFileSync("package.json", "utf8"));
+      for (const file of Object.values(bin)) {
+        fs.chmodSync(file, fs.statSync(file).mode | 0o111);
+      }
+    '
 
     # Only the install action bootstraps Agent; update --web-only must stay web-only.
     if [[ "${1:-local}" == local ]]; then
