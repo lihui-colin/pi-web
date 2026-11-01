@@ -15,10 +15,11 @@ Nginx 从固定版本源码构建，校验 SHA-256 并保留许可证，已有�
 安装脚本会自动从 `config.json.example` 初始化缺失的官方完整配置 `data/.paseo/config.json`（目录权限 `700`、文件权限 `600`）；已有文件保持不变。对于此前已安装但缺少配置的实例，首次 `start` 确认服务已停止后也会自动补建，无需重新安装或手工复制。符号链接配置会被拒绝，避免覆盖访问配置或其他文件。
 
 - `data/paseo.conf`：只包含访问地址 `ip` 和 `port`，默认 `10.30.0.25:25227`。
-- `data/.paseo/`：官方数据目录（`PASEO_HOME`），包含完整配置 `config.json`、会话、认证、模型和 daemon 日志。代理 CLI 需另行安装并认证；任务工作目录由会话指定。
-- `data/tls/<ip>/`：独立维护的 `fullchain.pem` 与 `privkey.pem`，IPv6 目录名将冒号替换为下划线。
-- `data/nginx.conf`：由 `nginx.conf.template` 生成；Nginx 日志、PID 和临时文件在 `data/nginx/`。
-- `data/`、`runtime/` 和 `.npm-cache/` 不纳入 Git；运行和安装不依赖其他服务目录。
+- `data/.paseo/`：官方数据目录（`PASEO_HOME`），包含完整配置 `config.json`、会话、认证和模型。代理 CLI 需另行安装并认证；任务工作目录由会话指定。
+- `log/daemon.log`：后端日志及轮转文件所在目录，通过官方 `log.file.path` 配置。停止后的下一次 `start` 会保留旧主日志到 `log/legacy-*/daemon.log`，并将旧位置 `data/.paseo/daemon.log` 链接到新日志，以兼容上游固定写入旧路径的退出记录；已有历史轮转文件不自动移动。运行中的后端不迁移日志。
+- `data/tls/<ip>/`：从 `ds-harness/data/tls/<ip>/` 复制的 `fullchain.pem` 与 `privkey.pem`，IPv6 目录名将冒号替换为下划线。HTTPS 启动时若文件缺失、为空或不可读，立即退出并提示复制，不自动启动 DSH 或生成证书。
+- `data/nginx.conf`：由 `nginx.conf.template` 生成；Nginx PID 和临时文件在 `data/nginx/`，错误日志在 `log/nginx/error.log`。Paseo 与 DSH 各自使用独立的 Nginx 二进制、配置、进程、PID 和日志目录，分别启停。
+- `data/`、`log/`、`runtime/` 和 `.npm-cache/` 不纳入 Git。
 
 ## 服务管理
 
@@ -33,7 +34,7 @@ bash paseo-ws/paseo_web_run.sh stop
 
 默认访问 `https://10.30.0.25:25227/`；无代理模式使用 HTTP。切换模式先停止再启动。停止服务会断开客户端，重载代理可能触发 WebSocket 重连，操作前检查活跃会话和运行任务；依赖本服务的会话应由独立维护进程完成启停与就绪检查。
 
-旧数据已迁入 `data/.paseo/`，迁移工具和临时诊断已移除。故障时检查 `data/nginx/error.log`、`data/.paseo/daemon.log`；勿重启其他服务。
+旧数据已迁入 `data/.paseo/`，迁移工具和临时诊断已移除。故障时检查 `log/nginx/error.log`、`log/daemon.log`；修改日志配置后需在允许中断会话时先 `stop` 再 `start` 才会全部生效，勿重启其他服务。
 
 ## DSH 插件模型目录
 

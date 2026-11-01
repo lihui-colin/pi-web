@@ -20,6 +20,8 @@ import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from dsh_runtime import redact_tokens
+
 
 def require_local_nginx():
     prefix = Path(__file__).resolve().parent / "data/.local/nginx"
@@ -295,8 +297,7 @@ def main():
         config.chmod(0o600)
 
         def diagnostic(line):
-            line = line.replace(launch_token, "[REDACTED]")
-            return re.sub(r"([?&]token=)[^&\s\"']+", r"\1[REDACTED]", line)
+            return redact_tokens(line.replace(launch_token, "[REDACTED]"))
 
         command = [nginx, "-p", str(runtime) + "/", "-c", str(config), "-e", "stderr"]
         try:

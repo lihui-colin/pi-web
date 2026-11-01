@@ -11,6 +11,10 @@ function fixture(t, withOfficialConfig = true) {
   const data = path.join(root, 'data');
   fs.mkdirSync(path.join(data, '.paseo'), { recursive: true });
   fs.writeFileSync(path.join(data, 'paseo.conf'), '{"ip":"127.0.0.1","port":31415}');
+  const tls = path.join(data, 'tls', '127.0.0.1');
+  fs.mkdirSync(tls, { recursive: true });
+  // Nginx is mocked here; certificate format validation belongs to nginx -t.
+  for (const file of ['fullchain.pem', 'privkey.pem']) fs.writeFileSync(path.join(tls, file), 'test fixture');
   if (withOfficialConfig) fs.copyFileSync(path.join(__dirname, 'config.json.example'), path.join(data, '.paseo/config.json'));
   for (const file of ['paseo_web_run.sh', 'node-runtime.sh', 'paseo-config.cjs', 'nginx.conf.template', 'config.json.example']) {
     fs.copyFileSync(path.join(__dirname, file), path.join(root, file));
@@ -50,6 +54,24 @@ if (command === 'paseo') {
   };
 }
 
+test('HTTPS start rejects missing or empty TLS files before calling services', t => {
+  for (const file of ['fullchain.pem', 'privkey.pem']) {
+    for (const missing of [true, false]) {
+      const service = fixture(t);
+      const target = path.join(service.data, 'tls', '127.0.0.1', file);
+      if (missing) fs.unlinkSync(target);
+      else fs.writeFileSync(target, '');
+      const result = service.run('start');
+      assert.equal(result.status, 1, result.stderr);
+      assert.match(result.stderr, /启动已取消/);
+      assert.ok(result.stderr.includes(path.join(path.dirname(service.root), 'ds-harness/data/tls/127.0.0.1/')));
+      assert.ok(result.stderr.includes(path.join(service.data, 'tls', '127.0.0.1')));
+      assert.ok(!fs.existsSync(path.join(service.root, 'calls')));
+      assert.ok(!fs.existsSync(path.join(service.data, 'nginx.conf')));
+    }
+  }
+});
+
 test('first start initializes missing official configuration in both modes', t => {
   for (const mode of ['--proxy', '--no-proxy']) {
     const service = fixture(t, false);
@@ -74,11 +96,20 @@ test('HTTPS lifecycle uses the official home, local certificates and proxy reloa
   assert.ok(curl.args.includes(`${service.data}/tls/127.0.0.1/fullchain.pem`));
   assert.ok(curl.args.includes('https://127.0.0.1:31415/api/health'));
   assert.ok(calls.some(call => call.command === 'nginx' && call.args.includes('reload')));
+  for (const call of calls.filter(call => call.command === 'nginx')) {
+    assert.equal(call.args[call.args.indexOf('-p') + 1], `${service.data}/nginx/`);
+    assert.equal(call.args[call.args.indexOf('-e') + 1], `${service.root}/log/nginx/error.log`);
+  }
+  const config = JSON.parse(fs.readFileSync(path.join(service.data, '.paseo/config.json')));
+  assert.equal(path.resolve(service.data, '.paseo', config.log.file.path), `${service.root}/log/daemon.log`);
   assert.ok(!fs.existsSync(path.join(service.root, 'state.json')));
 });
 
 test('HTTP mode skips Nginx and uses the configured direct listener', t => {
   const service = fixture(t);
+  for (const file of ['fullchain.pem', 'privkey.pem']) {
+    fs.unlinkSync(path.join(service.data, 'tls', '127.0.0.1', file));
+  }
   const result = service.run('start', '--no-proxy');
   assert.equal(result.status, 0, result.stderr);
   assert.equal(JSON.parse(fs.readFileSync(path.join(service.root, 'state.json'))).listen, '0.0.0.0:31415');

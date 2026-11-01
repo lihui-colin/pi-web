@@ -24,6 +24,37 @@ NGINX = local_nginx()
 
 
 class LauncherTests(unittest.TestCase):
+    def test_stop_aborts_before_dependencies_or_token_cleanup_on_failure(self):
+        services = ['dsh-token-proxy', 'dsh-web', 'magpie-serve']
+        cases = [(service, 1, index + 1) for index, service in enumerate(services)]
+        cases += [('', 0, 3), ('', 2, 3), ('', 1, 3)]
+        for failed, identity_status, count in cases:
+            with self.subTest(failed=failed, identity=identity_status), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                copy_test_launcher(root)
+                config = root / 'data/dsh.conf'
+                config.parent.mkdir(exist_ok=True)
+                config.write_text('test configuration')
+                capture = root / 'capture'
+                capture.write_text('test captured state')
+                wrapper = '''source "$1"
+failed=$2 identity_status=$3
+token_capture_file="$script_dir/capture"
+prepare_runtime() { :; }
+stop_service() { printf '%s\\n' "$1"; [[ "$1" != "$failed" ]]; }
+service_pid() { return "$identity_status"; }
+write_token() { printf 'clear-token\\n'; }
+stop
+'''
+                result = subprocess.run(['bash', '-c', wrapper, 'test', str(root / 'dsh_web_run.sh'),
+                                         failed, str(identity_status)], capture_output=True, text=True, timeout=5)
+                success = not failed and identity_status == 1
+                expected = services[:count] + (['clear-token'] if success else [])
+                self.assertEqual(result.stdout.splitlines(), expected, result.stderr)
+                self.assertEqual(result.returncode == 0, success, result.stderr)
+                self.assertEqual(capture.exists(), not success)
+                self.assertEqual(config.read_text(), 'test configuration')
+
     def test_main_serializes_operations_and_releases_lock_after_failure(self):
         for held, contender in [('start', 'start'), ('start', 'stop'), ('stop', 'start')]:
             with self.subTest(held=held, contender=contender), tempfile.TemporaryDirectory(

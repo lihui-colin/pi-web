@@ -31,7 +31,7 @@ def redact_tokens(line):
     def replace(match):
         return (match[1] + match[2] + '=[REDACTED]' if unquote_plus(match[2]) == 'token'
                 else match[0])
-    return re.sub(r'([?&])([^&\s=]+)=([^&\s]+)', replace, line)
+    return re.sub(r"([?&])([^&\s=]+)=([^&\s\"']+)", replace, line)
 
 
 def snapshot(pid):

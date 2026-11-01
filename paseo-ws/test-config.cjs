@@ -6,8 +6,10 @@ const path = require('node:path');
 const { endpoint, initialize, prepare, renderProxy } = require('./paseo-config.cjs');
 
 function fixture(t, config = { ip: '10.30.0.25', port: 25227 }, withOfficialConfig = true) {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'paseo-config-'));
-  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'paseo-config-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const home = path.join(root, 'data');
+  fs.mkdirSync(home);
   fs.writeFileSync(path.join(home, 'paseo.conf'), JSON.stringify(config));
   if (!withOfficialConfig) return home;
   fs.mkdirSync(path.join(home, '.paseo'), { mode: 0o700 });
@@ -95,6 +97,37 @@ test('prepare preserves provider settings and the two-field user configuration',
   assert.equal(fs.statSync(path.join(home, '.paseo', 'config.json')).mode & 0o777, 0o600);
 });
 
+test('stopped instances preserve old logs and redirect lifecycle writes without changing rotation', t => {
+  const home = fixture(t);
+  const file = path.join(home, '.paseo/config.json');
+  const config = JSON.parse(fs.readFileSync(file));
+  config.log = { level: 'debug', file: { path: 'daemon.log', rotate: { maxFiles: 7 } } };
+  fs.writeFileSync(file, JSON.stringify(config));
+  const legacy = path.join(home, '.paseo/daemon.log');
+  fs.writeFileSync(legacy, 'old log\n');
+  const logs = path.resolve(home, '..', 'log');
+  fs.mkdirSync(logs);
+  const current = path.join(logs, 'daemon.log');
+  fs.writeFileSync(current, 'new log\n');
+  prepare(home, 'proxy', { localDaemon: 'running', listen: '127.0.0.1:25226' });
+  assert.ok(!fs.lstatSync(legacy).isSymbolicLink());
+  assert.equal(JSON.parse(fs.readFileSync(file)).log.file.path, 'daemon.log');
+  prepare(home, 'proxy', { localDaemon: 'stopped' });
+  const after = JSON.parse(fs.readFileSync(file));
+  assert.equal(path.resolve(path.dirname(file), after.log.file.path), current);
+  assert.equal(after.log.level, 'debug');
+  assert.equal(after.log.file.rotate.maxFiles, 7);
+  assert.ok(fs.lstatSync(legacy).isSymbolicLink());
+  assert.equal(fs.readFileSync(current, 'utf8'), 'new log\n');
+  const archives = fs.readdirSync(logs).filter(name => name.startsWith('legacy-'));
+  assert.equal(archives.length, 1);
+  assert.equal(fs.readFileSync(path.join(logs, archives[0], 'daemon.log'), 'utf8'), 'old log\n');
+  fs.appendFileSync(legacy, 'exit record\n');
+  assert.equal(fs.readFileSync(current, 'utf8'), 'new log\nexit record\n');
+  prepare(home, 'proxy', { localDaemon: 'stopped' });
+  assert.equal(fs.readdirSync(logs).filter(name => name.startsWith('legacy-')).length, 1);
+});
+
 test('running mode mismatch and unknown state cannot rewrite official configuration', t => {
   const home = fixture(t);
   const before = fs.readFileSync(path.join(home, '.paseo', 'config.json'), 'utf8');
@@ -110,5 +143,7 @@ test('proxy configuration uses local certificates, configured port, and intact N
   assert.ok(text.includes('server_name 127.0.0.2;'));
   assert.ok(text.includes(`${home}/tls/127.0.0.2/fullchain.pem`));
   assert.ok(text.includes('$http_upgrade'));
+  assert.ok(text.includes(`error_log ${path.resolve(home, '..', 'log')}/nginx/error.log warn;`));
+  assert.ok(text.includes(`pid ${home}/nginx/nginx.pid;`));
   assert.ok(!text.includes('@PASEO_'));
 });

@@ -1,5 +1,8 @@
 {
   "version": 1,
+  "log": {
+    "file": { "path": "../../log/daemon.log" }
+  },
   "daemon": {
     "listen": "127.0.0.1:25226",
     "hostnames": ["localhost"],

@@ -191,22 +191,22 @@ start() {
 }
 
 stop() {
-    local service result=0 status
+    local service status
     prepare_runtime || return 1
+    # Dependencies must stay alive when a consumer cannot be safely stopped.
     for service in dsh-token-proxy dsh-web magpie-serve; do
-        stop_service "$service" || result=1
+        stop_service "$service" || return 1
     done
-    if [[ "$result" == 0 && -f "$config_file" ]]; then
+    if [[ -f "$config_file" ]]; then
         if service_pid dsh-web >/dev/null; then
-            result=1
+            return 1
         else
             status=$?
             [[ "$status" == 1 ]] || return "$status"
-            write_token '' || return 1
-            rm -f "$token_capture_file"
         fi
+        write_token '' || return 1
+        rm -f "$token_capture_file"
     fi
-    return "$result"
 }
 
 main() (

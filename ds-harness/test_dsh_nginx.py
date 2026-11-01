@@ -1,6 +1,7 @@
 """Isolated integration tests for the generated Nginx HTTPS proxy."""
 
 import http.client
+import io
 import os
 import shutil
 import signal
@@ -33,6 +34,30 @@ NGINX = local_nginx()
 
 
 class NginxBinaryTests(unittest.TestCase):
+    def test_configuration_diagnostics_redact_tokens_and_preserve_url_context(self):
+        from dsh_nginx import main
+        with tempfile.TemporaryDirectory(prefix='dsh-nginx-diagnostic-') as temporary:
+            root = Path(temporary)
+            config = root / 'dsh.conf'
+            config.write_text("dsh_token='launch-test-secret'\n")
+            argv = ['dsh_nginx.py', '--listen-host', '127.0.0.1', '--listen-port', '34567',
+                    '--upstream-host', '127.0.0.1', '--upstream-port', '34568',
+                    '--public-host', 'localhost', '--config', str(config),
+                    '--tls-cert', str(root / 'cert'), '--tls-key', str(root / 'key')]
+            message = 'launch-test-secret "https://localhost/?token=plain-secret&x=keep"\n'
+            message += '"https://localhost/?%74oken=encoded-secret"\n'
+            errors = io.StringIO()
+            with mock.patch('sys.argv', argv), mock.patch('sys.stderr', errors), \
+                    mock.patch('dsh_nginx.require_local_nginx', return_value='/mock/nginx'), \
+                    mock.patch('dsh_nginx.subprocess.run', return_value=SimpleNamespace(returncode=1, stderr=message)):
+                self.assertEqual(main(), 1)
+            text = errors.getvalue()
+            for secret in ('launch-test-secret', 'plain-secret', 'encoded-secret'):
+                self.assertNotIn(secret, text)
+            self.assertIn('?token=[REDACTED]&x=keep"', text)
+            self.assertIn('?%74oken=[REDACTED]"', text)
+            self.assertFalse((root / 'log/.nginx-34567/nginx.conf').exists())
+
     def test_privileged_binary_is_rejected_before_execution(self):
         with tempfile.TemporaryDirectory(prefix="dsh-nginx-privileged-") as temporary:
             root = Path(temporary)
@@ -58,7 +83,8 @@ class NginxBinaryTests(unittest.TestCase):
             with self.subTest(component=component), tempfile.TemporaryDirectory(prefix="dsh-nginx-link-") as temporary:
                 root = Path(temporary) / "project"
                 root.mkdir()
-                shutil.copy2(Path(__file__).with_name("dsh_nginx.py"), root / "dsh_nginx.py")
+                for name in ("dsh_nginx.py", "dsh_runtime.py"):
+                    shutil.copy2(Path(__file__).with_name(name), root / name)
                 outside = Path(temporary) / "outside"
                 binary = outside / ".local/nginx/sbin/nginx"
                 binary.parent.mkdir(parents=True)
@@ -82,7 +108,8 @@ class NginxBinaryTests(unittest.TestCase):
     def test_symlink_to_binary_inside_installation_remains_local(self):
         with tempfile.TemporaryDirectory(prefix="dsh-nginx-local-link-") as temporary:
             root = Path(temporary)
-            shutil.copy2(Path(__file__).with_name("dsh_nginx.py"), root / "dsh_nginx.py")
+            for name in ("dsh_nginx.py", "dsh_runtime.py"):
+                shutil.copy2(Path(__file__).with_name(name), root / name)
             binary = root / "data/.local/nginx/sbin/nginx-versioned"
             binary.parent.mkdir(parents=True)
             binary.write_text("#!/bin/sh\nprintf 'nginx/1.30.0' >&2\n")
@@ -99,7 +126,8 @@ class NginxBinaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="dsh-nginx-binary-") as temporary:
             root = Path(temporary)
             script = root / "dsh_nginx.py"
-            shutil.copy2(Path(__file__).with_name("dsh_nginx.py"), script)
+            for name in ("dsh_nginx.py", "dsh_runtime.py"):
+                shutil.copy2(Path(__file__).with_name(name), root / name)
             binaries = root / "bin"
             binaries.mkdir()
             fallback = binaries / "nginx"

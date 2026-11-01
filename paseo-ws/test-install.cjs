@@ -5,6 +5,41 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
+test('access initialization handles piped input and never replaces existing files', t => {
+  const cases = [
+    ['\n\n', { ip: '10.30.0.25', port: 25227 }],
+    ['  ::1  \n 31415 \n', { ip: '::1', port: 31415 }],
+    ['invalid\n127.0.0.1\n25226\n65536\n1e3\n31415\n', { ip: '127.0.0.1', port: 31415 }],
+    ['', null], ['127.0.0.1\n', null],
+  ];
+  for (const [input, expected] of cases) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'paseo-access-'));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const data = path.join(root, 'data');
+    const run = text => spawnSync(process.execPath, [path.join(__dirname, 'paseo-config.cjs'), 'access', data], {
+      input: text, encoding: 'utf8', timeout: 5000,
+    });
+    const file = path.join(data, 'paseo.conf');
+    const result = run(input);
+    assert.equal(result.status, expected ? 0 : 1, result.stderr);
+    if (!expected) {
+      assert.match(result.stderr, /配置未创建/);
+      assert.ok(!fs.existsSync(file));
+      continue;
+    }
+    assert.deepEqual(JSON.parse(fs.readFileSync(file)), expected);
+    assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+    fs.writeFileSync(file, 'existing configuration');
+    assert.equal(run('').status, 0);
+    assert.equal(fs.readFileSync(file, 'utf8'), 'existing configuration');
+    fs.unlinkSync(file);
+    fs.symlinkSync(path.join(root, 'missing-target'), file);
+    assert.equal(run('').status, 0);
+    assert.ok(fs.lstatSync(file).isSymbolicLink());
+    assert.ok(!fs.existsSync(path.join(root, 'missing-target')));
+  }
+});
+
 test('installer creates both configurations and preserves custom configuration on reinstall', t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'paseo-install-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

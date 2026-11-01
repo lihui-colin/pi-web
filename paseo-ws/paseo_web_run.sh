@@ -4,6 +4,7 @@ umask 077
 
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 DATA="$ROOT/data"
+LOG="$ROOT/log"
 export PASEO_HOME="$DATA/.paseo"
 PASEO="$ROOT/runtime/bin/paseo"
 
@@ -39,7 +40,7 @@ fi
 NGINX="$ROOT/runtime/nginx/sbin/nginx"
 NGINX_CONF="$DATA/nginx.conf"
 NGINX_RUN="$DATA/nginx"
-mkdir -p "$NGINX_RUN"
+mkdir -p "$NGINX_RUN" "$LOG/nginx"
 exec 9>"$DATA/service.lock"
 flock -x 9
 
@@ -54,7 +55,7 @@ nginx_running() {
   [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null
 }
 nginx_cmd() {
-  "$NGINX" -p "$NGINX_RUN/" -c "$NGINX_CONF" -e "$NGINX_RUN/error.log" "$@" 9>&-
+  "$NGINX" -p "$NGINX_RUN/" -c "$NGINX_CONF" -e "$LOG/nginx/error.log" "$@" 9>&-
 }
 case "$1" in
   start)
@@ -63,6 +64,17 @@ case "$1" in
     URL="${ENDPOINT_FIELDS[1]}"
     CA_CERT="${ENDPOINT_FIELDS[2]}"
     if [[ "$MODE" == proxy ]]; then
+      TLS_DIR="${CA_CERT%/*}"
+      TLS_KEY="$TLS_DIR/privkey.pem"
+      if [[ ! -f "$CA_CERT" || ! -r "$CA_CERT" || ! -s "$CA_CERT" ||
+            ! -f "$TLS_KEY" || ! -r "$TLS_KEY" || ! -s "$TLS_KEY" ]]; then
+        printf 'Paseo HTTPS 证书缺失、为空或不可读，启动已取消。\n' >&2
+        printf '请从 ds-harness/data 下对应的证书目录复制 fullchain.pem 和 privkey.pem：\n' >&2
+        printf '  来源：%s/ds-harness/data/tls/%s/\n' "${ROOT%/*}" "${TLS_DIR##*/}" >&2
+        printf '  目标：%s/\n' "$TLS_DIR" >&2
+        printf '复制完成后重新执行 start。\n' >&2
+        exit 1
+      fi
       node "$ROOT/paseo-config.cjs" proxy "$DATA"
       [[ -x "$NGINX" ]] || { printf '请先运行 install.sh 安装 Nginx。\n' >&2; exit 1; }
       mkdir -p "$NGINX_RUN"/{body,proxy,fastcgi,uwsgi,scgi}
