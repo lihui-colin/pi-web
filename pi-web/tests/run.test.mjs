@@ -60,6 +60,26 @@ test('migrated run directory recognizes processes launched through a compatibili
   } finally { f.cleanup(); }
 });
 
+test('relative state, run and socket paths resolve against the component directory', () => {
+  const f = fixture();
+  try {
+    const overrides = { PI_WEB_DATA_DIR: 'data/custom-state', PI_WEB_RUN_DIR: 'data/custom-run', PI_WEB_SESSIOND_SOCKET: 'data/custom.sock', PI_WEB_LOG_DIR: 'log/8425' };
+    const started = f.run('start', '8425', overrides);
+    for (const name of ['server', 'sessiond']) {
+      const file = join(f.root, overrides.PI_WEB_RUN_DIR, `${name}.pid`);
+      if (existsSync(file)) f.pids.push(Number(readFileSync(file, 'utf8')));
+    }
+    assert.equal(started.status, 0, started.stdout + started.stderr);
+    for (const name of ['server', 'sessiond']) {
+      assert.equal(existsSync(join(f.root, overrides.PI_WEB_RUN_DIR, `${name}.log`)), false);
+      assert.deepEqual(readFileSync(join(f.root, overrides.PI_WEB_LOG_DIR, `${name}.log`), 'utf8').trim().split('\n'),
+        [overrides.PI_WEB_DATA_DIR, overrides.PI_WEB_SESSIOND_SOCKET, overrides.PI_WEB_RUN_DIR].map(path => join(f.root, path)));
+    }
+    assert.equal(f.run('status', '8425', overrides).status, 0);
+    assert.equal(f.run('stop', '8425', overrides).status, 0);
+  } finally { f.cleanup(); }
+});
+
 test('unsupported update options and service arguments are rejected', () => {
   const f = fixture();
   try {

@@ -1,6 +1,7 @@
 /.serena
 /.codegraph
 /pi-web/data/
+/pi-web/log/
 /pi-web/.pi-web/
 /pi-web/pi-web.conf
 /pi-web/.pnpm-store/

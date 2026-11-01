@@ -27,7 +27,7 @@ script_file="$(readlink -f "${BASH_SOURCE[0]}")"
 project_root="$(cd "$(dirname "$script_file")/.." && pwd)"
 config_file="$project_root/data/pi-web.conf"
 # Service settings come only from the local config, not the calling shell.
-unset PI_WEB_PORT PI_WEB_HOST PI_WEB_PASSWORD PI_WEB_DATA_DIR PI_WEB_RUN_DIR PI_WEB_VOICE_INPUT_ENABLED \
+unset PI_WEB_PORT PI_WEB_HOST PI_WEB_PASSWORD PI_WEB_DATA_DIR PI_WEB_RUN_DIR PI_WEB_LOG_DIR PI_WEB_VOICE_INPUT_ENABLED \
     PI_WEB_SESSIOND_SOCKET PI_WEB_SESSIOND_PORT PI_WEB_SESSIOND_URL PI_WEB_PI_PACKAGE_DIR
 if [[ -f "$config_file" ]]; then
     set -a
@@ -69,8 +69,10 @@ PI WEB (jmfederico) 手动运行管理脚本
   PI_WEB_PASSWORD  设置后（若支持）开启访问保护
   PI_WEB_VOICE_INPUT_ENABLED  语音输入入口开关，true/false，默认 false
   PI_WEB_DATA_DIR  状态目录，默认 data/pi-web/<port>/state
-  PI_WEB_RUN_DIR   日志和 PID 目录，默认 data/pi-web/<port>
+  PI_WEB_RUN_DIR   PID 目录，默认 data/pi-web/<port>
+  PI_WEB_LOG_DIR   日志目录，模板为 log/<port>；未配置时沿用 PID 目录
   PI_WEB_SESSIOND_SOCKET  默认 <状态目录>/sessiond.sock
+  上述路径支持相对路径，以 pi-web/ 组件目录为基准，不依赖当前工作目录。
   HTTP_PROXY / HTTPS_PROXY / NO_PROXY  代理环境变量，传给服务及 Codex app-server；未填写时继承启动环境
   PI_WEB_UPSTREAM_URL  官方上游 Git URL 覆盖
   PI_WEB_INSTALL_ROOT  安装目录父路径
@@ -124,12 +126,19 @@ case "$PI_WEB_VOICE_INPUT_ENABLED" in
 esac
 PI_WEB_PORT="$((10#$PI_WEB_PORT))"
 instance_dir="$project_root/data/pi-web/$PI_WEB_PORT"
-export PI_WEB_DATA_DIR="${PI_WEB_DATA_DIR:-$instance_dir/state}"
-export PI_WEB_SESSIOND_SOCKET="${PI_WEB_SESSIOND_SOCKET:-$PI_WEB_DATA_DIR/sessiond.sock}"
-export PI_WEB_RUN_DIR="${PI_WEB_RUN_DIR:-$instance_dir}"
+# Resolve configured paths against the component, independent of the caller's cwd.
+component_path() {
+    local path="$1"
+    [[ "$path" == /* ]] || path="$project_root/$path"
+    readlink -m -- "$path"
+}
+export PI_WEB_DATA_DIR="$(component_path "${PI_WEB_DATA_DIR:-$instance_dir/state}")"
+export PI_WEB_SESSIOND_SOCKET="$(component_path "${PI_WEB_SESSIOND_SOCKET:-$PI_WEB_DATA_DIR/sessiond.sock}")"
+export PI_WEB_RUN_DIR="$(component_path "${PI_WEB_RUN_DIR:-$instance_dir}")"
 log_dir="$PI_WEB_RUN_DIR"
-server_log="$log_dir/server.log"
-sessiond_log="$log_dir/sessiond.log"
+export PI_WEB_LOG_DIR="$(component_path "${PI_WEB_LOG_DIR:-$PI_WEB_RUN_DIR}")"
+server_log="$PI_WEB_LOG_DIR/server.log"
+sessiond_log="$PI_WEB_LOG_DIR/sessiond.log"
 server_pid="$log_dir/server.pid"
 sessiond_pid="$log_dir/sessiond.pid"
 run_script="$script_file"
@@ -150,7 +159,7 @@ check_port_free() {
 
 start() {
     require_bins
-    mkdir -p "$log_dir"
+    mkdir -p "$log_dir" "$PI_WEB_LOG_DIR"
     # nohup ignores SIGHUP, but does not detach the process group from an
     # automation runner. Start a separate session where setsid is available.
     local -a launcher=(nohup)

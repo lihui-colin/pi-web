@@ -14,10 +14,12 @@ PI_WEB_PASSWORD=''
 # 语音输入入口开关：true/false，默认关闭，图标仍可见但不可用。识别尚未实现，开启后也暂不可用。
 PI_WEB_VOICE_INPUT_ENABLED=false
 
-# 可选：留空或不填写时按端口自动生成绝对路径。
-# PI_WEB_DATA_DIR='/absolute/path/to/state'
-# PI_WEB_RUN_DIR='/absolute/path/to/run'
-# PI_WEB_SESSIOND_SOCKET='/absolute/path/to/sessiond.sock'
+# 可选：留空或不填写时按端口自动生成路径。
+# 以下路径相对于 pi-web/ 组件目录解析，也支持绝对路径。
+# PI_WEB_DATA_DIR='data/pi-web/8024/state'
+# PI_WEB_RUN_DIR='data/pi-web/8024'
+PI_WEB_LOG_DIR="log/${PI_WEB_PORT}"
+# PI_WEB_SESSIOND_SOCKET='data/pi-web/8024/state/sessiond.sock'
 
 # 可选：update 的下载、安装和测试设置。
 # PI_WEB_UPSTREAM_URL=https://github.com/jmfederico/pi-web.git
