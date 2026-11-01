@@ -5,14 +5,14 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
-function fixture(t) {
+function fixture(t, withOfficialConfig = true) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'paseo-service-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const data = path.join(root, 'data');
   fs.mkdirSync(path.join(data, '.paseo'), { recursive: true });
   fs.writeFileSync(path.join(data, 'paseo.conf'), '{"ip":"127.0.0.1","port":31415}');
-  fs.copyFileSync(path.join(__dirname, 'config.json.example'), path.join(data, '.paseo/config.json'));
-  for (const file of ['paseo_web_run.sh', 'node-runtime.sh', 'paseo-config.cjs', 'nginx.conf.template']) {
+  if (withOfficialConfig) fs.copyFileSync(path.join(__dirname, 'config.json.example'), path.join(data, '.paseo/config.json'));
+  for (const file of ['paseo_web_run.sh', 'node-runtime.sh', 'paseo-config.cjs', 'nginx.conf.template', 'config.json.example']) {
     fs.copyFileSync(path.join(__dirname, file), path.join(root, file));
   }
   const mock = `#!${process.execPath}
@@ -49,6 +49,19 @@ if (command === 'paseo') {
     calls() { return fs.readFileSync(path.join(root, 'calls'), 'utf8').trim().split('\n').map(JSON.parse); },
   };
 }
+
+test('first start initializes missing official configuration in both modes', t => {
+  for (const mode of ['--proxy', '--no-proxy']) {
+    const service = fixture(t, false);
+    const result = service.run('start', mode);
+    assert.equal(result.status, 0, result.stderr);
+    const config = JSON.parse(fs.readFileSync(path.join(service.data, '.paseo/config.json')));
+    assert.equal(config.daemon.listen, mode === '--proxy' ? '127.0.0.1:25226' : '0.0.0.0:31415');
+    assert.ok(config.daemon.hostnames.includes('127.0.0.1'));
+    assert.equal(config.features.webUi.enabled, true);
+    assert.equal(config.daemon.relay.enabled, false);
+  }
+});
 
 test('HTTPS lifecycle uses the official home, local certificates and proxy reload', t => {
   const service = fixture(t);

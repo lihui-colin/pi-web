@@ -12,13 +12,7 @@ Nginx 从固定版本源码构建，校验 SHA-256 并保留许可证，已有�
 
 如果 `data/paseo.conf` 不存在，安装脚本会提示输入 IP 和端口（回车使用 `10.30.0.25`、`25227`），验证后创建仅含这两个字段、权限为 `600` 的 JSON 文件。支持 IPv4/IPv6；端口不能与后端 `25226` 冲突。已有配置不覆盖，也不再询问；没有标准输入时明确报错，不写入不完整配置。
 
-首次部署还需初始化官方完整配置，已有文件不要覆盖：
-
-```bash
-install -d -m 700 paseo-ws/data/.paseo
-cp -n paseo-ws/config.json.example paseo-ws/data/.paseo/config.json
-chmod 600 paseo-ws/data/.paseo/config.json
-```
+安装脚本会自动从 `config.json.example` 初始化缺失的官方完整配置 `data/.paseo/config.json`（目录权限 `700`、文件权限 `600`）；已有文件保持不变。对于此前已安装但缺少配置的实例，首次 `start` 确认服务已停止后也会自动补建，无需重新安装或手工复制。符号链接配置会被拒绝，避免覆盖访问配置或其他文件。
 
 - `data/paseo.conf`：只包含访问地址 `ip` 和 `port`，默认 `10.30.0.25:25227`。
 - `data/.paseo/`：官方数据目录（`PASEO_HOME`），包含完整配置 `config.json`、会话、认证、模型和 daemon 日志。代理 CLI 需另行安装并认证；任务工作目录由会话指定。

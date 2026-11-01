@@ -35,6 +35,27 @@ function writeJson(file, value) {
   }
 }
 
+function initialize(data) {
+  const file = path.join(data, '.paseo', 'config.json');
+  const existing = fs.lstatSync(file, { throwIfNoEntry: false });
+  if (existing) {
+    if (existing.isSymbolicLink() || !existing.isFile()) {
+      throw new Error('config.json 必须是独立文件，不能链接至 paseo.conf。');
+    }
+    return;
+  }
+  const defaults = JSON.parse(fs.readFileSync(path.join(__dirname, 'config.json.example'), 'utf8'));
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  try {
+    fs.writeFileSync(file, JSON.stringify(defaults, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
+  } catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+    // Another initializer won the race; validate its path without overwriting it.
+    const winner = fs.lstatSync(file);
+    if (winner.isSymbolicLink() || !winner.isFile()) throw error;
+  }
+}
+
 function prepare(data, mode, state) {
   const target = endpoint(data, mode);
   if (state.localDaemon === 'running' && state.listen !== target.listen) {
@@ -44,6 +65,7 @@ function prepare(data, mode, state) {
     throw new Error(`无法确认服务已停止：${state.localDaemon}，请检查 status。`);
   }
   const file = path.join(data, '.paseo', 'config.json');
+  if (state.localDaemon === 'stopped') initialize(data);
   if (fs.lstatSync(file).isSymbolicLink()) throw new Error('config.json 必须是独立文件，不能链接至 paseo.conf。');
   const config = JSON.parse(fs.readFileSync(file, 'utf8'));
   config.daemon ??= {};
@@ -72,6 +94,8 @@ if (require.main === module) {
     if (action === 'endpoint') {
       const value = endpoint(data, mode);
       console.log([value.listen, value.url, path.join(data, 'tls', value.tlsName, 'fullchain.pem')].join('\n'));
+    } else if (action === 'init') {
+      initialize(data);
     } else if (action === 'prepare') {
       prepare(data, mode, JSON.parse(rawState));
     } else if (action === 'proxy') {
@@ -83,4 +107,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { endpoint, prepare, renderProxy };
+module.exports = { endpoint, initialize, prepare, renderProxy };
