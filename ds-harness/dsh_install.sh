@@ -21,7 +21,7 @@ while (( $# )); do
                 '默认补装缺失程序和插件；--upgrade 更新 DSH、pnpm、Magpie 和插件。' \
                 'Nginx 及静态依赖安装到本目录 data/.local/nginx；首次构建需要 cc、make、perl、tar、Python 3。' \
                 '不会安装系统包或使用系统 Nginx；已有本地 Nginx 只检查版本 >=1.24 和 HTTP SSL 模块。' \
-                'DSH/第三方插件使用 latest，官方 Codex 插件与 DSH 同版，启用 15 个 bundle。' \
+                'DSH/第三方插件使用 latest，官方 Codex 插件与 DSH 同版；保留已有额外插件启用状态，新 profile 默认启用八个。' \
                 '安装结束时创建 data/dsh.conf：已有配置保留，否则从控制台输入 IP 和端口。' \
                 'HTTPS 证书请单独运行 bash ds-harness/dsh_cert.sh 创建。' \
                 '数据固定放在脚本同级 data/.dsh，共享 agent 配置放在 data/.agents。' \
@@ -119,18 +119,6 @@ if ! "$dry_run"; then
     done
 fi
 
-# 官方插件的 latest 标签可能滞后于运行时；使用实际安装的 DSH 版本。
-# dry-run 不执行安装，不能把当前机器的旧版本当作安装后的版本。
-if "$dry_run" && "$dsh_will_install"; then
-    dsh_version='<安装后的 DSH 版本>'
-else
-    dsh_version="$(dsh --version)"
-    if [[ ! "$dsh_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
-        printf '无法识别 DSH 版本：%s，停止安装插件。\n' "$dsh_version" >&2
-        exit 1
-    fi
-fi
-
 # 官方安装来源：https://github.com/yetone/magpie#quick-start
 # 安装/更新程序，不运行 magpie serve，也不安装常驻服务。
 if ! "$upgrade" && command -v magpie >/dev/null 2>&1; then
@@ -146,49 +134,19 @@ else
     fi
 fi
 
-# 同时检查 profile 声明和实际包文件，避免把未完成的安装当作已安装。
-# 官方 Codex 插件版本不匹配时仍需对齐；由上游执行最终兼容性检查。
-plugin_plan="$(node --input-type=module - "$profile_dir" "$dsh_version" "$upgrade" <<'PLAN_NODE'
-import fs from 'node:fs';
-import path from 'node:path';
-const [dir, version, upgrade] = process.argv.slice(2);
-const manifest = path.join(dir, 'package.json');
-const pkg = fs.existsSync(manifest) ? JSON.parse(fs.readFileSync(manifest, 'utf8')) : {};
-const names = ['@deepseek-ai/dsh-subagent-codex', 'ds-bot', 'dsh-web-mobile', 'dshmarket', 'dsh-ide-git', 'dsh-sidebar-enhancement', 'dsh-sidebar-plus', '@huanlin/dsh-plugin-input-history'];
-for (const name of names) {
-  const target = name === names[0] ? version : 'latest';
-  const installedPath = path.join(dir, 'node_modules', name, 'package.json');
-  let installed;
-  if (fs.existsSync(installedPath)) installed = JSON.parse(fs.readFileSync(installedPath, 'utf8'));
-  const declared = pkg.dependencies?.[name] || pkg.devDependencies?.[name] || pkg.optionalDependencies?.[name];
-  if (upgrade !== 'true' && declared && installed?.name === name && installed.version &&
-      (name !== names[0] || installed.version === version)) {
-    console.error(`已安装 ${name}@${installed.version}，跳过安装。`);
-  } else {
-    console.log(`${name}@${target}`);
-  }
-}
-PLAN_NODE
-)"
-plugins=()
-while IFS= read -r plugin; do
-    if [[ -n "$plugin" ]]; then plugins+=("$plugin"); fi
-done <<< "$plugin_plan"
-
-# dsh plugin 会初始化 web profile，并更新包清单及锁文件。
-# 先备份已有包清单；完整的会话、配置和密钥仍需另行备份。
-if [[ -f "$profile_dir/package.json" ]]; then
-    backup="$profile_dir/package.json.before-dsh-install.$(date +%Y%m%dT%H%M%S).$$"
-    run cp -p -- "$profile_dir/package.json" "$backup"
+# 额外插件由独立安装器维护；dry-run 不能把旧版本当作升级后的版本。
+plugin_args=()
+if "$dry_run"; then
+    plugin_args+=(--dry-run)
+    if "$dsh_will_install"; then
+        plugin_args+=(--expected-dsh-version '<安装后的 DSH 版本>')
+    fi
 fi
-if (( ${#plugins[@]} )); then
-    run dsh plugin --profile web add -w --save-exact "${plugins[@]}"
-else
-    printf '%s\n' '所需插件均已安装，跳过插件安装。'
-fi
+if "$upgrade"; then plugin_args+=(--upgrade); fi
+bash "$script_dir/dsh_plugins_install.sh" "${plugin_args[@]}"
 
 # 官方实验功能随 DSH 分发，不另行固定旧版依赖。
-# 恢复本机 bundle 顺序，并保留目标 profile 中其他已有 bundle。
+# 补齐内置 bundle，并保留额外插件启用状态及其他已有 bundle 配置。
 run node --input-type=module - "$profile_dir/package.json" <<'NODE'
 import fs from 'node:fs';
 const path = process.argv[2];
@@ -197,18 +155,10 @@ const expected = [
   '@deepseek-ai/dsh-base',
   '@deepseek-ai/dsh-web-app',
   '@deepseek-ai/dsh-experimental-plugin-market-bundle',
-  '@deepseek-ai/dsh-subagent-codex',
   '@deepseek-ai/dsh-experimental-terminal-bundle',
   '@deepseek-ai/dsh-experimental-tool-worktree',
   '@deepseek-ai/dsh-experimental-agent-team-profile',
-  'dsh-web-mobile',
-  'dshmarket',
-  'ds-bot',
   '@deepseek-ai/dsh-experimental-voice-input-bundle',
-  'dsh-sidebar-enhancement',
-  'dsh-sidebar-plus',
-  'dsh-ide-git',
-  '@huanlin/dsh-plugin-input-history',
 ];
 pkg.dsh ??= {};
 pkg.dsh.profile ??= {};
@@ -265,7 +215,7 @@ CONFIG_WRITE
 
 if "$dry_run"; then
     printf '%s\n' '预览：安装结束后保留 data/dsh.conf；若不存在则复制旧配置或提示输入 IP 和端口，不在预览时读取输入。'
-    printf '%s\n' '预览完成：node 步骤将配置 15 个 bundle；未安装程序或修改文件。'
+    printf '%s\n' '预览完成：node 步骤将补齐七个内置 bundle，额外插件由独立安装器维护；未安装程序或修改文件。'
 else
     for bin in dsh pnpm magpie; do run "$bin" --version; done
     ensure_config

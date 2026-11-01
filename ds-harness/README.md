@@ -28,7 +28,31 @@ bash ds-harness/dsh_install.sh --upgrade
 
 默认复用已有的 DSH、pnpm 和 magpie，只补装缺失插件；`--upgrade` 更新 DSH、pnpm、Magpie 和插件。官方 Codex 插件版本与 DSH 对齐，保留上游兼容性检查，同版包缺失或不兼容时停止安装。安装器在安装结束时检查 `data/dsh.conf`：存在则原样保留；只有旧位置 `dsh.conf` 时复制到新位置并保留原文件；两处都没有时提示输入 IPv4/IPv6 地址及 HTTPS 端口（回车默认 `25228`）。无效输入会重新询问，输入结束或中断时不创建半成品；新文件权限为 `600`。`--dry-run` 不询问、不创建配置。安装器不生成证书、不启停服务；安装或更新应在目标 DSH 停机时执行。
 
-默认安装并启用 `@huanlin/dsh-plugin-input-history@latest`，提供输入框 ↑/↓ 历史回填和跨会话持久化；已安装时默认跳过，使用 `--upgrade` 更新。
+额外插件由独立脚本 `dsh_plugins_install.sh` 管理，主安装器会调用它。已有 DSH 环境只安装或更新插件时，可以单独运行：
+
+```bash
+bash ds-harness/dsh_plugins_install.sh --dry-run
+bash ds-harness/dsh_plugins_install.sh
+bash ds-harness/dsh_plugins_install.sh --upgrade
+```
+
+脚本管理以下 9 个额外安装包：
+
+| 插件 | 新 profile 默认状态 |
+| --- | --- |
+| `@deepseek-ai/dsh-subagent-codex` | 启用 |
+| `ds-bot` | 启用 |
+| `dsh-web-mobile` | 启用 |
+| `dshmarket` | 启用 |
+| `@xbzbing/dsh-git-panel` | 启用 |
+| `dsh-sidebar-enhancement` | 启用 |
+| `dsh-sidebar-plus` | 启用 |
+| `@huanlin/dsh-plugin-input-history` | 启用 |
+| `dsh-ide-git` | 仅安装，不启用 |
+
+已有 profile 保留额外插件的启用／停用状态和其他 bundle。默认跳过已完整安装的插件，Codex 插件版本仍与当前 DSH 对齐；第三方插件首次安装和 `--upgrade` 使用 `latest`，实际安装版本由包清单与锁文件记录。`--dry-run` 仅预览，不安装包、不写入 profile。独立脚本不安装 DSH、Nginx 或 Magpie，也不启停服务。
+
+`ds-bot` 的本地界面补丁仍需单独应用，插件安装器不会自动执行。重新安装或更新插件可能覆盖补丁；当前补丁仅适用于 0.2.4，其他版本须重新检查兼容性。参见 [补丁说明](patches/README.md)。
 
 Nginx 固定安装到 `ds-harness/data/.local/nginx/sbin/nginx`；即使系统已有 Nginx，也不会复用系统版本。`dsh_nginx_install.sh` 使用 [Nginx 官方构建流程](https://nginx.org/en/docs/configure.html)，固定 Nginx 1.30.6、OpenSSL 3.5.9、PCRE2 10.49、zlib 1.3.2，下载后先校验 SHA-256。三项库静态链接，不再依赖容器中额外安装的共享库；编译成功、版本和 SSL 模块检查通过后才发布完整安装目录。
 

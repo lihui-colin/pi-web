@@ -14,7 +14,8 @@ import unittest
 
 SCRIPT = Path(__file__).resolve().with_name('dsh_install.sh')
 NGINX_SCRIPT = SCRIPT.with_name('dsh_nginx_install.sh')
-NAMES = ['@deepseek-ai/dsh-subagent-codex', 'ds-bot', 'dsh-web-mobile', 'dshmarket', 'dsh-ide-git', 'dsh-sidebar-enhancement', 'dsh-sidebar-plus', '@huanlin/dsh-plugin-input-history']
+PLUGIN_SCRIPT = SCRIPT.with_name('dsh_plugins_install.sh')
+NAMES = ['@deepseek-ai/dsh-subagent-codex', 'ds-bot', 'dsh-web-mobile', 'dshmarket', 'dsh-ide-git', 'dsh-sidebar-enhancement', 'dsh-sidebar-plus', '@huanlin/dsh-plugin-input-history', '@xbzbing/dsh-git-panel']
 
 
 NGINX_STUB = f'''#!{sys.executable}
@@ -29,7 +30,7 @@ sys.exit(int(os.environ.get('TEST_NGINX_EXIT', '0')))
 def copy_installers(root):
     project = root / 'project'
     project.mkdir()
-    for source in (SCRIPT, NGINX_SCRIPT):
+    for source in (SCRIPT, NGINX_SCRIPT, PLUGIN_SCRIPT):
         shutil.copy2(source, project / source.name)
     return project
 
@@ -175,6 +176,29 @@ class InstallPlanTests(unittest.TestCase):
         output = self.run_plan()
         self.assertFalse(self.config.exists())
         self.assertIn('不在预览时读取输入', output)
+
+    def test_main_install_preserves_extra_bundle_selection(self):
+        manifest = self.profile / 'package.json'
+        pkg = json.loads(manifest.read_text())
+        pkg['dsh'] = {'profile': {'bundles': ['ds-bot', 'custom-bundle']}}
+        manifest.write_text(json.dumps(pkg))
+        result = self.install('127.0.0.1\n25228\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        bundles = json.loads(manifest.read_text())['dsh']['profile']['bundles']
+        self.assertIn('ds-bot', bundles)
+        self.assertIn('custom-bundle', bundles)
+        self.assertIn('@deepseek-ai/dsh-base', bundles)
+        self.assertNotIn('dsh-ide-git', bundles)
+        self.assertNotIn('dsh-web-mobile', bundles)
+
+    def test_plugin_installer_failure_stops_main_install(self):
+        (self.project / PLUGIN_SCRIPT.name).write_text('#!/bin/bash\nexit 42\n')
+        result = self.install('127.0.0.1\n25228\n')
+        self.assertEqual(result.returncode, 42, result.stderr)
+        self.assertFalse(self.config.exists())
+
+    def test_upgrade_preview_includes_git_panel(self):
+        self.assertIn('@xbzbing/dsh-git-panel@latest', self.run_plan('--upgrade'))
 
     def test_certificate_options_rejected(self):
         for option in ['--cert-only', '--config', '--tls-dir', '--tls-host']:
