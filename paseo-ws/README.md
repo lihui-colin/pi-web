@@ -35,6 +35,12 @@ bash paseo-ws/paseo_web_run.sh stop
 
 旧数据已迁入 `data/.paseo/`，迁移工具和临时诊断已移除。故障时检查 `data/nginx/error.log`、`data/.paseo/daemon.log`；勿重启其他服务。
 
+## DSH 插件模型目录
+
+`paseo-dsh` 默认使用 `$DSH_HOME/profiles/paseo/cordis.patch.yml`，DSH Web 使用 `profiles/web/cordis.patch.yml`；Web 新增的模型不会自动同步到 Paseo。本部署已在 paseo profile 中注册 `xinmian/grok-4.7`，引用共享凭据库中的 `XINMIAN_API_KEY`，不复制密钥。
+
+`patch-dsh-catalog.cjs` 修复 `paseo-dsh 0.2.17` 的冷启动目录查询：让 `paseo/catalog` 和 `initialize` 一样等待 `loader.await()`，防止凭据服务尚未加载时漏报自定义模型。已核查[上游实现](https://github.com/liuxing7954/paseo-dsh/blob/c642c604aeb5b409a6237ca3ef54fdb82801677d/dsh-bridge/lib/index.js#L83)，该提交仅对 initialize 等待。补丁同时更新当前桥接入口与插件内嵌资源；安装脚本会应用，也可在插件安装/升级后运行 `node paseo-ws/patch-dsh-catalog.cjs`（非默认 home 时设置 `DSH_HOME`）。结构不匹配会停止，需重新核查上游。无需重启服务；变更后需刷新 Paseo 的全局 provider snapshot：在 Providers 中打开 DeepSeek Harness (native)，点击 Refresh；客户端 API 为 `refreshProvidersSnapshot({ providers: ['deepseek-harness-native'] })`，不传 `cwd`。传 `cwd` 只刷新对应项目的快照，设置页仍可能显示旧列表。验证时需打开实际提供商详情，确认模型数量为 9 且显示 `xinmian/grok-4.7`。插件自身目录另有最长五分钟缓存。
+
 ## Web UI 补丁
 
 `patch-web-ui.cjs` 将首次连接探测和后续 TLS 连接等待时间调整为 20 秒，修复手机慢连接超时；同时给网页版 Add projects 增加 **Browse** 服务器目录树入口。补丁生成新哈希资源地址，保留原 JS。安装时自动执行，也可运行 `node paseo-ws/patch-web-ui.cjs` 后刷新网页，无需重启。

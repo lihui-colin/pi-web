@@ -22,6 +22,7 @@ bash "$ROOT/paseo_nginx_install.sh"
 mkdir -p -- "$PREFIX"
 npm install --global --prefix "$PREFIX" --cache "$ROOT/.npm-cache" --engine-strict '@getpaseo/cli'
 node "$ROOT/patch-web-ui.cjs"
+node "$ROOT/patch-dsh-catalog.cjs"
 
 printf '\n安装完成。运行环境：%s\n' "$PREFIX"
 printf '启动：bash %q start\n' "$ROOT/paseo_web_run.sh"

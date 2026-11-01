@@ -18,6 +18,7 @@ test('installer creates both configurations and preserves custom configuration o
   fs.writeFileSync(path.join(root, 'node-runtime.sh'), 'paseo_select_node() { export PATH="$ROOT/bin:$PATH"; }\n');
   fs.writeFileSync(path.join(root, 'paseo_nginx_install.sh'), 'exit 0\n');
   fs.writeFileSync(path.join(root, 'patch-web-ui.cjs'), '');
+  fs.writeFileSync(path.join(root, 'patch-dsh-catalog.cjs'), '');
   const run = input => spawnSync('bash', [path.join(root, 'install.sh')], {
     input, encoding: 'utf8', timeout: 10000,
   });
