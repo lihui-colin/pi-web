@@ -1,0 +1,92 @@
+.nh
+.TH "GH-ISSUE-ARTIFACT-DOWNLOAD" "1" "Oct 2026" "GitHub CLI 2.103.3" "GitHub CLI manual"
+
+.SH NAME
+gh-issue-artifact-download - Download issue artifacts (preview)
+
+
+.SH SYNOPSIS
+\fBgh issue artifact download {<issue> [<artifact-number>...] | <artifact-url>...} [flags]\fR
+
+
+.SH DESCRIPTION
+Download issue artifacts to files. Without artifact numbers, every artifact
+on the issue is downloaded. Artifacts can also be named by their URLs, which
+must all be on one issue. \fB<issue>\fR is an issue number or URL.
+
+.PP
+Each file is named \fB<number>-<name>\fR\&. Markdown documents end in \fB\&.md\fR, HTML
+documents in \fB\&.html\fR, and links are saved as \fB\&.url\fR Internet Shortcut files.
+If a file already exists, that artifact fails unless you use \fB--clobber\fR to
+overwrite it or \fB--skip-existing\fR to skip it.
+
+.PP
+Use \fB--dir\fR to choose the directory to download files into, \fB--output\fR to
+choose the path for a single artifact, or \fB--output -\fR to print its content.
+Use \fB--version\fR with a single artifact to download an earlier version from
+its edit history.
+
+
+.SH OPTIONS
+.TP
+\fB--clobber\fR
+Overwrite existing files of the same name
+
+.TP
+\fB-D\fR, \fB--dir\fR \fB<directory> (default ".")\fR
+The directory to download files into
+
+.TP
+\fB-O\fR, \fB--output\fR \fB<file>\fR
+The file to write a single artifact to (use "-" to write to standard output)
+
+.TP
+\fB--skip-existing\fR
+Skip downloading when files of the same name exist
+
+.TP
+\fB--version\fR \fB<number> (default 0)\fR
+Download the version with this number from the edit history
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+.TP
+\fB-R\fR, \fB--repo\fR \fB<[HOST/]OWNER/REPO>\fR
+Select another repository using the [HOST/]OWNER/REPO format
+
+
+.SH EXIT CODES
+0: Successful execution
+
+.PP
+1: Error
+
+.PP
+2: Command canceled
+
+.PP
+4: Authentication required
+
+.PP
+NOTE: Specific commands may have additional exit codes. Refer to the command's help for more information.
+
+
+.SH EXAMPLE
+.EX
+# Download every artifact on issue 142
+$ gh issue artifact download 142
+
+# Download two artifacts into a folder
+$ gh issue artifact download 142 2 5 --dir notes
+
+# Print one artifact's content
+$ gh issue artifact download 142 2 --output -
+
+# Download an earlier version of one artifact
+$ gh issue artifact download 142 2 --version 5
+
+.EE
+
+
+.SH SEE ALSO
+\fBgh-issue-artifact(1)\fR

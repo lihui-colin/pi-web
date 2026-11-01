@@ -1,0 +1,97 @@
+.nh
+.TH "GH-ISSUE-ARTIFACT-VIEW" "1" "Oct 2026" "GitHub CLI 2.103.3" "GitHub CLI manual"
+
+.SH NAME
+gh-issue-artifact-view - View an issue artifact (preview)
+
+
+.SH SYNOPSIS
+\fBgh issue artifact view {<issue> <artifact-number> | <artifact-url>} [flags]\fR
+
+
+.SH DESCRIPTION
+Display an issue artifact's name, type, authors, content, and edit history. A
+link shows its URL.
+
+.PP
+Name the artifact by its issue and number, or by its URL. \fB<issue>\fR is an
+issue number or URL.
+
+.PP
+By default, the current version is shown. Use \fB--version\fR to show an earlier
+version from the edit history.
+
+.PP
+With \fB--web\fR, open a document's page on GitHub, or a link's URL.
+
+
+.SH OPTIONS
+.TP
+\fB-q\fR, \fB--jq\fR \fB<expression>\fR
+Filter JSON output using a jq expression
+
+.TP
+\fB--json\fR \fB<fields>\fR
+Output JSON with the specified fields
+
+.TP
+\fB-t\fR, \fB--template\fR \fB<string>\fR
+Format JSON output using a Go template; see "gh help formatting"
+
+.TP
+\fB--version\fR \fB<number> (default 0)\fR
+Show the version with this number from the edit history
+
+.TP
+\fB-w\fR, \fB--web\fR
+Open a document's page on GitHub, or a link's URL
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+.TP
+\fB-R\fR, \fB--repo\fR \fB<[HOST/]OWNER/REPO>\fR
+Select another repository using the [HOST/]OWNER/REPO format
+
+
+.SH JSON FIELDS
+\fBbody\fR, \fBbodyHtml\fR, \fBcreatedAt\fR, \fBcreator\fR, \fBdescription\fR, \fBid\fR, \fBname\fR, \fBnumber\fR, \fBtype\fR, \fBupdatedAt\fR, \fBupdatedByActor\fR, \fBurl\fR, \fBversions\fR
+
+
+.SH EXIT CODES
+0: Successful execution
+
+.PP
+1: Error
+
+.PP
+2: Command canceled
+
+.PP
+4: Authentication required
+
+.PP
+NOTE: Specific commands may have additional exit codes. Refer to the command's help for more information.
+
+
+.SH EXAMPLE
+.EX
+# View artifact 2 on issue 142
+$ gh issue artifact view 142 2
+
+# View an earlier version
+$ gh issue artifact view 142 2 --version 5
+
+# View an artifact by its URL
+$ gh issue artifact view https://github.com/monalisa/monas-cafe/issues/142/artifacts/3
+
+# Open a link artifact in the browser
+$ gh issue artifact view 142 3 --web
+
+# Print an artifact's body
+$ gh issue artifact view 142 2 --json body --jq .body
+
+.EE
+
+
+.SH SEE ALSO
+\fBgh-issue-artifact(1)\fR

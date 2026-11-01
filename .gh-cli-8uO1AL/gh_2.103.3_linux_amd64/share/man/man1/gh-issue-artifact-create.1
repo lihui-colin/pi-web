@@ -1,0 +1,104 @@
+.nh
+.TH "GH-ISSUE-ARTIFACT-CREATE" "1" "Oct 2026" "GitHub CLI 2.103.3" "GitHub CLI manual"
+
+.SH NAME
+gh-issue-artifact-create - Create issue artifacts (preview)
+
+
+.SH SYNOPSIS
+\fBgh issue artifact create {<issue-number> | <issue-url>} [<file>[#<name>] | <url>]... [flags]\fR
+
+
+.SH DESCRIPTION
+Create one artifact for each file or URL. A text file becomes a document
+named after the file; add \fB#<name>\fR to choose a different name. A \fB\&.html\fR or
+\fB\&.htm\fR file becomes an HTML document. A URL, or a \fB\&.url\fR Internet Shortcut
+file, becomes a link; a URL is named after its host.
+
+.PP
+Artifact names can't contain some characters, such as parentheses. When a
+file's name has them, they're removed: \fBplan (1).md\fR is named \fBplan 1.md\fR\&.
+
+.PP
+Use \fB--body\fR to create a single document from text, or \fB--body-file\fR to create
+one artifact from a file (\fB-\fR reads standard input). \fB--name\fR sets its name.
+
+.PP
+Documents are saved as \fBgeneric\fR, and HTML documents as \fBembedded_html\fR\&. Use
+\fB--type\fR to set the type of every document instead, whatever the file
+extension. A plan currently behaves the same as a generic document.
+
+
+.SH OPTIONS
+.TP
+\fB--attach\fR \fB<file>\fR
+Attach an image or video file, in '#\&' format
+
+.TP
+\fB-b\fR, \fB--body\fR \fB<string>\fR
+Content for a single document
+
+.TP
+\fB-F\fR, \fB--body-file\fR \fB<file>\fR
+Read content for a single artifact from file (use "-" to read from standard input)
+
+.TP
+\fB--name\fR \fB<string>\fR
+Name for a single artifact
+
+.TP
+\fB--type\fR \fB<string>\fR
+Type for documents: {generic|plan|embedded_html}
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+.TP
+\fB-R\fR, \fB--repo\fR \fB<[HOST/]OWNER/REPO>\fR
+Select another repository using the [HOST/]OWNER/REPO format
+
+
+.SH ALIASES
+gh issue artifact new
+
+
+.SH EXIT CODES
+0: Successful execution
+
+.PP
+1: Error
+
+.PP
+2: Command canceled
+
+.PP
+4: Authentication required
+
+.PP
+NOTE: Specific commands may have additional exit codes. Refer to the command's help for more information.
+
+
+.SH EXAMPLE
+.EX
+# Create a document from a file
+$ gh issue artifact create 142 signin-plan.md
+
+# Create documents from two files, naming the first
+$ gh issue artifact create 142 'docs/signin-plan.md#Sign-in plan' oauth-research.md
+
+# Create an HTML document from a file
+$ gh issue artifact create 142 menu-prototype.html
+
+# Create a link with a name
+$ gh issue artifact create 142 https://github.com/monalisa/monas-cafe/wiki/OAuth-runbook --name 'Staging OAuth runbook'
+
+# Create a document from standard input
+$ cat order-sync.log | gh issue artifact create 142 --body-file - --name 'Order sync log'
+
+# Upload an image that the document references
+$ gh issue artifact create 142 signin-plan.md --attach ./signin-flow.png
+
+.EE
+
+
+.SH SEE ALSO
+\fBgh-issue-artifact(1)\fR

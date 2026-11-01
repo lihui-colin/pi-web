@@ -1,0 +1,69 @@
+.nh
+.TH "GH-ISSUE-ARTIFACT" "1" "Oct 2026" "GitHub CLI 2.103.3" "GitHub CLI manual"
+
+.SH NAME
+gh-issue-artifact - Work with issue artifacts (preview)
+
+
+.SH SYNOPSIS
+\fBgh issue artifact <command> [flags]\fR
+
+
+.SH DESCRIPTION
+Working with issue artifacts in the GitHub CLI is in preview and subject to change without notice.
+
+.PP
+Issue artifacts are Markdown documents, HTML documents and links attached to an issue.
+They are not GitHub Actions artifacts; to download those, use \fBgh run download\fR\&.
+
+
+.SH AVAILABLE COMMANDS
+.TP
+\fBgh-issue-artifact-create(1)\fR
+Create issue artifacts (preview)
+
+.TP
+\fBgh-issue-artifact-delete(1)\fR
+Delete issue artifacts (preview)
+
+.TP
+\fBgh-issue-artifact-download(1)\fR
+Download issue artifacts (preview)
+
+.TP
+\fBgh-issue-artifact-edit(1)\fR
+Edit an issue artifact (preview)
+
+.TP
+\fBgh-issue-artifact-list(1)\fR
+List artifacts on an issue (preview)
+
+.TP
+\fBgh-issue-artifact-view(1)\fR
+View an issue artifact (preview)
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+.TP
+\fB-R\fR, \fB--repo\fR \fB<[HOST/]OWNER/REPO>\fR
+Select another repository using the [HOST/]OWNER/REPO format
+
+
+.SH EXIT CODES
+0: Successful execution
+
+.PP
+1: Error
+
+.PP
+2: Command canceled
+
+.PP
+4: Authentication required
+
+.PP
+NOTE: Specific commands may have additional exit codes. Refer to the command's help for more information.
+
+
+.SH SEE ALSO
+\fBgh-issue(1)\fR

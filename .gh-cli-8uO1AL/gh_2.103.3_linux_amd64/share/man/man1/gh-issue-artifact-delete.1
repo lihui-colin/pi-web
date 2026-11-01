@@ -1,0 +1,64 @@
+.nh
+.TH "GH-ISSUE-ARTIFACT-DELETE" "1" "Oct 2026" "GitHub CLI 2.103.3" "GitHub CLI manual"
+
+.SH NAME
+gh-issue-artifact-delete - Delete issue artifacts (preview)
+
+
+.SH SYNOPSIS
+\fBgh issue artifact delete {<issue> <artifact-number>... | <artifact-url>...} [flags]\fR
+
+
+.SH DESCRIPTION
+Delete artifacts from an issue. A deleted artifact can't be restored.
+
+.PP
+Name artifacts by their issue and numbers, or by their URLs, which must all be
+on one issue. \fB<issue>\fR is an issue number or URL.
+
+.PP
+In a terminal, deletion requires confirmation. \fB--yes\fR skips the prompt and is
+required when prompting is unavailable.
+
+
+.SH OPTIONS
+.TP
+\fB--yes\fR
+Confirm deletion without prompting
+
+
+.SH OPTIONS INHERITED FROM PARENT COMMANDS
+.TP
+\fB-R\fR, \fB--repo\fR \fB<[HOST/]OWNER/REPO>\fR
+Select another repository using the [HOST/]OWNER/REPO format
+
+
+.SH EXIT CODES
+0: Successful execution
+
+.PP
+1: Error
+
+.PP
+2: Command canceled
+
+.PP
+4: Authentication required
+
+.PP
+NOTE: Specific commands may have additional exit codes. Refer to the command's help for more information.
+
+
+.SH EXAMPLE
+.EX
+# Delete artifact 2 from issue 142
+$ gh issue artifact delete 142 2
+
+# Delete two artifacts without a prompt
+$ gh issue artifact delete 142 2 5 --yes
+
+.EE
+
+
+.SH SEE ALSO
+\fBgh-issue-artifact(1)\fR
