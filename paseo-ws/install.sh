@@ -15,6 +15,7 @@ if ! paseo_select_node; then
 fi
 printf '使用 Node.js %s：%s\n' "$(node --version)" "$(command -v node)"
 bash "$ROOT/init-access-config.sh"
+node "$ROOT/paseo-config.cjs" init "$ROOT/data"
 
 # 仅安装环境，不启动或停止服务；已有配置保持不变。
 bash "$ROOT/paseo_nginx_install.sh"

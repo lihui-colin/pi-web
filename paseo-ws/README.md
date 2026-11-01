@@ -12,13 +12,7 @@ Nginx 从固定版本源码构建，校验 SHA-256 并保留许可证，已有�
 
 如果 `data/paseo.conf` 不存在，安装脚本会提示输入 IP 和端口（回车使用 `10.30.0.25`、`25227`），验证后创建仅含这两个字段、权限为 `600` 的 JSON 文件。支持 IPv4/IPv6；端口不能与后端 `25226` 冲突。已有配置不覆盖，也不再询问；没有标准输入时明确报错，不写入不完整配置。
 
-首次部署还需初始化官方完整配置，已有文件不要覆盖：
-
-```bash
-install -d -m 700 paseo-ws/data/.paseo
-cp -n paseo-ws/config.json.example paseo-ws/data/.paseo/config.json
-chmod 600 paseo-ws/data/.paseo/config.json
-```
+安装脚本会自动从 `config.json.example` 初始化缺失的官方完整配置 `data/.paseo/config.json`（目录权限 `700`、文件权限 `600`）；已有文件保持不变。对于此前已安装但缺少配置的实例，首次 `start` 确认服务已停止后也会自动补建，无需重新安装或手工复制。符号链接配置会被拒绝，避免覆盖访问配置或其他文件。
 
 - `data/paseo.conf`：只包含访问地址 `ip` 和 `port`，默认 `10.30.0.25:25227`。
 - `data/.paseo/`：官方数据目录（`PASEO_HOME`），包含完整配置 `config.json`、会话、认证、模型和 daemon 日志。代理 CLI 需另行安装并认证；任务工作目录由会话指定。
@@ -48,6 +42,10 @@ bash paseo-ws/paseo_web_run.sh stop
 目录选择器由 `server-directory-picker.js` 实现，复用已连接主机的 `listDirectory(cwd, path)` 会话接口。点击名称选中并按需展开子目录，左侧箭头可展开或折叠，再点击 **Select this folder** 添加；支持上级目录、刷新、错误重试、键盘和手机布局。可浏览服务器进程有权限访问的目录，包括隐藏目录；默认从已有推荐绝对路径开始，没有推荐路径则从 `/` 开始。已有路径搜索和 Electron 本机原生选择器保留。
 
 上游核查：[`v0.14.0` AddProjectFlow](https://github.com/getpaseo/paseo/blob/v0.14.0/packages/app/src/components/add-project-flow.tsx#L359) 的 Browse 仅适用于 Electron 本机；main 提交 `5afa1a9f8ef4b069ff84278668c1fd030df42273` 同样如此。后端已有 [`listDirectory`](https://github.com/getpaseo/paseo/blob/v0.14.0/packages/client/src/daemon-client.ts#L5068)，本补丁只补界面接入，不新增文件访问服务。
+
+Web 终端使用浏览器原生右键菜单：PC 右键、手机长按的菜单和复制粘贴选项由浏览器提供，不注入自定义菜单或常驻按钮。补丁移除 Web 终端对 `contextmenu` 的默认行为拦截，Electron 继续使用原生应用菜单。具体可用选项由浏览器、选区和当前焦点决定。已应用旧自定义菜单补丁的安装会在再次运行补丁时自动移除旧实现，刷新页面后生效。
+
+上游核查：[`v0.14.0` TerminalEmulator](https://github.com/getpaseo/paseo/blob/v0.14.0/packages/app/src/components/terminal-emulator.tsx) 的右键处理无条件调用 `preventDefault()`，但菜单实现依赖 Electron，因此浏览器默认菜单被拦截后没有替代菜单。本补丁仅在 Electron 菜单接口存在时拦截事件。
 
 `patch-web-ui.baseline.json` 记录适用版本 `v0.14.0` 及上游 commit [`8c6de842a3157530c26a7a94c78a3d647fb96ce9`](https://github.com/getpaseo/paseo/commit/8c6de842a3157530c26a7a94c78a3d647fb96ce9)。版本、commit 不匹配或缺少 `gitHead` 时输出 `[WARN]`；资源结构不匹配时退出，不自动更新基准。适配新版本后应同步更新基准。
 

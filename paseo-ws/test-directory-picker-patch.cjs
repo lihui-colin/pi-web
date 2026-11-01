@@ -34,6 +34,17 @@ test('installed upstream bundle accepts the directory picker patch idempotently'
   assert.ok(bundle.includes('globalThis.__paseoPickServerDirectory(je,'));
   assert.ok(bundle.includes('client.listDirectory(path,'));
   assert.ok(bundle.includes('timeoutMs:20000'));
+  assert.equal(bundle.includes('__paseoMountTerminalClipboard'), false);
+  const handler = bundle.match(/oe=\(0,n\.useCallback\)\((n=>\{typeof window\.paseoDesktop\?\.menu\?\.showContextMenu==="function"&&\(n\.preventDefault\(\),te\(\)\)\}),\[te\]\)/)?.[1];
+  assert.ok(handler, 'browser context menu handler is present');
+  const vm = require('node:vm');
+  let prevented = 0, desktopMenus = 0;
+  const event = { preventDefault() { prevented++; } };
+  vm.runInNewContext('(' + handler + ')(event)', { window: {}, event, te() { desktopMenus++; } });
+  assert.equal(prevented, 0, 'Web leaves the native browser menu enabled');
+  vm.runInNewContext('(' + handler + ')(event)', { window: { paseoDesktop: { menu: { showContextMenu() {} } } }, event, te() { desktopMenus++; } });
+  assert.equal(prevented, 1);
+  assert.equal(desktopMenus, 1);
   const second = run(); assert.equal(second.status, 0, second.stderr);
   assert.equal(fs.readFileSync(path.join(web, 'index.html'), 'utf8'), html);
   assert.equal(fs.readFileSync(outputPath, 'utf8'), bundle);

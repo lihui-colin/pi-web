@@ -3,18 +3,62 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { endpoint, prepare, renderProxy } = require('./paseo-config.cjs');
+const { endpoint, initialize, prepare, renderProxy } = require('./paseo-config.cjs');
 
-function fixture(t, config = { ip: '10.30.0.25', port: 25227 }) {
+function fixture(t, config = { ip: '10.30.0.25', port: 25227 }, withOfficialConfig = true) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'paseo-config-'));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   fs.writeFileSync(path.join(home, 'paseo.conf'), JSON.stringify(config));
+  if (!withOfficialConfig) return home;
   fs.mkdirSync(path.join(home, '.paseo'), { mode: 0o700 });
   fs.writeFileSync(path.join(home, '.paseo', 'config.json'), JSON.stringify({
     version: 1, daemon: { relay: { enabled: false } }, agents: { providers: { pi: { enabled: true } } },
   }));
   return home;
 }
+
+test('initialize creates private defaults and leaves existing configuration untouched', t => {
+  const home = fixture(t, undefined, false);
+  initialize(home);
+  const file = path.join(home, '.paseo/config.json');
+  assert.deepEqual(JSON.parse(fs.readFileSync(file)), JSON.parse(fs.readFileSync(path.join(__dirname, 'config.json.example'))));
+  assert.equal(fs.statSync(path.dirname(file)).mode & 0o777, 0o700);
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  const custom = '{"daemon":{"auth":{"password":"keep-me"}},"agents":{"providers":{}}}\n';
+  fs.writeFileSync(file, custom);
+  initialize(home);
+  assert.equal(fs.readFileSync(file, 'utf8'), custom);
+  fs.writeFileSync(file, 'invalid existing config');
+  initialize(home);
+  assert.equal(fs.readFileSync(file, 'utf8'), 'invalid existing config');
+});
+
+test('prepare bootstraps a stopped instance but never invents running or unknown configuration', t => {
+  for (const state of [{localDaemon: 'running', listen: '127.0.0.1:25226'}, {localDaemon: 'unknown'}]) {
+    const home = fixture(t, undefined, false);
+    assert.throws(() => prepare(home, 'proxy', state));
+    assert.ok(!fs.existsSync(path.join(home, '.paseo/config.json')));
+  }
+  const home = fixture(t, {ip: '127.0.0.2', port: 31415}, false);
+  prepare(home, 'direct', {localDaemon: 'stopped'});
+  const config = JSON.parse(fs.readFileSync(path.join(home, '.paseo/config.json')));
+  assert.equal(config.daemon.listen, '0.0.0.0:31415');
+  assert.ok(config.daemon.hostnames.includes('127.0.0.2'));
+  assert.equal(config.daemon.relay.enabled, false);
+  assert.equal(config.features.webUi.enabled, true);
+});
+
+test('initialize rejects existing and dangling configuration symlinks without changing their targets', t => {
+  for (const target of ['paseo.conf', 'missing.json']) {
+    const home = fixture(t, undefined, false);
+    const before = fs.readFileSync(path.join(home, 'paseo.conf'), 'utf8');
+    fs.mkdirSync(path.join(home, '.paseo'));
+    fs.symlinkSync(path.join(home, target), path.join(home, '.paseo/config.json'));
+    assert.throws(() => initialize(home), /独立文件/);
+    assert.equal(fs.readFileSync(path.join(home, 'paseo.conf'), 'utf8'), before);
+    assert.ok(!fs.existsSync(path.join(home, 'missing.json')));
+  }
+});
 
 test('IP and port control direct and proxy endpoints, including IPv6', t => {
   const home = fixture(t, { ip: '127.0.0.2', port: 31415 });

@@ -14,7 +14,7 @@ import unittest
 
 SCRIPT = Path(__file__).resolve().with_name('dsh_install.sh')
 NGINX_SCRIPT = SCRIPT.with_name('dsh_nginx_install.sh')
-NAMES = ['@deepseek-ai/dsh-subagent-codex', 'ds-bot', 'dsh-web-mobile', 'dshmarket', 'dsh-ide-git', 'dsh-sidebar-enhancement', 'dsh-sidebar-plus']
+NAMES = ['@deepseek-ai/dsh-subagent-codex', 'ds-bot', 'dsh-web-mobile', 'dshmarket', 'dsh-ide-git', 'dsh-sidebar-enhancement', 'dsh-sidebar-plus', '@huanlin/dsh-plugin-input-history']
 
 
 NGINX_STUB = f'''#!{sys.executable}
@@ -100,7 +100,7 @@ class InstallPlanTests(unittest.TestCase):
         self.assertIn('+ npm install', output)
         self.assertIn('+ curl', output)
         self.assertIn('ds-bot@latest dsh-web-mobile@latest dshmarket@latest dsh-ide-git@latest', output)
-        self.assertIn('dsh-sidebar-enhancement@latest dsh-sidebar-plus@latest', output)
+        self.assertIn('dsh-sidebar-enhancement@latest dsh-sidebar-plus@latest @huanlin/dsh-plugin-input-history@latest', output)
         self.assertNotIn('dsh-file-transfer', output)
 
     def test_removed_plugin_not_reinstalled(self):
