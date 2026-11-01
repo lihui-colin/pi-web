@@ -28,7 +28,7 @@ project_root="$(cd "$(dirname "$script_file")/.." && pwd)"
 config_file="$project_root/data/pi-web.conf"
 # Service settings come only from the local config, not the calling shell.
 unset PI_WEB_PORT PI_WEB_HOST PI_WEB_PASSWORD PI_WEB_DATA_DIR PI_WEB_RUN_DIR PI_WEB_LOG_DIR PI_WEB_VOICE_INPUT_ENABLED \
-    PI_WEB_SESSIOND_SOCKET PI_WEB_SESSIOND_PORT PI_WEB_SESSIOND_URL PI_WEB_PI_PACKAGE_DIR
+    PI_WEB_SESSIOND_SOCKET PI_WEB_SESSIOND_PORT PI_WEB_SESSIOND_URL PI_WEB_PI_PACKAGE_DIR PI_WEB_STOP_TIMEOUT_SECONDS
 if [[ -f "$config_file" ]]; then
     set -a
     source "$config_file"
@@ -72,6 +72,9 @@ PI WEB (jmfederico) 手动运行管理脚本
   PI_WEB_RUN_DIR   PID 目录，默认 data/pi-web/<port>
   PI_WEB_LOG_DIR   日志目录，模板为 log/<port>；未配置时沿用 PID 目录
   PI_WEB_SESSIOND_SOCKET  默认 <状态目录>/sessiond.sock
+  PI_WEB_STOP_TIMEOUT_SECONDS  每个进程 TERM 等待秒数，默认 30，整数 1–86400，仅本地配置
+  stop/restart 超时不发送 KILL：返回失败并保留 PID；server 未停止时不停止 sessiond。
+  清理较慢时可增大等待时间后重试；本脚本不提供强制终止。
   上述路径支持相对路径，以 pi-web/ 组件目录为基准，不依赖当前工作目录。
   HTTP_PROXY / HTTPS_PROXY / NO_PROXY  代理环境变量，传给服务及 Codex app-server；未填写时继承启动环境
   PI_WEB_UPSTREAM_URL  官方上游 Git URL 覆盖
@@ -124,6 +127,13 @@ case "$PI_WEB_VOICE_INPUT_ENABLED" in
     true|false) ;;
     *) echo "错误：PI_WEB_VOICE_INPUT_ENABLED 必须为 true 或 false" >&2; exit 2 ;;
 esac
+PI_WEB_STOP_TIMEOUT_SECONDS="${PI_WEB_STOP_TIMEOUT_SECONDS-30}"
+if [[ ! "$PI_WEB_STOP_TIMEOUT_SECONDS" =~ ^[0-9]{1,5}$ ]] ||
+   (( 10#$PI_WEB_STOP_TIMEOUT_SECONDS < 1 || 10#$PI_WEB_STOP_TIMEOUT_SECONDS > 86400 )); then
+    echo "错误：PI_WEB_STOP_TIMEOUT_SECONDS 必须为 1–86400 的整数" >&2
+    exit 2
+fi
+PI_WEB_STOP_TIMEOUT_SECONDS="$((10#$PI_WEB_STOP_TIMEOUT_SECONDS))"
 PI_WEB_PORT="$((10#$PI_WEB_PORT))"
 instance_dir="$project_root/data/pi-web/$PI_WEB_PORT"
 # Resolve configured paths against the component, independent of the caller's cwd.
@@ -142,6 +152,14 @@ sessiond_log="$PI_WEB_LOG_DIR/sessiond.log"
 server_pid="$log_dir/server.pid"
 sessiond_pid="$log_dir/sessiond.pid"
 run_script="$script_file"
+# Resolve installed symlinks once. Missing commands cannot establish ownership.
+declare -A service_paths=()
+for service_name in pi-web-server pi-web-sessiond; do
+    service_command=$(command -v "$service_name" 2>/dev/null || true)
+    service_paths[$service_name]=$(readlink -f -- "$service_command" 2>/dev/null || true)
+done
+node_command=$(command -v node 2>/dev/null || true)
+node_executable=$(readlink -f -- "$node_command" 2>/dev/null || true)
 
 require_bins() {
     command -v pi-web-server   >/dev/null 2>&1 || { echo "错误：未找到 pi-web-server" >&2; exit 1; }
@@ -230,7 +248,7 @@ service_running() {
     if [[ -f "$pidfile" ]]; then
         pid=$(cat "$pidfile")
         if [[ "$pid" =~ ^[1-9][0-9]*$ && "$pid" -gt 1 ]] && process_running "$pid"; then
-            if [[ ! -d /proc ]] || is_instance_process "$pid" "$name"; then return 0; fi
+            if is_instance_process "$pid" "$name"; then return 0; fi
         fi
     fi
     # Recover ownership before checking the port or launching a replacement.
@@ -248,21 +266,39 @@ service_running() {
 
 # Match both executable identity and this instance's run directory before recovering a PID.
 is_instance_process() {
-    local pid="$1" name="$2" arg entry matched=0
+    local pid="$1" name="$2" entry expected executable script matched=0
+    local -a argv=()
     [[ "$pid" =~ ^[1-9][0-9]*$ && "$pid" -gt 1 ]] || return 1
     [[ -r "/proc/$pid/cmdline" && -r "/proc/$pid/environ" ]] || return 1
-    while IFS= read -r -d '' arg; do
-        if [[ "${arg##*/}" == "$name" ]]; then matched=1; fi
-    done < "/proc/$pid/cmdline"
-    [[ $matched -eq 1 ]] || return 1
+    expected="${service_paths[$name]:-}"
+    [[ -n "$expected" && -f "$expected" ]] || return 1
+    mapfile -d '' -t argv 2>/dev/null < "/proc/$pid/cmdline" || return 1
+    [[ ${#argv[@]} -gt 0 ]] || return 1
+    # Our installed commands are Node shebang scripts. Accept only the plain
+    # script position (or explicit --); never guess arity of Node options.
+    script="${argv[1]:-}"
+    [[ "$script" != -- ]] || script="${argv[2]:-}"
+    if [[ -n "$script" && "$script" != -* ]]; then
+        [[ "$script" == /* ]] || script="/proc/$pid/cwd/$script"
+        [[ "$script" -ef "$expected" ]] && matched=1
+    fi
+    # Cheap argv-position filter before resolving /proc/exe. argv[0] is only
+    # a candidate for native executables; it never establishes ownership alone.
+    entry="${argv[0]:-}"
+    [[ "$entry" == /* ]] || entry="/proc/$pid/cwd/$entry"
+    [[ $matched -eq 1 || "${argv[0]##*/}" == "$name" || "$entry" -ef "$expected" ]] || return 1
+    executable=$(readlink -f -- "/proc/$pid/exe" 2>/dev/null) || return 1
+    if [[ "$executable" != "$expected" ]]; then
+        [[ -n "$node_executable" && "$executable" == "$node_executable" && $matched -eq 1 ]] || return 1
+    fi
     while IFS= read -r -d '' entry; do
-        [[ "$entry" == "PI_WEB_RUN_DIR=$log_dir" ]] && return 0
-        # A live process may still name the compatibility symlink after migration.
-        if [[ "$entry" == PI_WEB_RUN_DIR=/* && -d "$log_dir" &&
+        if [[ "$entry" == "PI_WEB_RUN_DIR=$log_dir" ]] ||
+           [[ "$entry" == PI_WEB_RUN_DIR=/* && -d "$log_dir" &&
               "${entry#PI_WEB_RUN_DIR=}" -ef "$log_dir" ]]; then
+            # Same-directory aliases preserve migrated run-directory ownership.
             return 0
         fi
-    done < "/proc/$pid/environ"
+    done 2>/dev/null < "/proc/$pid/environ" || return 1
     return 1
 }
 
@@ -278,42 +314,57 @@ process_running() {
     return 0
 }
 
+# Linux start time distinguishes a reused PID, even when argv/env match again.
+process_start_time() {
+    local stat rest
+    local -a fields=()
+    IFS= read -r stat 2>/dev/null < "/proc/$1/stat" || return 1
+    rest="${stat##*) }"
+    read -r -a fields <<< "$rest"
+    [[ "${fields[19]:-}" =~ ^[0-9]+$ ]] || return 1
+    process_identity="${fields[19]}"
+}
+
 stop_pid() {
-    local name="$1" pidfile="$2" pid candidate attempt signal attempts recorded="" failed=0
-    local -a pids=()
-    if [[ -f "$pidfile" ]]; then
-        recorded=$(cat "$pidfile")
-        if [[ "$recorded" =~ ^[1-9][0-9]*$ && "$recorded" -gt 1 ]] && process_running "$recorded"; then
-            if [[ ! -d /proc ]] || is_instance_process "$recorded" "$name"; then
-                pids+=("$recorded")
-            else
-                echo "忽略不属于本实例的过期 PID: $recorded ($name)" >&2
-            fi
-        fi
-    fi
-    # PID files can disappear or contain the PID of an exited launcher.
-    for candidate in /proc/[0-9]*/cmdline; do
+    local name="$1" pidfile="$2" pid candidate attempt identity process_identity recorded="" failed=0
+    local -a pids=() identities=()
+    if [[ -f "$pidfile" ]]; then recorded=$(cat "$pidfile"); fi
+    # Include recorded and recovered PIDs, capturing identity before ownership
+    # checks so a process replaced during discovery cannot inherit permission.
+    for candidate in "$recorded" /proc/[0-9]*/cmdline; do
         pid="${candidate%/cmdline}"; pid="${pid##*/}"
-        [[ "$pid" == "$recorded" ]] && continue
+        [[ "$pid" =~ ^[1-9][0-9]*$ && "$pid" -gt 1 ]] || continue
+        [[ "$candidate" == "$recorded" || "$pid" != "$recorded" ]] || continue
+        process_start_time "$pid" 2>/dev/null || continue
+        identity="$process_identity"
         if is_instance_process "$pid" "$name" && process_running "$pid"; then
             pids+=("$pid")
-            echo "找到本实例遗留进程: $name (PID $pid)"
+            identities+=("$identity")
+            [[ "$pid" == "$recorded" ]] || echo "找到本实例遗留进程: $name (PID $pid)"
         fi
     done
-    for pid in "${pids[@]}"; do
-        signal=TERM
-        # Give graceful shutdown 3 seconds, then allow 2 seconds after KILL.
-        for attempts in 30 20; do
-            kill -s "$signal" "$pid" 2>/dev/null || true
-            for ((attempt=0; attempt<attempts; attempt++)); do
+    for candidate in "${!pids[@]}"; do
+        pid="${pids[$candidate]}"
+        identity="${identities[$candidate]}"
+        process_running "$pid" || continue
+        # Revalidate immediately before the only signal. Shell /proc checks
+        # cannot eliminate the final check-to-kill race (a pidfd would be needed).
+        if ! process_start_time "$pid" 2>/dev/null || [[ "$process_identity" != "$identity" ]] ||
+           ! is_instance_process "$pid" "$name"; then
+            echo "错误：$name (PID $pid) 身份已改变，未发送信号，保留 PID 文件" >&2
+            printf '%s\n' "$pid" > "$pidfile"
+            failed=1
+            continue
+        fi
+        if kill -s TERM "$pid" 2>/dev/null; then
+            for ((attempt=0; attempt<PI_WEB_STOP_TIMEOUT_SECONDS*10; attempt++)); do
                 process_running "$pid" || break
+                process_start_time "$pid" 2>/dev/null && [[ "$process_identity" == "$identity" ]] || break
                 sleep 0.1
             done
-            process_running "$pid" || break
-            signal=KILL
-        done
+        fi
         if process_running "$pid"; then
-            echo "错误：无法停止 $name (PID $pid)，保留 PID 文件" >&2
+            echo "错误：无法停止 $name (PID $pid)，TERM 等待上限 ${PI_WEB_STOP_TIMEOUT_SECONDS}s；未发送 KILL，保留 PID 文件" >&2
             printf '%s\n' "$pid" > "$pidfile"
             failed=1
         else
@@ -325,7 +376,7 @@ stop_pid() {
 }
 
 stop() {
-    stop_pid "pi-web-server"   "$server_pid"
+    stop_pid "pi-web-server" "$server_pid" || return 1
     stop_pid "pi-web-sessiond" "$sessiond_pid"
 }
 

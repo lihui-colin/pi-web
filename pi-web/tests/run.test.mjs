@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -245,7 +245,7 @@ for (const missing of [true, false]) {
   });
 }
 
-test('stop escalates to KILL when a service ignores TERM', () => {
+test('hung server keeps its PID and sessiond alive when graceful shutdown expires', () => {
   const f = fixture();
   try {
     writeFileSync(join(f.root, 'bin/pi-web-server'), `#!${process.execPath}
@@ -261,11 +261,15 @@ setInterval(() => {}, 1000);
     }
     assert.equal(started.status, 0, started.stderr);
     assert.match(readFileSync(join(dir, 'server.log'), 'utf8'), /ready/);
-    const stopped = f.run('stop');
-    assert.equal(stopped.status, 0, stopped.stderr);
+    const stopped = f.run('stop', '8425', { PI_WEB_STOP_TIMEOUT_SECONDS: '1' });
+    assert.equal(stopped.status, 1, stopped.stdout + stopped.stderr);
+    assert.match(stopped.stderr, /1s.*未发送 KILL.*保留 PID 文件/);
     assert.match(readFileSync(join(dir, 'server.log'), 'utf8'), /TERM ignored/);
-    for (const service of ['server', 'sessiond']) assert.equal(existsSync(join(dir, `${service}.pid`)), false);
-    assert.equal(f.run('status').status, 1);
+    for (const [index, service] of ['server', 'sessiond'].entries()) {
+      assert.equal(Number(readFileSync(join(dir, `${service}.pid`), 'utf8')), f.pids[index]);
+      process.kill(f.pids[index], 0);
+    }
+    assert.equal(f.run('status').status, 0);
   } finally { f.cleanup(); }
 });
 
@@ -278,7 +282,7 @@ test(`${action} failure preserves PID files and returns an error`, () => {
     for (const service of ['server', 'sessiond']) f.pids.push(Number(readFileSync(join(dir, `${service}.pid`), 'utf8')));
     const shellEnv = join(f.root, 'deny-signals.sh');
     writeFileSync(shellEnv, 'kill() { if [[ "$1" == -0 ]]; then builtin kill "$@"; else return 1; fi; }\n');
-    const result = f.run(action, '8425', { BASH_ENV: shellEnv });
+    const result = f.run(action, '8425', { BASH_ENV: shellEnv, PI_WEB_STOP_TIMEOUT_SECONDS: '1' });
     assert.doesNotMatch(result.stdout, /启动 pi-web/);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /无法停止.*保留 PID 文件/);
@@ -344,7 +348,7 @@ test('Linux services run in separate sessions with detached stdin', { skip: proc
 test('service environment cannot override config or defaults', () => {
   const f = fixture();
   try {
-    const env = { ...process.env, PI_WEB_PORT: '9999', PI_WEB_HOST: 'bad-host', PI_WEB_RUN_DIR: '/bad-path' };
+    const env = { ...process.env, PATH: `${join(f.root, 'bin')}:${process.env.PATH}`, PI_WEB_PORT: '9999', PI_WEB_HOST: 'bad-host', PI_WEB_RUN_DIR: '/bad-path' };
     const run = () => spawnSync('bash', [join(f.root, 'scripts/run.sh'), 'status'], { env, encoding: 'utf8' });
     // Start owned processes to expose the selected host and port in status output.
     for (const port of ['8024', '8425']) {
@@ -526,5 +530,148 @@ test('invalid voice input setting is rejected before starting services', () => {
       assert.match(result.stderr, /PI_WEB_VOICE_INPUT_ENABLED/);
       assert.equal(existsSync(join(f.root, 'data/pi-web/8425/server.pid')), false);
     }
+  } finally { f.cleanup(); }
+});
+
+// Match the installed npm symlinks: the real files do not bear command names.
+test('resolved global-style Node commands are recovered with missing PID files', () => {
+  const f = fixture();
+  try {
+    const dist = join(f.root, 'installed source', 'dist');
+    mkdirSync(dist, { recursive: true });
+    for (const [service, filename] of [['server', 'index.js'], ['sessiond', 'sessiond.js']]) {
+      const bin = join(f.root, 'bin', `pi-web-${service}`);
+      const target = join(dist, filename);
+      writeFileSync(target, readFileSync(bin), { mode: 0o755 });
+      rmSync(bin);
+      symlinkSync(target, bin);
+    }
+    const started = f.run('start', '8425');
+    const dir = join(f.root, 'data/pi-web/8425');
+    for (const service of ['server', 'sessiond']) {
+      const file = join(dir, `${service}.pid`);
+      if (existsSync(file)) f.pids.push(Number(readFileSync(file, 'utf8')));
+    }
+    assert.equal(started.status, 0, started.stdout + started.stderr);
+    for (const service of ['server', 'sessiond']) rmSync(join(dir, `${service}.pid`));
+    assert.equal(f.run('status').status, 0);
+    for (const [index, service] of ['server', 'sessiond'].entries()) {
+      assert.equal(Number(readFileSync(join(dir, `${service}.pid`), 'utf8')), f.pids[index]);
+    }
+    assert.equal(f.run('stop').status, 0);
+  } finally { f.cleanup(); }
+});
+
+for (const kind of ['eval-token', 'eval-path', 'foreign-script']) {
+  test(`ordinary Node process with service-looking ${kind} is never adopted or stopped`, async () => {
+    const f = fixture();
+    try {
+      const dir = join(f.root, 'data/pi-web/8425');
+      mkdirSync(dir, { recursive: true });
+      const source = "setInterval(() => {}, 1000); console.log('ready');";
+      let args = ['-e', source, kind === 'eval-token' ? 'pi-web-server' : join(f.root, 'bin/pi-web-server')];
+      if (kind === 'foreign-script') {
+        const other = join(f.root, 'other');
+        mkdirSync(other);
+        writeFileSync(join(other, 'pi-web-server'), source);
+        args = [join(other, 'pi-web-server')];
+      }
+      const child = spawn(process.execPath, args, {
+        env: { ...process.env, PI_WEB_RUN_DIR: dir }, stdio: ['ignore', 'pipe', 'inherit'],
+      });
+      f.pids.push(child.pid);
+      await new Promise((resolve, reject) => { child.stdout.once('data', resolve); child.once('error', reject); });
+      // Exercise recovery with no PID file, then the explicit stale PID path.
+      assert.equal(f.run('status', '8425').status, 1);
+      assert.equal(existsSync(join(dir, 'server.pid')), false);
+      writeFileSync(join(dir, 'server.pid'), String(child.pid));
+      assert.equal(f.run('stop').status, 0);
+      process.kill(child.pid, 0);
+      assert.equal(f.run('start').status, 0);
+      for (const service of ['server', 'sessiond']) {
+        const pid = Number(readFileSync(join(dir, `${service}.pid`), 'utf8'));
+        f.pids.push(pid);
+        assert.notEqual(pid, child.pid);
+      }
+      assert.equal(f.run('stop').status, 0);
+      process.kill(child.pid, 0);
+    } finally { f.cleanup(); }
+  });
+}
+
+for (const service of ['server', 'sessiond']) {
+  test(`${service} completes four-second cleanup before stop succeeds`, () => {
+    const f = fixture();
+    try {
+      writeFileSync(join(f.root, 'bin', `pi-web-${service}`), `#!${process.execPath}
+const fs = require('node:fs');
+process.once('SIGTERM', () => setTimeout(() => {
+  fs.writeFileSync(process.env.PI_WEB_RUN_DIR + '/cleanup-complete', 'done');
+  process.exit(0);
+}, 4000));
+console.log('ready');
+setInterval(() => {}, 1000);
+`, { mode: 0o755 });
+      const started = f.run('start', '8425');
+      const dir = join(f.root, 'data/pi-web/8425');
+      for (const name of ['server', 'sessiond']) {
+        const file = join(dir, `${name}.pid`);
+        if (existsSync(file)) f.pids.push(Number(readFileSync(file, 'utf8')));
+      }
+      assert.equal(started.status, 0, started.stdout + started.stderr);
+      // An inherited short timeout must not override the local/default policy.
+      const stopped = spawnSync('bash', [join(f.root, 'scripts/run.sh'), 'stop'], {
+        env: { ...process.env, PATH: `${join(f.root, 'bin')}:${process.env.PATH}`, PI_WEB_STOP_TIMEOUT_SECONDS: '1' },
+        encoding: 'utf8', timeout: 15000,
+      });
+      assert.equal(stopped.status, 0, stopped.stdout + stopped.stderr);
+      assert.equal(readFileSync(join(dir, 'cleanup-complete'), 'utf8'), 'done');
+      for (const name of ['server', 'sessiond']) assert.equal(existsSync(join(dir, `${name}.pid`)), false);
+    } finally { f.cleanup(); }
+  });
+}
+
+test('invalid local graceful shutdown timeout is rejected', () => {
+  const f = fixture();
+  try {
+    for (const value of ['', '0', '-1', '1.5', '86401', 'bad']) {
+      const result = f.run('stop', '8425', { PI_WEB_STOP_TIMEOUT_SECONDS: value });
+      assert.equal(result.status, 2);
+      assert.match(result.stderr, /PI_WEB_STOP_TIMEOUT_SECONDS/);
+    }
+  } finally { f.cleanup(); }
+});
+
+test('stop rechecks ownership before TERM and preserves sessiond if identity changes', () => {
+  const f = fixture();
+  try {
+    assert.equal(f.run('start', '8425').status, 0);
+    const dir = join(f.root, 'data/pi-web/8425');
+    for (const service of ['server', 'sessiond']) f.pids.push(Number(readFileSync(join(dir, `${service}.pid`), 'utf8')));
+    const shellEnv = join(f.root, 'change-identity.sh');
+    // Simulate an exec/identity change between discovery and signaling. Keep the
+    // real process alive so an accidental TERM is observable after stop returns.
+    writeFileSync(shellEnv, `readlink() {
+  if [[ "$*" == "-f -- /proc/$TEST_SERVER_PID/exe" ]]; then
+    if [[ -f "$TEST_IDENTITY_MARKER" ]]; then printf '/unrelated-executable\\n'; return 0; fi
+    printf seen > "$TEST_IDENTITY_MARKER"
+  fi
+  command readlink "$@"
+}
+kill() {
+  if [[ "$1" != -0 ]]; then printf '%s\\n' "$*" >> "$TEST_SIGNAL_LOG"; fi
+  builtin kill "$@"
+}
+`);
+    const result = f.run('stop', '8425', {
+      BASH_ENV: shellEnv, TEST_SERVER_PID: String(f.pids[0]),
+      TEST_IDENTITY_MARKER: join(f.root, 'identity-seen'), TEST_SIGNAL_LOG: join(f.root, 'signals'),
+      PI_WEB_STOP_TIMEOUT_SECONDS: '1',
+    });
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.match(result.stderr, /身份已改变.*未发送信号.*保留 PID 文件/);
+    assert.equal(existsSync(join(f.root, 'signals')), false);
+    for (const pid of f.pids) process.kill(pid, 0);
+    for (const service of ['server', 'sessiond']) assert.equal(existsSync(join(dir, `${service}.pid`)), true);
   } finally { f.cleanup(); }
 });

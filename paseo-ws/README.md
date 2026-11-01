@@ -18,7 +18,7 @@ Nginx 从固定版本源码构建，校验 SHA-256 并保留许可证，已有�
 - `data/.paseo/`：官方数据目录（`PASEO_HOME`），包含完整配置 `config.json`、会话、认证和模型。代理 CLI 需另行安装并认证；任务工作目录由会话指定。
 - `log/daemon.log`：后端日志及轮转文件所在目录，通过官方 `log.file.path` 配置。停止后的下一次 `start` 会保留旧主日志到 `log/legacy-*/daemon.log`，并将旧位置 `data/.paseo/daemon.log` 链接到新日志，以兼容上游固定写入旧路径的退出记录；已有历史轮转文件不自动移动。运行中的后端不迁移日志。
 - `data/tls/<ip>/`：从 `ds-harness/data/tls/<ip>/` 复制的 `fullchain.pem` 与 `privkey.pem`，IPv6 目录名将冒号替换为下划线。HTTPS 启动时若文件缺失、为空或不可读，立即退出并提示复制，不自动启动 DSH 或生成证书。
-- `data/nginx.conf`：由 `nginx.conf.template` 生成；Nginx PID 和临时文件在 `data/nginx/`，错误日志在 `log/nginx/error.log`。Paseo 与 DSH 各自使用独立的 Nginx 二进制、配置、进程、PID 和日志目录，分别启停。
+- `data/nginx.conf`：由 `nginx.conf.template` 生成；Nginx PID、进程启动身份记录 `master.json` 和临时文件在 `data/nginx/`，错误日志在 `log/nginx/error.log`。Paseo 与 DSH 各自使用独立的 Nginx 二进制、配置、进程、PID 和日志目录，分别启停。
 - `data/`、`log/`、`runtime/` 和 `.npm-cache/` 不纳入 Git。
 
 ## 服务管理
@@ -32,15 +32,17 @@ bash paseo-ws/paseo_web_run.sh reload-proxy      # 校验并重载 Nginx
 bash paseo-ws/paseo_web_run.sh stop
 ```
 
+服务管理使用 Linux `/proc` 和 Python 3 校验 Nginx 可执行文件、实例参数、系统启动标识和进程启动时间，拒绝向身份不符的 PID 发信号。`reload-proxy` 校验候选配置成功后才原子替换正式配置，失败保留原文件；`stop` 直接向已验证的主进程发信号，不依赖当前配置或证书是否有效。
+
 默认访问 `https://10.30.0.25:25227/`；无代理模式使用 HTTP。切换模式先停止再启动。停止服务会断开客户端，重载代理可能触发 WebSocket 重连，操作前检查活跃会话和运行任务；依赖本服务的会话应由独立维护进程完成启停与就绪检查。
 
 旧数据已迁入 `data/.paseo/`，迁移工具和临时诊断已移除。故障时检查 `log/nginx/error.log`、`log/daemon.log`；修改日志配置后需在允许中断会话时先 `stop` 再 `start` 才会全部生效，勿重启其他服务。
 
 ## DSH 插件模型目录
 
-`paseo-dsh` 默认使用 `$DSH_HOME/profiles/paseo/cordis.patch.yml`，DSH Web 使用 `profiles/web/cordis.patch.yml`；Web 新增的模型不会自动同步到 Paseo。本部署已在 paseo profile 中注册 `xinmian/grok-4.7`，引用共享凭据库中的 `XINMIAN_API_KEY`，不复制密钥。
+`paseo-dsh` 使用 `$DSH_HOME/profiles/paseo/cordis.patch.yml`；未设置 `DSH_HOME` 时与上游一致，使用 `~/.dsh`。可通过 `DSH_PASEO_PROFILE` 选择其他 profile。DSH Web 使用自己的 `web` profile，新增模型不会自动同步到 Paseo。Paseo 的模型定义及其引用的凭据需要在自身配置中独立配置，例如 `xinmian/grok-4.7` 引用 `XINMIAN_API_KEY`；不要将 DSH Web 的数据目录当作默认值。
 
-`patch-dsh-catalog.cjs` 修复 `paseo-dsh 0.2.17` 的冷启动目录查询：让 `paseo/catalog` 和 `initialize` 一样等待 `loader.await()`，防止凭据服务尚未加载时漏报自定义模型。已核查[上游实现](https://github.com/liuxing7954/paseo-dsh/blob/c642c604aeb5b409a6237ca3ef54fdb82801677d/dsh-bridge/lib/index.js#L83)，该提交仅对 initialize 等待。补丁同时更新当前桥接入口与插件内嵌资源；安装脚本会应用，也可在插件安装/升级后运行 `node paseo-ws/patch-dsh-catalog.cjs`（非默认 home 时设置 `DSH_HOME`）。结构不匹配会停止，需重新核查上游。无需重启服务；变更后需刷新 Paseo 的全局 provider snapshot：在 Providers 中打开 DeepSeek Harness (native)，点击 Refresh；客户端 API 为 `refreshProvidersSnapshot({ providers: ['deepseek-harness-native'] })`，不传 `cwd`。传 `cwd` 只刷新对应项目的快照，设置页仍可能显示旧列表。验证时需打开实际提供商详情，确认模型数量为 9 且显示 `xinmian/grok-4.7`。插件自身目录另有最长五分钟缓存。
+`patch-dsh-catalog.cjs` 修复 `paseo-dsh 0.2.17` 的冷启动目录查询：让 `paseo/catalog` 和 `initialize` 一样等待 `loader.await()`，防止凭据服务尚未加载时漏报自定义模型。已核查[上游实现](https://github.com/liuxing7954/paseo-dsh/blob/c642c604aeb5b409a6237ca3ef54fdb82801677d/dsh-bridge/lib/index.js#L83)，该提交仅对 initialize 等待。补丁同时更新当前桥接入口与插件内嵌资源；安装脚本会应用，也可在插件安装/升级后运行 `node paseo-ws/patch-dsh-catalog.cjs`（使用与运行中插件一致的 `DSH_HOME` 和 `DSH_PASEO_PROFILE`；默认 home 为 `~/.dsh`）。结构不匹配会停止，需重新核查上游。无需重启服务；变更后需刷新 Paseo 的全局 provider snapshot：在 Providers 中打开 DeepSeek Harness (native)，点击 Refresh；客户端 API 为 `refreshProvidersSnapshot({ providers: ['deepseek-harness-native'] })`，不传 `cwd`。传 `cwd` 只刷新对应项目的快照，设置页仍可能显示旧列表。验证时需打开实际提供商详情，核对该 profile 实际配置的模型列表及 reasoning 档位，例如 `xinmian/grok-4.7`，不要仅确认提供商出现在列表中。插件自身目录另有最长五分钟缓存。
 
 ## Web UI 补丁
 
@@ -56,4 +58,4 @@ Web 终端使用浏览器原生右键菜单：PC 右键、手机长按的菜单�
 
 `patch-web-ui.baseline.json` 记录适用版本 `v0.14.0` 及上游 commit [`8c6de842a3157530c26a7a94c78a3d647fb96ce9`](https://github.com/getpaseo/paseo/commit/8c6de842a3157530c26a7a94c78a3d647fb96ce9)。版本、commit 不匹配或缺少 `gitHead` 时输出 `[WARN]`；资源结构不匹配时退出，不自动更新基准。适配新版本后应同步更新基准。
 
-验证：`node --test paseo-ws/test-*.cjs`，测试使用临时目录与模拟服务，不启停线上服务。目录树浏览器测试需安装 Playwright/Chromium 及其运行库；可用 `PASEO_PLAYWRIGHT_MODULE=/path/to/playwright node --test paseo-ws/test-server-directory-picker.cjs` 指定模块路径。未安装时该浏览器测试明确跳过，其余测试继续运行。浏览器用例覆盖桌面/手机尺寸、懒加载、选择确认、取消、上级导航、空目录、权限失败重试和晚到响应。
+验证：`node --test paseo-ws/test-*.cjs` 和 `python3 -B paseo-ws/test-nginx.py`。生命周期测试需要 `cc` 与 Python 3，使用临时目录和独立测试进程，不启停线上服务。目录树浏览器测试需安装 Playwright/Chromium 及其运行库；可用 `PASEO_PLAYWRIGHT_MODULE=/path/to/playwright node --test paseo-ws/test-server-directory-picker.cjs` 指定模块路径。未安装时该浏览器测试明确跳过，其余测试继续运行。浏览器用例覆盖桌面/手机尺寸、懒加载、选择确认、取消、上级导航、空目录、权限失败重试和晚到响应。

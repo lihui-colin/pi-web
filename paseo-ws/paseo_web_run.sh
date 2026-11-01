@@ -38,7 +38,6 @@ if [[ ! -x "$PASEO" ]]; then
 fi
 
 NGINX="$ROOT/runtime/nginx/sbin/nginx"
-NGINX_CONF="$DATA/nginx.conf"
 NGINX_RUN="$DATA/nginx"
 mkdir -p "$NGINX_RUN" "$LOG/nginx"
 exec 9>"$DATA/service.lock"
@@ -48,14 +47,11 @@ daemon() {
   "$PASEO" daemon "$@" --home "$PASEO_HOME" 9>&-
 }
 
-nginx_running() {
-  [[ -f "$NGINX_RUN/nginx.pid" ]] || return 1
-  local pid
-  read -r pid < "$NGINX_RUN/nginx.pid"
-  [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null
+nginx_control() {
+  python3 "$ROOT/paseo_nginx.py" "$1" "$ROOT" 9>&-
 }
-nginx_cmd() {
-  "$NGINX" -p "$NGINX_RUN/" -c "$NGINX_CONF" -e "$LOG/nginx/error.log" "$@" 9>&-
+nginx_running() {
+  nginx_control running
 }
 case "$1" in
   start)
@@ -75,14 +71,16 @@ case "$1" in
         printf '复制完成后重新执行 start。\n' >&2
         exit 1
       fi
-      node "$ROOT/paseo-config.cjs" proxy "$DATA"
       [[ -x "$NGINX" ]] || { printf '请先运行 install.sh 安装 Nginx。\n' >&2; exit 1; }
       mkdir -p "$NGINX_RUN"/{body,proxy,fastcgi,uwsgi,scgi}
-      nginx_cmd -t
+      nginx_control publish
     else
       if nginx_running; then
         printf 'HTTPS 代理正在运行，请先 stop 再 start --no-proxy。\n' >&2
         exit 1
+      else
+        code=$?
+        [[ "$code" -eq 1 ]] || exit "$code"
       fi
     fi
     # 读取实际运行状态，禁止隐式重启或改写运行中实例的监听设置。
@@ -91,35 +89,28 @@ case "$1" in
     daemon start
     CURL_ARGS=(--noproxy '*' --fail --silent --show-error --max-time 15)
     if [[ "$MODE" == proxy ]]; then
-      if ! nginx_running; then nginx_cmd; fi
+      nginx_control start
       CURL_ARGS+=(--cacert "$CA_CERT")
     fi
     curl "${CURL_ARGS[@]}" "$URL/api/health"
     printf '\nPaseo：%s/\n' "$URL"
     ;;
   stop)
-    if nginx_running; then
-      nginx_cmd -s quit
-      for ((attempt=0; attempt<50; attempt++)); do
-        nginx_running || break
-        sleep 0.2
-      done
-      if nginx_running; then
-        printf 'Nginx 仍在退出，请稍后重试 stop。\n' >&2
-        exit 1
-      fi
-    fi
+    nginx_control quit
     daemon stop
     ;;
   status)
     daemon status
-    if nginx_running; then printf 'nginx: running (HTTPS)\n'; else printf 'nginx: stopped\n'; fi
+    if nginx_running; then
+      printf 'nginx: running (HTTPS)\n'
+    else
+      code=$?
+      [[ "$code" -eq 1 ]] || exit "$code"
+      printf 'nginx: stopped\n'
+    fi
     ;;
   reload-proxy)
-    node "$ROOT/paseo-config.cjs" proxy "$DATA"
-    nginx_cmd -t
-    nginx_running || { printf 'Nginx 未运行。\n' >&2; exit 1; }
-    nginx_cmd -s reload
+    nginx_control reload
     ;;
   set-password) daemon set-password ;;
 esac

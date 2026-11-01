@@ -147,6 +147,9 @@ main start
 ''', 'test', str(script)]
             cases = [
                 ('::1', None, '::1'),
+                ('0:0:0:0:0:0:0:1', '127.0.0.1', '127.0.0.1'),
+                ('::ffff:192.0.2.1', '127.0.0.1', '127.0.0.1'),
+                ('::ffff:c000:201', '127.0.0.1', '127.0.0.1'),
                 ('2001:db8::25', '', '127.0.0.2'),
                 ('192.0.2.25', None, '127.0.0.2'),
                 ('DSH.Example.Test', '127.0.0.1', '127.0.0.1'),
@@ -156,13 +159,22 @@ main start
                 ('dsh.example.test', '', '127.0.0.2'),
             ] + [('127.0.0.1', invalid, None) for invalid in
                  ('localhost', 'https://127.0.0.1', '127.0.0.1:25228', '[::1]', '999.0.0.1', '::gg', '127.0.0.1/8')]
+            canonical_hosts = {
+                '0:0:0:0:0:0:0:1': '[::1]',
+                '::ffff:192.0.2.1': '[::ffff:c000:201]',
+                '::ffff:c000:201': '[::ffff:c000:201]',
+                '::1': '[::1]',
+                '2001:db8::25': '[2001:db8::25]',
+            }
             for address, listen, expected in cases:
+                # Explicit scheme-default ports must remain exact-port grants.
+                port = {'0:0:0:0:0:0:0:1': 443, '::ffff:192.0.2.1': 80}.get(address, 25228)
                 with self.subTest(address=address, listen=listen):
                     tls = root / 'data/tls' / address.lower().replace(':', '_')
                     tls.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(cert, tls / 'fullchain.pem')
                     shutil.copy2(key, tls / 'privkey.pem')
-                    config.write_text(f"port=25228\nserver_ip='{address}'\n" +
+                    config.write_text(f"port={port}\nserver_ip='{address}'\n" +
                                       (f"listen_host='{listen}'\n" if listen is not None else ''))
                     result = subprocess.run(command, env=environment, capture_output=True,
                                             text=True, timeout=10)
@@ -174,11 +186,16 @@ main start
                         self.assertEqual(result.returncode, 0, result.stderr)
                         proxy = next(line for line in result.stdout.splitlines()
                                      if line.startswith('SERVICE dsh-token-proxy '))
-                        self.assertIn(f'--listen-host {expected} --listen-port 25228', proxy)
-                        host = f'[{address}]' if ':' in address else address
-                        self.assertIn(f'--public-host {host}:25228', proxy)
-                        self.assertIn(f'访问地址：https://{host}:25228/', result.stdout)
+                        self.assertIn(f'--listen-host {expected} --listen-port {port}', proxy)
+                        host = canonical_hosts.get(address, address.lower())
+                        self.assertIn(f'--public-host {host}:{port}', proxy)
+                        self.assertIn(f'访问地址：https://{host}:{port}/', result.stdout)
+                        backend = next(line for line in result.stdout.splitlines()
+                                       if line.startswith('SERVICE dsh-web '))
+                        self.assertIn(f'--trusted-host {host}:{port} --trusted-host 127.0.0.1:12346', backend)
+                        self.assertIn(f'--public-url https://{host}:{port}/ --no-open', backend)
                         self.assertIn(f'--tls-cert {tls}/fullchain.pem', proxy)
+                        self.assertIn(f'--tls-key {tls}/privkey.pem', proxy)
                     self.assertFalse((binaries / 'called-dsh').exists())
                     self.assertFalse((binaries / 'called-magpie').exists())
                     self.assertFalse(list((root / 'log').glob('*.pid')))

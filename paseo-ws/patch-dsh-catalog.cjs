@@ -2,6 +2,7 @@
 // Upstream checked: liuxing7954/paseo-dsh@c642c604aeb5b409a6237ca3ef54fdb82801677d.
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
 const before = "if (method === 'initialize') await ctx.get('loader')?.await();";
 const after = "if (method === 'initialize' || method === 'paseo/catalog') await ctx.get('loader')?.await();";
 function patchSource(source) {
@@ -17,13 +18,13 @@ function patchAssets(source) {
 }
 function main() {
   const plugins = path.join(__dirname, 'data/.paseo/plugins/dsh-paseo');
-  const dshHome = process.env.DSH_HOME || path.resolve(__dirname, '../ds-harness/data/.dsh');
+  const dshHome = process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh');
   const targets = [];
   if (fs.existsSync(plugins)) for (const version of fs.readdirSync(plugins)) {
     const asset = path.join(plugins, version, 'node_modules/paseo-dsh/server/bridge-assets.ts');
     if (fs.existsSync(asset)) targets.push([asset, patchAssets]);
   }
-  const bridge = path.join(dshHome, 'profiles', process.env.DSH_PASEO_PROFILE || 'paseo', 'node_modules/dsh-paseo-bridge/lib/index.js');
+  const bridge = path.join(dshHome, 'profiles', process.env.DSH_PASEO_PROFILE ?? 'paseo', 'node_modules/dsh-paseo-bridge/lib/index.js');
   if (fs.existsSync(bridge)) targets.push([bridge, patchSource]);
   // Validate every source before changing any of them.
   const edits = targets.map(([file, patch]) => { const old = fs.readFileSync(file, 'utf8'); return { file, old, next: patch(old) }; });

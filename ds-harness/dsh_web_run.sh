@@ -129,7 +129,6 @@ start() {
     local command_name upstream_port='' pid status
     local public_host="$server_ip"
     [[ "$server_ip" != *:* ]] || public_host="[$server_ip]"
-    local public_url="https://${public_host}:${port}/" cookie_prefix="dsh${port}_"
     local tls_dir tls_cert tls_key
     # Validate the address and HTTPS together before starting any service.
     local address_selection
@@ -138,9 +137,14 @@ start() {
     tls_dir="${address_selection#*$'\n'}"
     tls_cert="$tls_dir/fullchain.pem"
     tls_key="$tls_dir/privkey.pem"
-    for command_name in magpie dsh; do
+    for command_name in node magpie dsh; do
         command -v "$command_name" >/dev/null || { fail "找不到 $command_name 命令。"; return 1; }
     done
+    # Match upstream trustedHosts' WHATWG hostname normalization (including
+    # expanded and IPv4-mapped IPv6). Keep server_ip intact for TLS lookup above,
+    # and append the explicit port ourselves so :80 and :443 retain exact scope.
+    public_host="$(node -p 'new URL(`http://${process.argv[1]}`).hostname' -- "$public_host")" || return 1
+    local public_url="https://${public_host}:${port}/" cookie_prefix="dsh${port}_"
     prepare_runtime || return 1
     # Reject ambiguous live legacy state before starting or changing any service.
     for command_name in magpie-serve dsh-web dsh-token-proxy; do
