@@ -2,15 +2,22 @@
 
 ## 安装与配置
 
-运行 `bash paseo-ws/install.sh` 安装本地 CLI、Nginx 并应用 Web UI 补丁；安装不启停服务。Nginx 从固定版本源码构建，校验 SHA-256 并保留许可证，已有安装校验后复用。首次构建需要 `cc`、`make`、`perl`、`curl`、`tar`、Python 3；`PASEO_NGINX_BUILD_JOBS` 默认 4。可用 `bash paseo-ws/paseo_nginx_install.sh --dry-run` 查看安装计划。
+运行 `bash paseo-ws/install.sh` 安装本地 CLI、Nginx 并应用 Web UI 补丁；安装不启停服务。安装和服务管理均排除 Conda 环境的 Node/npm，即使它们可运行也不使用。选择顺序为显式 `PASEO_NODE_BIN`、项目 `runtime/node/bin`、PATH 中独立的 Node.js >=22/npm、本机已安装的 NVM 版本。通过 Conda 路径、环境前缀及 `conda-meta` 识别环境，并检查可执行文件符号链接的真实路径。
 
-首次部署时初始化配置，已有文件不要覆盖：
+没有可用独立运行时时，安装器自动调用 `install-node.sh`：从 `nodejs.org` 下载当前平台的 Node.js 24 LTS，核对官方 SHA-256 后安装到 `runtime/node`。此步骤需要 curl、tar、Python 3；支持 Linux/macOS 的 x64/arm64，不修改 Conda、系统动态库或全局 PATH。已有 `runtime/node` 不覆盖；服务管理只选择运行时，不自动下载。
+
+也可用 `PASEO_NODE_BIN=/absolute/path/to/node/bin bash paseo-ws/install.sh` 显式指定同时包含 `node` 和 `npm` 的独立目录；服务管理脚本支持同一变量。显式指定无效或 Conda 路径会直接报错，不回退。
+
+Nginx 从固定版本源码构建，校验 SHA-256 并保留许可证，已有安装校验后复用。首次构建需要 `cc`、`make`、`perl`、`curl`、`tar`、Python 3；`PASEO_NGINX_BUILD_JOBS` 默认 4。可用 `bash paseo-ws/paseo_nginx_install.sh --dry-run` 查看安装计划。
+
+如果 `data/paseo.conf` 不存在，安装脚本会提示输入 IP 和端口（回车使用 `10.30.0.25`、`25227`），验证后创建仅含这两个字段、权限为 `600` 的 JSON 文件。支持 IPv4/IPv6；端口不能与后端 `25226` 冲突。已有配置不覆盖，也不再询问；没有标准输入时明确报错，不写入不完整配置。
+
+首次部署还需初始化官方完整配置，已有文件不要覆盖：
 
 ```bash
 install -d -m 700 paseo-ws/data/.paseo
-cp -n paseo-ws/paseo.conf.example paseo-ws/data/paseo.conf
 cp -n paseo-ws/config.json.example paseo-ws/data/.paseo/config.json
-chmod 600 paseo-ws/data/paseo.conf paseo-ws/data/.paseo/config.json
+chmod 600 paseo-ws/data/.paseo/config.json
 ```
 
 - `data/paseo.conf`：只包含访问地址 `ip` 和 `port`，默认 `10.30.0.25:25227`。

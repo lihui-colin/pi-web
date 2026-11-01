@@ -12,7 +12,7 @@ function fixture(t) {
   fs.mkdirSync(path.join(data, '.paseo'), { recursive: true });
   fs.writeFileSync(path.join(data, 'paseo.conf'), '{"ip":"127.0.0.1","port":31415}');
   fs.copyFileSync(path.join(__dirname, 'config.json.example'), path.join(data, '.paseo/config.json'));
-  for (const file of ['paseo_web_run.sh', 'paseo-config.cjs', 'nginx.conf.template']) {
+  for (const file of ['paseo_web_run.sh', 'node-runtime.sh', 'paseo-config.cjs', 'nginx.conf.template']) {
     fs.copyFileSync(path.join(__dirname, file), path.join(root, file));
   }
   const mock = `#!${process.execPath}

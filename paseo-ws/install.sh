@@ -5,14 +5,18 @@ umask 077
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PREFIX="$ROOT/runtime"
 
-for dependency in node npm; do
-  if ! command -v "$dependency" >/dev/null 2>&1; then
-    printf '缺少 %s，请先安装 Node.js（含 npm）。\n' "$dependency" >&2
-    exit 1
-  fi
-done
+source "$ROOT/node-runtime.sh"
+if ! paseo_select_node; then
+  # An explicit invalid override is a configuration error, not permission to ignore it.
+  if [[ ${PASEO_NODE_BIN+x} ]]; then exit 1; fi
+  printf '未找到独立 Node.js，正在为 Paseo 安装官方 Node.js 24 LTS…\n'
+  bash "$ROOT/install-node.sh"
+  paseo_select_node
+fi
+printf '使用 Node.js %s：%s\n' "$(node --version)" "$(command -v node)"
+bash "$ROOT/init-access-config.sh"
 
-# 仅安装环境，不修改服务配置，不启动或停止服务。
+# 仅安装环境，不启动或停止服务；已有配置保持不变。
 bash "$ROOT/paseo_nginx_install.sh"
 mkdir -p -- "$PREFIX"
 npm install --global --prefix "$PREFIX" --cache "$ROOT/.npm-cache" --engine-strict '@getpaseo/cli'

@@ -28,6 +28,9 @@ case "$ACTION" in
   *) usage >&2; exit 2 ;;
 esac
 
+source "$ROOT/node-runtime.sh"
+paseo_select_node
+
 if [[ ! -x "$PASEO" ]]; then
   printf '尚未安装 Paseo，请先运行：bash %q\n' "$ROOT/install.sh" >&2
   exit 1
