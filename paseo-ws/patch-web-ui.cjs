@@ -48,6 +48,26 @@ function main() {
   // Align the underlying client timeout (normally 15s) with the TLS probe's budget.
   replaceOnce('if("directTcp"===t.type)return{...h,url:(0,s.buildDaemonWebSocketUrl)(t.endpoint,{useTls:t.useTls??!1})}',
    'if("directTcp"===t.type)return{...h,...t.useTls?{connectTimeoutMs:n?.timeoutMs??20000}:{},url:(0,s.buildDaemonWebSocketUrl)(t.endpoint,{useTls:t.useTls??!1})}');
+  // Web/remote hosts reuse the daemon's listDirectory API. Electron keeps its native picker.
+  replaceOnce('canBrowse:t&&(0,C.getIsElectronRuntime)()&&Z===e.serverId',
+    'canBrowse:t&&(_.isWeb&&!(0,C.getIsElectronRuntime)()||(0,C.getIsElectronRuntime)()&&Z===e.serverId)');
+  replaceOnce('if(me&&ke&&!He.current){He.current=!0;',
+    'if(me&&(ke||_.isWeb)&&!He.current){He.current=!0;');
+  replaceOnce('const e=await(0,T.pickDirectory)();',
+    'const e=await(_.isWeb&&!(0,C.getIsElectronRuntime)()?globalThis.__paseoPickServerDirectory(je,{initialPath:xe[0],hostLabel:we?.label}):(0,T.pickDirectory)());');
+  replaceOnce('},[me,ke,Ge]),Ve=', '},[me,ke,Ge,je,xe,we]),Ve=');
+  replaceOnce('description:"Choose or create a directory in Finder"', 'description:`Choose a directory on ${t.label}`');
+  const pickerStart = '/* PASEO_DIRECTORY_PICKER_START */';
+  const pickerEnd = '/* PASEO_DIRECTORY_PICKER_END */';
+  if (patched.startsWith(pickerStart)) {
+    const markerEnd = patched.indexOf(pickerEnd);
+    if (markerEnd < 0) throw new Error('Incomplete directory picker patch');
+    patched = patched.slice(markerEnd + pickerEnd.length).replace(/^\n/, '');
+  }
+  const picker = fs.readFileSync(path.join(__dirname, 'server-directory-picker.js'), 'utf8');
+  patched = pickerStart + '\n' + picker + '\n' + pickerEnd + '\n' + patched;
+  // Validate syntax before publishing either the bundle or HTML.
+  new (require('node:vm').Script)(patched);
   const hash = crypto.createHash('sha256').update(patched).digest('hex').slice(0, 32);
   const newUrl = '/_expo/static/js/web/index-' + hash + '.js';
   const target = path.join(root, newUrl);

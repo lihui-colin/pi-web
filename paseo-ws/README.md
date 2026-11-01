@@ -36,8 +36,12 @@ bash paseo-ws/paseo_web_run.sh stop
 
 ## Web UI 补丁
 
-`patch-web-ui.cjs` 将首次连接探测和后续 TLS 连接等待时间调整为 20 秒，修复手机慢连接超时；生成新哈希资源地址，保留原 JS。安装时自动执行，也可运行 `node paseo-ws/patch-web-ui.cjs` 后刷新网页，无需重启。
+`patch-web-ui.cjs` 将首次连接探测和后续 TLS 连接等待时间调整为 20 秒，修复手机慢连接超时；同时给网页版 Add projects 增加 **Browse** 服务器目录树入口。补丁生成新哈希资源地址，保留原 JS。安装时自动执行，也可运行 `node paseo-ws/patch-web-ui.cjs` 后刷新网页，无需重启。
+
+目录选择器由 `server-directory-picker.js` 实现，复用已连接主机的 `listDirectory(cwd, path)` 会话接口。点击名称选中并按需展开子目录，左侧箭头可展开或折叠，再点击 **Select this folder** 添加；支持上级目录、刷新、错误重试、键盘和手机布局。可浏览服务器进程有权限访问的目录，包括隐藏目录；默认从已有推荐绝对路径开始，没有推荐路径则从 `/` 开始。已有路径搜索和 Electron 本机原生选择器保留。
+
+上游核查：[`v0.14.0` AddProjectFlow](https://github.com/getpaseo/paseo/blob/v0.14.0/packages/app/src/components/add-project-flow.tsx#L359) 的 Browse 仅适用于 Electron 本机；main 提交 `5afa1a9f8ef4b069ff84278668c1fd030df42273` 同样如此。后端已有 [`listDirectory`](https://github.com/getpaseo/paseo/blob/v0.14.0/packages/client/src/daemon-client.ts#L5068)，本补丁只补界面接入，不新增文件访问服务。
 
 `patch-web-ui.baseline.json` 记录适用版本 `v0.14.0` 及上游 commit [`8c6de842a3157530c26a7a94c78a3d647fb96ce9`](https://github.com/getpaseo/paseo/commit/8c6de842a3157530c26a7a94c78a3d647fb96ce9)。版本、commit 不匹配或缺少 `gitHead` 时输出 `[WARN]`；资源结构不匹配时退出，不自动更新基准。适配新版本后应同步更新基准。
 
-验证：`node --test paseo-ws/test-*.cjs`，测试使用临时目录与模拟服务，不启停线上服务。
+验证：`node --test paseo-ws/test-*.cjs`，测试使用临时目录与模拟服务，不启停线上服务。目录树浏览器测试需安装 Playwright/Chromium 及其运行库；可用 `PASEO_PLAYWRIGHT_MODULE=/path/to/playwright node --test paseo-ws/test-server-directory-picker.cjs` 指定模块路径。未安装时该浏览器测试明确跳过，其余测试继续运行。浏览器用例覆盖桌面/手机尺寸、懒加载、选择确认、取消、上级导航、空目录、权限失败重试和晚到响应。
