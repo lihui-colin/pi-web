@@ -43,6 +43,10 @@ bash paseo-ws/paseo_web_run.sh stop
 
 上游核查：[`v0.14.0` AddProjectFlow](https://github.com/getpaseo/paseo/blob/v0.14.0/packages/app/src/components/add-project-flow.tsx#L359) 的 Browse 仅适用于 Electron 本机；main 提交 `5afa1a9f8ef4b069ff84278668c1fd030df42273` 同样如此。后端已有 [`listDirectory`](https://github.com/getpaseo/paseo/blob/v0.14.0/packages/client/src/daemon-client.ts#L5068)，本补丁只补界面接入，不新增文件访问服务。
 
+Web 终端使用浏览器原生右键菜单：PC 右键、手机长按的菜单和复制粘贴选项由浏览器提供，不注入自定义菜单或常驻按钮。补丁移除 Web 终端对 `contextmenu` 的默认行为拦截，Electron 继续使用原生应用菜单。具体可用选项由浏览器、选区和当前焦点决定。已应用旧自定义菜单补丁的安装会在再次运行补丁时自动移除旧实现，刷新页面后生效。
+
+上游核查：[`v0.14.0` TerminalEmulator](https://github.com/getpaseo/paseo/blob/v0.14.0/packages/app/src/components/terminal-emulator.tsx) 的右键处理无条件调用 `preventDefault()`，但菜单实现依赖 Electron，因此浏览器默认菜单被拦截后没有替代菜单。本补丁仅在 Electron 菜单接口存在时拦截事件。
+
 `patch-web-ui.baseline.json` 记录适用版本 `v0.14.0` 及上游 commit [`8c6de842a3157530c26a7a94c78a3d647fb96ce9`](https://github.com/getpaseo/paseo/commit/8c6de842a3157530c26a7a94c78a3d647fb96ce9)。版本、commit 不匹配或缺少 `gitHead` 时输出 `[WARN]`；资源结构不匹配时退出，不自动更新基准。适配新版本后应同步更新基准。
 
 验证：`node --test paseo-ws/test-*.cjs`，测试使用临时目录与模拟服务，不启停线上服务。目录树浏览器测试需安装 Playwright/Chromium 及其运行库；可用 `PASEO_PLAYWRIGHT_MODULE=/path/to/playwright node --test paseo-ws/test-server-directory-picker.cjs` 指定模块路径。未安装时该浏览器测试明确跳过，其余测试继续运行。浏览器用例覆盖桌面/手机尺寸、懒加载、选择确认、取消、上级导航、空目录、权限失败重试和晚到响应。

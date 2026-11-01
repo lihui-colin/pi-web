@@ -57,6 +57,13 @@ function main() {
     'const e=await(_.isWeb&&!(0,C.getIsElectronRuntime)()?globalThis.__paseoPickServerDirectory(je,{initialPath:xe[0],hostLabel:we?.label}):(0,T.pickDirectory)());');
   replaceOnce('},[me,ke,Ge]),Ve=', '},[me,ke,Ge,je,xe,we]),Ve=');
   replaceOnce('description:"Choose or create a directory in Finder"', 'description:`Choose a directory on ${t.label}`');
+  // Remove the older local clipboard menu hook when upgrading an already patched bundle.
+  const clipboardHook = '(0,n.useEffect)(()=>globalThis.__paseoMountTerminalClipboard(D.current,A.current),[h]);';
+  if (patched.split(clipboardHook).length > 2) throw new Error('Unexpected duplicate clipboard hook');
+  patched = patched.replace(clipboardHook, '');
+  // Only Electron owns a custom context menu; Web must allow the browser default.
+  replaceOnce('oe=(0,n.useCallback)(n=>{n.preventDefault(),te()},[te])',
+    'oe=(0,n.useCallback)(n=>{typeof window.paseoDesktop?.menu?.showContextMenu==="function"&&(n.preventDefault(),te())},[te])');
   const pickerStart = '/* PASEO_DIRECTORY_PICKER_START */';
   const pickerEnd = '/* PASEO_DIRECTORY_PICKER_END */';
   if (patched.startsWith(pickerStart)) {
