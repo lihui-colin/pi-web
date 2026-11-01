@@ -24,14 +24,6 @@ function main() {
   const root = path.join(serverRoot, 'dist/server/web-ui');
   const indexPath = path.join(root, 'index.html');
   const html = fs.readFileSync(indexPath, 'utf8');
-  function publishHtml(next) {
-    next = next.replace(/<script id="paseo-local-diagnostics">[\s\S]*?<\/script>\n?/g, '');
-    if (process.env.PASEO_DIAGNOSTICS === '1') {
-      const diagnostics = fs.readFileSync(path.join(__dirname, 'browser-diagnostics.js'), 'utf8');
-      next = next.replace('<head>', '<head>\n<script id="paseo-local-diagnostics">'+diagnostics+'</script>');
-    }
-    fs.writeFileSync(indexPath, next);
-  }
   const match = html.match(/src="(\/_expo\/static\/js\/web\/index-[a-f0-9]+\.js)"/);
   if (!match) throw new Error('Cannot find Paseo entry asset; review upstream build.');
   let patched = fs.readFileSync(path.join(root, match[1]), 'utf8');
@@ -61,7 +53,9 @@ function main() {
   const target = path.join(root, newUrl);
   if (fs.existsSync(target) && fs.readFileSync(target, 'utf8') !== patched) throw new Error('Asset hash collision');
   fs.writeFileSync(target, patched);
-  publishHtml(html.replaceAll(match[1], newUrl));
+  // Remove diagnostics injected by older local patches when publishing the HTML.
+  const nextHtml = html.replace(/<script id="paseo-local-diagnostics">[\s\S]*?<\/script>\n?/g, '');
+  fs.writeFileSync(indexPath, nextHtml.replaceAll(match[1], newUrl));
   console.log('Initial discovery and subsequent TLS probes patched to 20s.');
   console.log('Asset: '+newUrl);
 }

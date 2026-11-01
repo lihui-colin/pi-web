@@ -8,7 +8,7 @@ export PASEO_HOME="$DATA/.paseo"
 PASEO="$ROOT/runtime/bin/paseo"
 
 usage() {
-  printf '用法：%s start [--proxy|--no-proxy]\n      %s {stop|status|set-password|reload-proxy|migrate-home}\n' "$0" "$0"
+  printf '用法：%s start [--proxy|--no-proxy]\n      %s {stop|status|set-password|reload-proxy}\n' "$0" "$0"
 }
 ACTION="${1:-}"
 MODE=proxy
@@ -22,7 +22,7 @@ case "$ACTION" in
       *) usage >&2; exit 2 ;;
     esac
     ;;
-  stop|status|set-password|reload-proxy|migrate-home)
+  stop|status|set-password|reload-proxy)
     [[ $# -eq 1 ]] || { usage >&2; exit 2; }
     ;;
   *) usage >&2; exit 2 ;;
@@ -36,32 +36,13 @@ fi
 NGINX="$ROOT/runtime/nginx/sbin/nginx"
 NGINX_CONF="$DATA/nginx.conf"
 NGINX_RUN="$DATA/nginx"
-if [[ "$ACTION" == migrate-home ]]; then
-  exec python3 "$ROOT/paseo-migrate-home.py" launch "$ROOT"
-fi
-
 mkdir -p "$NGINX_RUN"
-# The detached migration worker passes its locked descriptor to lifecycle commands.
-if [[ -n "${PASEO_MAINTENANCE_HOME:-}" && "$(readlink /proc/self/fd/9)" == "$DATA/service.lock" ]]; then
-  [[ "$PASEO_MAINTENANCE_HOME" == "$DATA" || "$PASEO_MAINTENANCE_HOME" == "$DATA/.paseo" ]] || {
-    printf '无效的维护进程锁或数据目录。\n' >&2; exit 1;
-  }
-  export PASEO_HOME="$PASEO_MAINTENANCE_HOME"
-else
-  # Older daemon launches may have inherited this marker without its lock descriptor.
-  unset PASEO_MAINTENANCE_HOME
-  exec 9>"$DATA/service.lock"
-fi
+exec 9>"$DATA/service.lock"
 flock -x 9
 
-if [[ -z "${PASEO_MAINTENANCE_HOME:-}" && -f "$DATA/config.json" ]]; then
-  case "$ACTION" in
-    status|stop) export PASEO_HOME="$DATA" ;;
-    start|set-password)
-      printf '旧数据尚未迁移，请在无运行任务时执行：%s migrate-home\n' "$0" >&2
-      exit 1 ;;
-  esac
-fi
+daemon() {
+  "$PASEO" daemon "$@" --home "$PASEO_HOME" 9>&-
+}
 
 nginx_running() {
   [[ -f "$NGINX_RUN/nginx.pid" ]] || return 1
@@ -72,20 +53,6 @@ nginx_running() {
 nginx_cmd() {
   "$NGINX" -p "$NGINX_RUN/" -c "$NGINX_CONF" -e "$NGINX_RUN/error.log" "$@" 9>&-
 }
-if [[ -z "${PASEO_MAINTENANCE_HOME:-}" && -f "$DATA/home-migration.json" &&
-      ( "$ACTION" == start || "$ACTION" == set-password ) ]]; then
-  node - "$DATA/home-migration.json" <<'NODE'
-const fs = require('node:fs');
-const { phase } = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
-if (!['complete', 'rolled-back'].includes(phase)) {
-  console.error('数据迁移未完成，请先检查 data/home-migration.json 和迁移日志。');
-  process.exit(1);
-}
-NODE
-fi
-
-# Maintenance context is local to this script, never part of the daemon environment.
-unset PASEO_MAINTENANCE_HOME
 case "$1" in
   start)
     ENDPOINT="$(node "$ROOT/paseo-config.cjs" endpoint "$DATA" "$MODE")"
@@ -104,21 +71,16 @@ case "$1" in
       fi
     fi
     # 读取实际运行状态，禁止隐式重启或改写运行中实例的监听设置。
-    STATE="$("$PASEO" daemon status --home "$PASEO_HOME" --json 9>&-)"
-    if [[ "$PASEO_HOME" == "$DATA/.paseo" ]]; then
-      node "$ROOT/paseo-config.cjs" prepare "$DATA" "$MODE" "$STATE"
-    fi
-    "$PASEO" daemon start --home "$PASEO_HOME" 9>&-
+    STATE="$(daemon status --json)"
+    node "$ROOT/paseo-config.cjs" prepare "$DATA" "$MODE" "$STATE"
+    daemon start
+    CURL_ARGS=(--noproxy '*' --fail --silent --show-error --max-time 15)
     if [[ "$MODE" == proxy ]]; then
       if ! nginx_running; then nginx_cmd; fi
-      curl --noproxy '*' --fail --silent --show-error --max-time 15 \
-        --cacert "$CA_CERT" \
-        "$URL/api/health"
-      printf '\nPaseo HTTPS：%s/\n' "$URL"
-    else
-      curl --noproxy '*' --fail --silent --show-error --max-time 15 "$URL/api/health"
-      printf '\nPaseo HTTP：%s/\n' "$URL"
+      CURL_ARGS+=(--cacert "$CA_CERT")
     fi
+    curl "${CURL_ARGS[@]}" "$URL/api/health"
+    printf '\nPaseo：%s/\n' "$URL"
     ;;
   stop)
     if nginx_running; then
@@ -132,10 +94,10 @@ case "$1" in
         exit 1
       fi
     fi
-    "$PASEO" daemon stop --home "$PASEO_HOME" 9>&-
+    daemon stop
     ;;
   status)
-    "$PASEO" daemon status --home "$PASEO_HOME" 9>&-
+    daemon status
     if nginx_running; then printf 'nginx: running (HTTPS)\n'; else printf 'nginx: stopped\n'; fi
     ;;
   reload-proxy)
@@ -144,5 +106,5 @@ case "$1" in
     nginx_running || { printf 'Nginx 未运行。\n' >&2; exit 1; }
     nginx_cmd -s reload
     ;;
-  set-password) "$PASEO" daemon set-password --home "$PASEO_HOME" 9>&- ;;
+  set-password) daemon set-password ;;
 esac
