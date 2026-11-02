@@ -50,6 +50,16 @@ PHONE_CSS = PHONE_TOOLS_CSS.replace(
 )
 
 
+COMPOSER = '[data-composer-card] [class*="_trailing"]{gap:8px!important}'
+COMPOSER_CSS = '''
+/* Keep typing full-width; actions occupy their own row below on every screen. */
+  html body [data-composer-card]{border-radius:18px!important}
+  html body [data-composer-card]>[data-input-scroll]{order:1!important;flex:0 0 100%!important;box-sizing:border-box;min-width:0!important;margin:0 0 6px!important}
+  html body [data-composer-card] [class*="_tools"]{order:2!important;gap:8px!important}
+  html body [data-composer-card] [class*="_trailing"]{order:3!important;margin-left:auto!important}
+'''
+
+
 GROUP_OLD = '''      { className: "bt-group-name", style: flat ? void 0 : { color: inkText(colorOf(bot)) } },
       flat ? lead : null,
       bot.name,
@@ -91,7 +101,8 @@ def patch(text, version='0.2.4'):
         text = replace_once(text, group_new, group_left)
     for old, new in ((GRID, GRID_FIXED), (TRACK, TRACK_FIXED),
                      (GRID_FIXED, GRID_FIXED + PHONE_CSS), (group_old, group_left),
-                     (META_CSS, META_FIXED), (RAIL_CSS, RAIL_FIXED)):
+                     (META_CSS, META_FIXED), (RAIL_CSS, RAIL_FIXED),
+                     (COMPOSER, COMPOSER + COMPOSER_CSS)):
         text = replace_once(text, old, new)
     return text
 

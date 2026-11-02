@@ -3,7 +3,7 @@ from patches import ds_bot_mobile as p
 
 class MobilePatchTests(unittest.TestCase):
     def source(self):
-        return '\n'.join([p.GRID, p.TRACK, p.GROUP_OLD.replace('import_react16','import_react17'), p.META_CSS, p.RAIL_CSS])
+        return '\n'.join([p.GRID, p.TRACK, p.GROUP_OLD.replace('import_react16','import_react17'), p.META_CSS, p.RAIL_CSS, p.COMPOSER])
 
     def test_tools_only_patch_migrates_without_duplicate_css(self):
         fixed=p.patch(self.source(),'0.2.6')
