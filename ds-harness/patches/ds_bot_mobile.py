@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
-"""Apply the ds-bot 0.2.4/0.2.5 / dsh-web-mobile layout compatibility fix.
+"""Apply the ds-bot 0.2.4/0.2.5/0.2.6 / dsh-web-mobile layout compatibility fix.
 
 Usage: python3 ds-harness/patches/ds_bot_mobile.py [path/to/ds-bot]
-Only reviewed 0.2.4/0.2.5 client bundles are supported; unknown versions fail closed.
+Only reviewed 0.2.4/0.2.5/0.2.6 client bundles are supported; unknown versions fail closed.
 """
 from pathlib import Path
 import json
 import sys
+
+if __package__:
+    from .ds_bot_patch_common import replace_once, publish
+else:
+    from ds_bot_patch_common import replace_once, publish
 
 GRID = '[class*="_frame"][data-sidebar-collapsed][data-rightbar-collapsed]:has(>[class*="_sidebarCol"]){grid-template-columns:0px minmax(0,1fr) 0px!important}'
 GRID_FIXED = GRID + '''
@@ -25,15 +30,24 @@ TRACK_FIXED = '''var sidebarTrackWidth = () => {
 };'''
 
 
-PHONE_CSS = '''
-/* Phone reading layout: use the chat width, float tools instead of reserving 82px. */
+PHONE_TOOLS_CSS = '''
+/* Phone action tools float beside the bubble without changing message widths. */
 @media (max-width:640px) and (pointer:coarse){
-  body .bt-msg,body .bt-astack[data-lead]>.bt-msg{max-width:100%}
-  body .bt-msg>.bt-msg-line{max-width:100%;min-width:0}
   body .bt-tools{top:-14px;right:0;left:auto;margin-left:0;transform:none;padding:2px;border-radius:999px;background:var(--bt-card);box-shadow:0 4px 14px rgba(0,0,0,.14)}
   body .bt-tools::after{display:none}
 }
 '''
+
+
+PHONE_CSS = PHONE_TOOLS_CSS.replace(
+    '/* Phone action tools float beside the bubble without changing message widths. */',
+    '/* Phone reading layout: use the chat width, float tools instead of reserving 82px. */',
+).replace(
+    '  body .bt-tools{',
+    '  body .bt-msg,body .bt-astack[data-lead]>.bt-msg{max-width:100%}\n'
+    '  body .bt-msg>.bt-msg-line{max-width:100%;min-width:0}\n'
+    '  body .bt-tools{',
+)
 
 
 GROUP_OLD = '''      { className: "bt-group-name", style: flat ? void 0 : { color: inkText(colorOf(bot)) } },
@@ -64,23 +78,21 @@ RAIL_FIXED = RAIL_CSS + '''
 
 
 def patch(text, version='0.2.4'):
-    react_name = {'0.2.4': 'import_react16', '0.2.5': 'import_react17'}.get(version)
+    react_name = {'0.2.4': 'import_react16', '0.2.5': 'import_react17', '0.2.6': 'import_react17'}.get(version)
     if react_name is None:
-        raise ValueError('This patch supports ds-bot 0.2.4/0.2.5 only; review other versions separately')
+        raise ValueError('This patch supports ds-bot 0.2.4/0.2.5/0.2.6 only; review other versions separately')
     group_old, group_new, group_left = (
         value.replace('import_react16', react_name)
         for value in (GROUP_OLD, GROUP_NEW, GROUP_LEFT)
     )
+    if PHONE_TOOLS_CSS in text or PHONE_CSS in text:
+        text = replace_once(text, PHONE_TOOLS_CSS, PHONE_CSS)
     if group_new in text:
-        text = text.replace(group_new, group_left, 1)
+        text = replace_once(text, group_new, group_left)
     for old, new in ((GRID, GRID_FIXED), (TRACK, TRACK_FIXED),
                      (GRID_FIXED, GRID_FIXED + PHONE_CSS), (group_old, group_left),
                      (META_CSS, META_FIXED), (RAIL_CSS, RAIL_FIXED)):
-        if new in text:
-            continue
-        if text.count(old) != 1:
-            raise ValueError('Unrecognized ds-bot bundle; inspect upstream before applying')
-        text = text.replace(old, new, 1)
+        text = replace_once(text, old, new)
     return text
 
 
@@ -89,13 +101,13 @@ def main():
                Path(__file__).resolve().parents[1] / 'data/.dsh/profiles/web/node_modules/ds-bot')
     manifest = json.loads((package / 'package.json').read_text())
     version = manifest.get('version')
-    if manifest.get('name') != 'ds-bot' or version not in ('0.2.4', '0.2.5'):
-        raise SystemExit('This patch supports ds-bot 0.2.4/0.2.5 only; review other versions separately')
+    if manifest.get('name') != 'ds-bot' or version not in ('0.2.4', '0.2.5', '0.2.6'):
+        raise SystemExit('This patch supports ds-bot 0.2.4/0.2.5/0.2.6 only; review other versions separately')
     target = package / 'client.js'
     original = target.read_text()
     fixed = patch(original, version)
     if fixed != original:
-        target.write_text(fixed)
+        publish([(target, original, fixed)])
         print(f'Applied ds-bot {version} mobile layout fix; refresh the Web page')
     else:
         print('ds-bot mobile layout fix already applied')
