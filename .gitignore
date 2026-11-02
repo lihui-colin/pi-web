@@ -1,5 +1,10 @@
 /.serena
 /.codegraph
+
+# Installed dependencies and package-manager caches are local artifacts.
+node_modules/
+.pnpm-store/
+
 /pi-web/data/
 /pi-web/log/
 /pi-web/.pi-web/
