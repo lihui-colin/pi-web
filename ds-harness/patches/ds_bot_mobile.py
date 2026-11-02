@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Apply the ds-bot 0.2.4 / dsh-web-mobile layout compatibility fix.
+"""Apply the ds-bot 0.2.4/0.2.5 / dsh-web-mobile layout compatibility fix.
 
 Usage: python3 ds-harness/patches/ds_bot_mobile.py [path/to/ds-bot]
-Only the shipped 0.2.4 client bundle is supported; unknown versions fail closed.
+Only reviewed 0.2.4/0.2.5 client bundles are supported; unknown versions fail closed.
 """
 from pathlib import Path
 import json
@@ -63,11 +63,18 @@ RAIL_FIXED = RAIL_CSS + '''
 '''
 
 
-def patch(text):
-    if GROUP_NEW in text:
-        text = text.replace(GROUP_NEW, GROUP_LEFT, 1)
+def patch(text, version='0.2.4'):
+    react_name = {'0.2.4': 'import_react16', '0.2.5': 'import_react17'}.get(version)
+    if react_name is None:
+        raise ValueError('This patch supports ds-bot 0.2.4/0.2.5 only; review other versions separately')
+    group_old, group_new, group_left = (
+        value.replace('import_react16', react_name)
+        for value in (GROUP_OLD, GROUP_NEW, GROUP_LEFT)
+    )
+    if group_new in text:
+        text = text.replace(group_new, group_left, 1)
     for old, new in ((GRID, GRID_FIXED), (TRACK, TRACK_FIXED),
-                     (GRID_FIXED, GRID_FIXED + PHONE_CSS), (GROUP_OLD, GROUP_LEFT),
+                     (GRID_FIXED, GRID_FIXED + PHONE_CSS), (group_old, group_left),
                      (META_CSS, META_FIXED), (RAIL_CSS, RAIL_FIXED)):
         if new in text:
             continue
@@ -81,14 +88,15 @@ def main():
     package = (Path(sys.argv[1]) if len(sys.argv) > 1 else
                Path(__file__).resolve().parents[1] / 'data/.dsh/profiles/web/node_modules/ds-bot')
     manifest = json.loads((package / 'package.json').read_text())
-    if manifest.get('name') != 'ds-bot' or manifest.get('version') != '0.2.4':
-        raise SystemExit('This patch supports ds-bot 0.2.4 only; review other versions separately')
+    version = manifest.get('version')
+    if manifest.get('name') != 'ds-bot' or version not in ('0.2.4', '0.2.5'):
+        raise SystemExit('This patch supports ds-bot 0.2.4/0.2.5 only; review other versions separately')
     target = package / 'client.js'
     original = target.read_text()
-    fixed = patch(original)
+    fixed = patch(original, version)
     if fixed != original:
         target.write_text(fixed)
-        print('Applied ds-bot 0.2.4 mobile layout fix; refresh the Web page')
+        print(f'Applied ds-bot {version} mobile layout fix; refresh the Web page')
     else:
         print('ds-bot mobile layout fix already applied')
 
