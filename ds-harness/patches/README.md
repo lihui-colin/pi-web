@@ -7,8 +7,12 @@
 python3 ds-harness/patches/ds_bot_apply.py
 # 只检查，不写文件；缺失补丁返回 1
 python3 ds-harness/patches/ds_bot_apply.py --check
+# 手机回车换行（DSH 和 DS Bot 共用组件，独立应用）
+python3 ds-harness/patches/dsh_composer_enter.py
+python3 ds-harness/patches/dsh_composer_enter.py --check
 # 回归测试
 python3 -B -m unittest discover -s ds-harness -p 'test_ds_bot_*.py'
+python3 -B -m unittest discover -s ds-harness -p 'test_dsh_composer_enter.py'
 ```
 
 ## 当前修复
@@ -21,11 +25,19 @@ python3 -B -m unittest discover -s ds-harness -p 'test_ds_bot_*.py'
 
 ## 上游核查与生效方式
 
+2026-11-03 核对 DSH conversation 0.2.2-alpha.2：共用 `registerComposerKeymap` 的 Enter 处理直接提交，没有移动端分支；底层编辑器已经支持换行。`dsh_composer_enter.py` 复用宿主 `isMobileDevice()` 判断，在输入法组合保护之后阻止手机 Enter 的默认行为并派发编辑器换行命令，点击发送按钮仍正常提交。PC Enter/Shift+Enter、底层 `beforeinput` 换行逻辑保持原样。补丁独立于 DS Bot，两个聊天界面均覆盖，未知版本或代码结构拒绝应用。
+
+注意：当前运行实例会在内存中保留前端 bundle。修改磁盘后必须确认实际 `/plugins/` 响应已包含补丁；仅刷新页面不保证生效。若实例未启用前端热加载，需要在确认活跃任务和中断影响后安排维护重载，不能直接重启正在执行任务的实例。
+
 2026-11-02 核对已安装发布包：DS Bot 0.2.6 仍只在 handoff 消息分支挂载历史；DSH conversation 按当前空分段进入 Hero 并跳过 Views，ChatFlow 未提供历史前置插槽；DS Bot 的提示词钩子仍直接读取 `assembled.tools.filter()`，而当前 DSH 在 waterfall 结束后才附加 tools。移动端修改对应的原始匹配点也仍存在。
 
-前端补丁修改发布包，刷新浏览器即可加载；服务端提示词补丁需模块重载或维护重启。安装器不自动执行本补丁，升级覆盖后先核对新版本，再运行检查。应用时在每个目标目录暂存完整文件，再原子替换；原件和目标清单保存在 `ds-harness/log/patch-backups/`。后续写入失败会回滚已完成的替换，回滚失败时按错误提示和备份清单恢复。突然断电或进程被强制终止仍可能中断多文件应用，恢复后先运行检查。
+前端补丁修改发布包，待运行实例重新加载前端资源后刷新浏览器；服务端提示词补丁需模块重载或维护重启。安装器不自动执行本补丁，升级覆盖后先核对新版本，再运行检查。应用时在每个目标目录暂存完整文件，再原子替换；原件和目标清单保存在 `ds-harness/log/patch-backups/`。后续写入失败会回滚已完成的替换，回滚失败时按错误提示和备份清单恢复。突然断电或进程被强制终止仍可能中断多文件应用，恢复后先运行检查。
 
 ## 验证记录
+
+2026-11-03 手机回车补丁：20 项相关单元测试通过，包含手机 Enter/null 事件、输入法组合与选词保护、PC Enter/Shift+Enter/Ctrl+Enter/重复按键。浏览器测试在隔离上下文中替换前端响应、拦截提交回调计数，分别验证普通 DSH 和 DS Bot：Android 模拟环境 Enter 插入换行且提交次数为 0，桌面 Enter 调用提交、Shift+Enter 只换行；没有向模型发送测试消息。此验证不代表运行实例的资源缓存已重载。
+
+同日经用户授权重启 25228：重启前列表中 181 个会话均未运行，使用独立维护进程完成 stop/start，HTTPS 返回 200。随后断言线上返回的 bundle 已包含补丁（不再注入修复代码），普通 DSH 与 Chief 聊天框的手机换行、PC 快捷键均通过；测试仍拦截提交回调，未发送模型请求。25028、25128 的 PID 与启动时间未变化。
 
 0.2.6 在实际25228入口以桌面1602×900、触屏390×844验证：Chief 历史分页由18条增至31条，桌面切换其他会话再返回正常；无页面错误和横向溢出。桌面消息列960px、长回复气泡768px，手机消息列及长回复气泡均为273px。测试未发送聊天消息或重启服务。
 
