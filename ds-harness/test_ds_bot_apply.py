@@ -8,6 +8,7 @@ import tempfile
 import unittest
 
 from patches import ds_bot_apply as p
+from patches import dsh_mobile_apply as mobile
 
 
 class CompletePatchTests(unittest.TestCase):
@@ -32,7 +33,7 @@ class CompletePatchTests(unittest.TestCase):
             self.bot / 'src/host/tools.js': p.PROMPT_OLD,
             self.host / 'dsh-client-ui-chat/lib/client.js': '\n'.join(a for a, _ in p.HISTORY_CHAT_REPLACEMENTS),
             self.host / 'dsh-client-ui-conversation/lib/client.js': '\n'.join(
-                [a for a, _ in p.HISTORY_CONVERSATION_REPLACEMENTS] + [p.COMPOSER_ANCHOR, p.VIEW_LIMIT_OLD]),
+                [a for a, _ in p.HISTORY_CONVERSATION_REPLACEMENTS] + [p.COMPOSER_ANCHOR, mobile.VIEW_LIMIT_OLD]),
         }
         for path, source in sources.items():
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -61,8 +62,8 @@ class CompletePatchTests(unittest.TestCase):
         self.assertIn(p.DIRECT_BUTTONS, (self.bot / 'client.js').read_text())
         conversation = (self.host / 'dsh-client-ui-conversation/lib/client.js').read_text()
         self.assertIn(p.COMPOSER_REPLACEMENT, conversation)
-        self.assertIn(p.VIEW_LIMIT_NEW, conversation)
-        self.assertNotIn('phone ? 1 : Math.max(1, Math.floor((row.clientWidth - 48) / 120))', conversation.replace(p.VIEW_LIMIT_NEW, '', 1))
+        self.assertIn(mobile.VIEW_LIMIT_OLD, conversation)
+        self.assertNotIn(mobile.VIEW_LIMIT_NEW, conversation)
         before = {path: path.stat().st_mtime_ns for path in self.sources}
         self.run_cli()
         self.assertEqual(before, {path: path.stat().st_mtime_ns for path in self.sources})

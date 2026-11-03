@@ -1,10 +1,10 @@
 # DS Bot 统一补丁
 
-所有补丁实现、版本校验、备份与回滚都集中在 **`ds_bot_apply.py`**，仅支持 **ds-bot 0.2.6 + DSH chat/conversation 0.2.2-alpha.2**。旧版本分支、独立补丁脚本和旧 Hero 实验入口已删除。未知版本或匹配点变化会停止，不猜测兼容性。
+**`ds_bot_apply.py`** 负责 DS Bot 与共用输入框补丁，支持 **ds-bot 0.2.6 + DSH chat/conversation 0.2.2-alpha.2**；**`dsh_mobile_apply.py`** 负责 **dsh-web-mobile 3.2.1** 的界面调整及其所需的宿主页签宽度折叠逻辑。两者共用原子写入、备份与回滚函数，未知版本或匹配点变化会停止。
 
 ## 安装与检查
 
-主安装器 `dsh_install.sh` 调用插件安装器 `dsh_plugins_install.sh`；插件安装成功后，后者自动执行统一补丁。首次安装、`--upgrade`、插件已安装而跳过下载时都会执行，防止重新安装覆盖补丁或遗漏共用输入框修复。补丁失败会使安装返回非零退出码；`--dry-run` 只打印计划，不修改文件。
+主安装器 `dsh_install.sh` 调用插件安装器 `dsh_plugins_install.sh`；插件安装成功后，后者依次执行 DS Bot 和 mobile 补丁。首次安装、`--upgrade`、插件已安装而跳过下载时都会执行，防止重新安装覆盖补丁或遗漏共用输入框修复。补丁失败会使安装返回非零退出码；`--dry-run` 只打印计划，不修改文件。
 
 ```sh
 bash ds-harness/dsh_install.sh
@@ -13,10 +13,13 @@ bash ds-harness/dsh_plugins_install.sh
 # 手动应用／只检查全部补丁
 python3 ds-harness/patches/ds_bot_apply.py
 python3 ds-harness/patches/ds_bot_apply.py --check
+python3 ds-harness/patches/dsh_mobile_apply.py
+python3 ds-harness/patches/dsh_mobile_apply.py --check
 # 回归测试
 python3 -B -m unittest discover -s ds-harness -p 'test_ds_bot*.py'
 python3 -B -m unittest discover -s ds-harness -p 'test_dsh_composer_enter.py'
 python3 -B -m unittest discover -s ds-harness -p 'test_dsh_plugins_install.py'
+python3 -B -m unittest discover -s ds-harness -p 'test_dsh_mobile_apply.py'
 ```
 
 默认定位本服务的 web profile 与 PATH 中的 DSH 安装；测试或明确的自定义安装可传 `--bot-dir` 和 `--host-dir`（DSH 的 `node_modules/@deepseek-ai` 目录）。升级到其他版本前必须重新核对上游实现；安装器仍按现有策略选择依赖版本，不会为了通过补丁检查静默降级。
@@ -25,7 +28,7 @@ python3 -B -m unittest discover -s ds-harness -p 'test_dsh_plugins_install.py'
 
 - **历史记录**：通过原生 ChatFlow 展示归档分段，空会话有历史时进入正常聊天视图；保留分页和插槽所有权，不恢复旧 Hero 容器。
 - **提示词接口**：当前 DSH 在 prompt waterfall 结束后附加工具，补丁不再在该钩子访问 tools；保留 sections 过滤、tools.restrict 与执行 guard。已打补丁的当前 0.2.6 安装会转换为同一实现，不支持旧宿主接口。
-- **布局**：修复移动侧栏网格、抽屉占位、窄侧栏名称、群聊头像和操作按钮；手机长回复使用可用宽度。手机与 PC 输入框均为上下两行，工具按钮间距 8px。会话顶栏保留宿主的固定偏好和更多菜单，按页签实际渲染宽度决定折叠，不再按每项 120px 粗估或强制手机只显示 Chat。
+- **布局**：修复移动侧栏网格、抽屉占位、窄侧栏名称、群聊头像和操作按钮；手机长回复使用可用宽度。手机与 PC 输入框均为上下两行，工具按钮间距 8px。页签按实际宽度折叠由 `dsh_mobile_apply.py` 负责，保留宿主固定偏好和更多菜单。
 - **桌面聊天宽度**：恢复 DSH 原生聊天区左右拖动条，正文和输入框同步调整，保留宿主输入框多出的 32px 内边距空间，沿用宿主的本地宽度记忆（与普通 DSH 聊天共享）。仅在视口至少 1024px、精确指针且支持悬停时启用；触屏与窄屏维持原有布局。
 - **共用输入框**：普通 DSH 和 ds-bot 手机 Enter 只换行，点击按钮发送；PC 保留 Enter 发送、Shift+Enter 换行。复用宿主移动设备检测，保留输入法组合保护和 `beforeinput` 换行处理。
 
@@ -51,7 +54,7 @@ python3 -B -m unittest discover -s ds-harness -p 'test_dsh_plugins_install.py'
 
 ## dsh-web-mobile 顶栏按钮
 
-`python3 -B ds-harness/patches/dsh_mobile_apply.py`（仓库根目录运行，`--check` 只验证）修复 3.2.1 的手机顶栏按钮裁剪问题，插件安装入口自动执行。复用统一补丁的原子写入与备份机制，未知版本或锚点不符时拒绝应用。
+`python3 -B ds-harness/patches/dsh_mobile_apply.py`（仓库根目录运行，`--check` 只验证）统一修复 3.2.1 的手机顶栏布局及 DSH 0.2.2-alpha.2 的页签宽度折叠，插件安装入口自动执行。先校验插件和宿主两个目标，再共用原子写入与备份机制发布；任一目标版本或锚点不符都不写入。`--check` 同时检查两个目标，`--mobile-dir` / `--host-dir` 可指定隔离安装目录。
 
 本机 3.2.1 发布源码把 `MobileNavToggle` 注入 `conversation.session.header.actions`，同时给其祖先 `headerActions` / `titleCluster` 设置滚动裁剪；侧边栏、文件按钮绝对定位到顶栏两端，落在裁剪区外而不可见，标题仍留有 32px。DSH 0.2.2-alpha.2 已有独立的 `conversation.header.leading` 槽位，因此补丁复用该槽位，只在手机且槽内存在本插件按钮时解除其隐藏。保留标题滚动、原有按钮事件及桌面隐藏条件；不修改宿主布局、不重启服务。
 
@@ -68,3 +71,5 @@ python3 -B -m unittest discover -s ds-harness -p 'test_dsh_plugins_install.py'
 顶栏动作横向滑动：3.2.1 将 headerActions 固定为不可收缩，同时隐藏团队文字与后台任务计数。补丁让动作区占用标题之外的剩余宽度并可横向滚动，各控件按自然宽度显示，恢复团队和任务文字，标题与左右侧栏按钮保持固定。复用插件现有手势对横向滚动容器的让位规则及宿主弹层。25228 的真实触屏事件验证滚动 27px、未打开抽屉，Agent team 弹层正常显示；按当前 jobs DOM 构造的浏览器测试节点在 360/390/820px 下文字不隐藏、内容可达、无页面横向溢出。未创建后台任务或重启服务。
 
 移动补丁维护：顶栏样式共用选择器前缀与规则生成函数，保持输出 CSS 字节和选择器权重不变；保留已发布补丁的迁移，移除未发布的临时图标位置迁移。已核验原始 3.2.1、已发布补丁和当前安装三种输入均生成相同结果，重复应用不写入，未知锚点仍拒绝。
+
+页签宽度补丁仅在运行时检测到 mobile 的 frame 标记且匹配 `(max-width:1023px) and (pointer:coarse)` 时使用实际宽度测量；无插件标记、桌面或非触屏布局直接走宿主原有 120px 估算规则。监听插件标记和媒体查询变化，启停插件或切换布局时重新计算。归属与运行时范围回归覆盖原版、旧补丁迁移、缺少宿主修复检测、宿主校验失败不写入，以及三种非移动组合的原生回退。

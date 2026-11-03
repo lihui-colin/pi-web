@@ -346,82 +346,6 @@ def patch_composer(text):
     return replace_once(text, COMPOSER_ANCHOR, COMPOSER_REPLACEMENT)
 
 
-# Preserve native pin/menu behavior; fit tabs using their rendered widths.
-VIEW_LIMIT_LEGACY = '''				const updateLimit = () => {
-					// Phone browsers show only Chat. Trajectory, Git, Statistics and other views stay in More.
-					const phone = (0, _deepseek_ai_dsh_client_ui_primitives.isMobileDevice)() && window.matchMedia("(max-width: 1023px)").matches;
-					setVisibleViewLimit(phone ? 1 : Math.max(1, Math.floor((row.clientWidth - 48) / 120)));
-				};'''
-VIEW_LIMIT_UPSTREAM = '''				const updateLimit = () => {
-					setVisibleViewLimit(Math.max(1, Math.floor((row.clientWidth - 48) / 120)));
-				};'''
-VIEW_LIMIT_OLD = '''			(0, react.useLayoutEffect)(() => {
-				const row = tabRow.current;
-				if (row === null || !hasEntryActions) return;
-				const updateLimit = () => {
-					setVisibleViewLimit(Math.max(1, Math.floor((row.clientWidth - 48) / 120)));
-				};
-				updateLimit();
-				if (typeof ResizeObserver === "undefined") return;
-				const observer = new ResizeObserver(updateLimit);
-				observer.observe(row);
-				return () => {
-					observer.disconnect();
-				};
-			}, [showTabs, hasEntryActions]);
-'''
-VIEW_LIMIT_NEW = '''			(0, react.useLayoutEffect)(() => {
-				const row = tabRow.current;
-				if (row === null || !hasEntryActions) return;
-				const updateLimit = () => {
-					const lane = row.querySelector('[data-conversation-tabs]');
-					const template = lane?.querySelector('[role="tab"]');
-					if (!lane || !template) return;
-					const preferred = [...tabs.filter((tab) => tab.id === FIXED_VIEW_ID), ...tabs.filter((tab) => tab.id !== "chat" && !unpinned.includes(tab.id))];
-					const px = (value) => parseFloat(value) || 0;
-					const rowStyle = getComputedStyle(row);
-					const laneStyle = getComputedStyle(lane);
-					const more = row.querySelector('[class*="_viewsMoreAnchor"]');
-					const moreStyle = more && getComputedStyle(more);
-					const available = row.clientWidth - px(rowStyle.paddingLeft) - px(rowStyle.paddingRight)
-						- (more ? more.getBoundingClientRect().width + px(moreStyle.marginLeft) + px(moreStyle.marginRight) + px(rowStyle.columnGap) : 0);
-					// Measure hidden candidates in the same CSS context, including localized labels.
-					const probe = lane.cloneNode(false);
-					probe.setAttribute('aria-hidden', 'true');
-					probe.inert = true;
-					for (const [name, value] of Object.entries({position: 'absolute', visibility: 'hidden', width: 'max-content', 'max-width': 'none', 'pointer-events': 'none'})) probe.style.setProperty(name, value, 'important');
-					for (const tab of preferred) {
-						const button = template.cloneNode(true);
-						const label = button.querySelector('[class*="_tabLabel"]');
-						(label || button).textContent = tab.label;
-						probe.appendChild(button);
-					}
-					row.appendChild(probe);
-					let count = 0;
-					let used = px(laneStyle.paddingLeft) + px(laneStyle.paddingRight);
-					try {
-						for (const button of probe.children) {
-							const style = getComputedStyle(button);
-							used += button.getBoundingClientRect().width + px(style.marginLeft) + px(style.marginRight) + (count ? px(laneStyle.columnGap) : 0);
-							if (used > available + 0.5) break;
-							count++;
-						}
-					} finally { probe.remove(); }
-					setVisibleViewLimit(Math.max(1, count));
-				};
-				updateLimit();
-				let disposed = false;
-				document.fonts?.ready.then(() => { if (!disposed) updateLimit(); });
-				const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(updateLimit);
-				observer?.observe(row);
-				return () => { disposed = true; observer?.disconnect(); };
-			}, [showTabs, hasEntryActions, tabs, unpinned]);
-'''
-
-def patch_view_tabs(text):
-    if VIEW_LIMIT_LEGACY in text:
-        text = replace_once(text, VIEW_LIMIT_LEGACY, VIEW_LIMIT_UPSTREAM)
-    return replace_once(text, VIEW_LIMIT_OLD, VIEW_LIMIT_NEW)
 
 
 HISTORY_BOT_REPLACEMENTS = [
@@ -458,7 +382,7 @@ def plan_changes(bot=None, host=None):
         (bot / 'client.js', [lambda text: patch_history(text, HISTORY_BOT_REPLACEMENTS), patch_mobile, patch_presentation]),
         (bot / 'src/host/tools.js', [patch_prompt]),
         (host / 'dsh-client-ui-chat/lib/client.js', [lambda text: patch_history(text, HISTORY_CHAT_REPLACEMENTS)]),
-        (host / 'dsh-client-ui-conversation/lib/client.js', [lambda text: patch_history(text, HISTORY_CONVERSATION_REPLACEMENTS), patch_composer, patch_view_tabs]),
+        (host / 'dsh-client-ui-conversation/lib/client.js', [lambda text: patch_history(text, HISTORY_CONVERSATION_REPLACEMENTS), patch_composer]),
     ]
     changes = []
     for path, steps in transforms:
