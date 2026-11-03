@@ -267,6 +267,12 @@ body[data-bt-layout] .bt-msg>.bt-msg-line{flex-wrap:wrap;row-gap:4px}
 body[data-bt-layout] .bt-msg>.bt-msg-line>.bt-tools{position:static;flex:0 0 100%;justify-content:flex-start;margin:0;transform:none;padding:0;border-radius:0;background:none;box-shadow:none}
 body[data-bt-layout] .bt-msg>.bt-msg-line>.bt-tools::after{display:none}
 '''
+TOUCH_ACTIONS_CSS = '''
+/* Touch users can access reply actions without first tapping the message. */
+@media (hover:none),(pointer:coarse){
+  body[data-bt-layout] .bt-msg>.bt-msg-line>.bt-tools{opacity:1;visibility:visible}
+}
+'''
 
 
 MORE_BUTTON = '''    (0, import_react17.createElement)("button", { type: "button", className: "bt-tool", "aria-label": t("More message actions"), title: t("More"), "aria-haspopup": "menu", "aria-expanded": panel?.kind === "more", onClick: (event) => open("more", event) }, copied ? (0, import_react17.createElement)(CheckIcon) : (0, import_react17.createElement)(DotsIcon)),'''
@@ -296,6 +302,7 @@ def patch_presentation(text):
     for old, new in [
         (WIDTH_HANDLES, WIDTH_HANDLES_FIXED), (WIDTH_BODY, WIDTH_BODY_FIXED),
         (WIDTH_COMPOSER, WIDTH_COMPOSER_FIXED), (ALIGN_ANCHOR, ALIGN_ANCHOR + ALIGN_CSS),
+        (ALIGN_CSS, ALIGN_CSS + TOUCH_ACTIONS_CSS),
         *MESSAGE_ACTION_REPLACEMENTS,
     ]:
         text = replace_once(text, old, new)
