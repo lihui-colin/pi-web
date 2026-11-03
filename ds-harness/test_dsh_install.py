@@ -34,6 +34,7 @@ def copy_installers(root):
         shutil.copy2(source, project / source.name)
     (project / 'patches').mkdir()
     (project / 'patches/ds_bot_apply.py').write_text('print("PATCH_BUNDLE_APPLIED")\n')
+    (project / 'patches/dsh_mobile_apply.py').write_text('print("MOBILE_PATCH_APPLIED")\n')
     return project
 
 

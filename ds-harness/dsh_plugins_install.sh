@@ -146,3 +146,4 @@ if (( status != 0 )); then exit "$status"; fi
 # Always validate/apply the full patch set, even when downloads were skipped.
 # A mismatched release must fail installation rather than silently omit fixes.
 run python3 -B "$script_dir/patches/ds_bot_apply.py"
+run python3 -B "$script_dir/patches/dsh_mobile_apply.py"

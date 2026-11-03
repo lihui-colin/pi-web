@@ -59,6 +59,7 @@ class PluginInstallerTests(unittest.TestCase):
         (self.root / 'patches').mkdir()
         (self.root / 'patches/ds_bot_apply.py').write_text(
             'import os, sys\nprint("PATCH_BUNDLE_APPLIED")\nsys.exit(int(os.environ.get("FAKE_PATCH_FAIL", "0")))\n')
+        (self.root / 'patches/dsh_mobile_apply.py').write_text('print("MOBILE_PATCH_APPLIED")\n')
         (self.root / 'dsh_nginx_install.sh').write_text('#!/bin/bash\nexit 0\n')
         self.fake('dsh', '#!' + shutil.which('python3') + '\n' + FAKE_DSH)
         for name in ('npm', 'curl'):
