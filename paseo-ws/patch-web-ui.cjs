@@ -72,7 +72,12 @@ function main() {
     patched = patched.slice(markerEnd + pickerEnd.length).replace(/^\n/, '');
   }
   const picker = fs.readFileSync(path.join(__dirname, 'server-directory-picker.js'), 'utf8');
-  patched = pickerStart + '\n' + picker + '\n' + pickerEnd + '\n' + patched;
+  // Preserve upstream layout/animation; arbitrate only left-sidebar touch pans.
+  if (!patched.includes('useOpenAgentListGesture=function') || !patched.includes('"compact-shell"')) {
+    throw new Error('Upstream mobile sidebar structure changed; review swipe patch.');
+  }
+  const swipe = fs.readFileSync(path.join(__dirname, 'mobile-sidebar-swipe.js'), 'utf8');
+  patched = pickerStart + '\n' + picker + '\n' + swipe + '\n' + pickerEnd + '\n' + patched;
   // Validate syntax before publishing either the bundle or HTML.
   new (require('node:vm').Script)(patched);
   const hash = crypto.createHash('sha256').update(patched).digest('hex').slice(0, 32);
@@ -84,6 +89,7 @@ function main() {
   const nextHtml = html.replace(/<script id="paseo-local-diagnostics">[\s\S]*?<\/script>\n?/g, '');
   fs.writeFileSync(indexPath, nextHtml.replaceAll(match[1], newUrl));
   console.log('Initial discovery and subsequent TLS probes patched to 20s.');
+  console.log('Mobile Web sidebar edge swipe preserves upstream gesture handling.');
   console.log('Asset: '+newUrl);
 }
 

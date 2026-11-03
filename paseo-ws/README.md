@@ -48,6 +48,8 @@ bash paseo-ws/paseo_web_run.sh stop
 
 `patch-web-ui.cjs` 将首次连接探测和后续 TLS 连接等待时间调整为 20 秒，修复手机慢连接超时；同时给网页版 Add projects 增加 **Browse** 服务器目录树入口。补丁生成新哈希资源地址，保留原 JS。安装时自动执行，也可运行 `node paseo-ws/patch-web-ui.cjs` 后刷新网页，无需重启。
 
+手机侧栏修复也由该入口自动应用（`mobile-sidebar-swipe.js`）：从屏幕左边缘 32px 内右滑打开左侧栏，在已打开的左侧栏内左滑关闭；保留原有宽度和布局，右侧栏不变。仍由上游手势负责动画和状态提交。已核对 [v0.14.0 上游侧栏手势](https://github.com/getpaseo/paseo/blob/8c6de842a3157530c26a7a94c78a3d647fb96ce9/packages/app/src/mobile-panels/gestures.ts) 和 [根布局](https://github.com/getpaseo/paseo/blob/8c6de842a3157530c26a7a94c78a3d647fb96ce9/packages/app/src/app/_layout.tsx)：原版已经支持侧滑，但 Web 的 `touch-action: auto` 允许浏览器抢占横向触摸。Chromium 手机模拟中可复现 `pointercancel` 导致打开失败。补丁只在紧凑布局下的左边缘右滑、或已打开左侧栏内的左滑时阻止浏览器默认横向移动；不拦截竖向滚动、聊天区中部横向滚动、输入区域、多指触摸、右侧栏或桌面布局，不另建侧栏状态。打开和关闭共用同一方向判定与事件清理逻辑，不注入布局样式、不改写上游手势模块。执行 `node --test paseo-ws/test-mobile-sidebar-swipe.cjs paseo-ws/test-patch-web-ui.cjs paseo-ws/test-directory-picker-patch.cjs` 验证事件边界与资源发布幂等性。
+
 目录选择器由 `server-directory-picker.js` 实现，复用已连接主机的 `listDirectory(cwd, path)` 会话接口。点击名称选中并按需展开子目录，左侧箭头可展开或折叠，再点击 **Select this folder** 添加；支持上级目录、刷新、错误重试、键盘和手机布局。可浏览服务器进程有权限访问的目录，包括隐藏目录；默认从已有推荐绝对路径开始，没有推荐路径则从 `/` 开始。已有路径搜索和 Electron 本机原生选择器保留。
 
 上游核查：[`v0.14.0` AddProjectFlow](https://github.com/getpaseo/paseo/blob/v0.14.0/packages/app/src/components/add-project-flow.tsx#L359) 的 Browse 仅适用于 Electron 本机；main 提交 `5afa1a9f8ef4b069ff84278668c1fd030df42273` 同样如此。后端已有 [`listDirectory`](https://github.com/getpaseo/paseo/blob/v0.14.0/packages/client/src/daemon-client.ts#L5068)，本补丁只补界面接入，不新增文件访问服务。

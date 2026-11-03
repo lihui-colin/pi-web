@@ -16,7 +16,7 @@ test('installed upstream bundle accepts the directory picker patch idempotently'
     assert.ok(path.resolve(root).startsWith(path.join(os.tmpdir(), 'paseo-picker-patch-')));
     fs.rmSync(root, { recursive: true, force: true });
   });
-  for (const file of ['patch-web-ui.cjs', 'patch-web-ui.baseline.json', 'server-directory-picker.js']) {
+  for (const file of ['patch-web-ui.cjs', 'patch-web-ui.baseline.json', 'server-directory-picker.js', 'mobile-sidebar-swipe.js']) {
     fs.copyFileSync(path.join(__dirname, file), path.join(root, file));
   }
   const server = path.join(root, relativeServer), web = path.join(server, 'dist/server/web-ui');
@@ -34,6 +34,17 @@ test('installed upstream bundle accepts the directory picker patch idempotently'
   assert.ok(bundle.includes('globalThis.__paseoPickServerDirectory(je,'));
   assert.ok(bundle.includes('client.listDirectory(path,'));
   assert.ok(bundle.includes('timeoutMs:20000'));
+  assert.ok(bundle.includes('__paseoMobileSidebarSwipeCleanup'));
+  const moduleContaining = (text, marker) => {
+    const position = text.indexOf(marker);
+    assert.ok(position > 0);
+    return text.slice(text.lastIndexOf('\n__d(', position), text.indexOf('\n__d(', position));
+  };
+  const upstream = fs.readFileSync(source, 'utf8');
+  for (const marker of ['e.useOpenAgentListGesture=function', '_e.MobilePanelOverlay=function']) {
+    assert.equal(moduleContaining(bundle, marker), moduleContaining(upstream, marker),
+      'Both sidebars retain upstream gesture code, width and animation');
+  }
   assert.equal(bundle.includes('__paseoMountTerminalClipboard'), false);
   const handler = bundle.match(/oe=\(0,n\.useCallback\)\((n=>\{typeof window\.paseoDesktop\?\.menu\?\.showContextMenu==="function"&&\(n\.preventDefault\(\),te\(\)\)\}),\[te\]\)/)?.[1];
   assert.ok(handler, 'browser context menu handler is present');
