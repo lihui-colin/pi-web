@@ -50,12 +50,15 @@ class PluginInstallerTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.bin = self.root / 'bin'
         self.bin.mkdir()
-        for name in ('bash', 'sh', 'node', 'dirname', 'cp', 'date'):
+        for name in ('bash', 'sh', 'node', 'dirname', 'cp', 'date', 'python3'):
             executable = shutil.which(name)
             self.assertIsNotNone(executable, name)
             (self.bin / name).symlink_to(executable)
         for name in ('dsh_install.sh', 'dsh_plugins_install.sh'):
             shutil.copy2(ROOT / name, self.root / name)
+        (self.root / 'patches').mkdir()
+        (self.root / 'patches/ds_bot_apply.py').write_text(
+            'import os, sys\nprint("PATCH_BUNDLE_APPLIED")\nsys.exit(int(os.environ.get("FAKE_PATCH_FAIL", "0")))\n')
         (self.root / 'dsh_nginx_install.sh').write_text('#!/bin/bash\nexit 0\n')
         self.fake('dsh', '#!' + shutil.which('python3') + '\n' + FAKE_DSH)
         for name in ('npm', 'curl'):
@@ -64,7 +67,7 @@ class PluginInstallerTests(unittest.TestCase):
             self.fake(name, '#!/bin/bash\nexit 0\n')
         self.env = dict(os.environ, PATH=str(self.bin), HOME=str(self.root / 'home'),
                         CALLS=str(self.root / 'calls'))
-        for name in ('FAKE_FAIL', 'FAKE_VERSION'):
+        for name in ('FAKE_FAIL', 'FAKE_VERSION', 'FAKE_PATCH_FAIL'):
             self.env.pop(name, None)
         self.manifest = self.root / 'data/.dsh/profiles/web/package.json'
 
@@ -106,7 +109,7 @@ class PluginInstallerTests(unittest.TestCase):
                 for p in self.root.rglob('*') if p.is_file()}
 
     def test_new_profile_installs_nine_enables_eight(self):
-        self.run_script()
+        self.assertIn("PATCH_BUNDLE_APPLIED", self.run_script())
         pkg = self.package()
         self.assertEqual(set(pkg['dependencies']), set(PLUGINS))
         self.assertEqual(set(pkg['dsh']['profile']['bundles']) & set(PLUGINS),
@@ -118,14 +121,14 @@ class PluginInstallerTests(unittest.TestCase):
     def test_installed_is_idempotent_without_writes(self):
         self.seed(['custom', 'dsh-ide-git'])
         before = self.snapshot()
-        self.run_script()
+        self.assertIn("PATCH_BUNDLE_APPLIED", self.run_script())
         self.assertEqual(before, self.snapshot())
         self.assertEqual(self.calls(), [])
 
     def test_upgrade_preserves_enabled_disabled_and_other_config(self):
         bundles = ['@deepseek-ai/dsh-base', 'custom', 'ds-bot', 'dsh-ide-git']
         self.seed(bundles)
-        self.run_script('--upgrade')
+        self.assertIn('PATCH_BUNDLE_APPLIED', self.run_script('--upgrade'))
         self.assertEqual(self.package()['dsh']['profile']['bundles'], bundles)
         self.assertEqual(self.package()['dsh']['profile']['other'], {'keep': True})
         self.assertEqual(len(self.calls()[0][6:]), 9)
@@ -172,7 +175,7 @@ class PluginInstallerTests(unittest.TestCase):
     def test_failure_propagates_and_restores_bundles(self):
         self.seed(['custom', 'ds-bot'], installed=False)
         self.env['FAKE_FAIL'] = '37'
-        self.run_script(status=37)
+        self.assertNotIn('PATCH_BUNDLE_APPLIED', self.run_script(status=37))
         self.assertEqual(self.package()['dsh']['profile']['bundles'], ['custom', 'ds-bot'])
 
     def test_parent_failure_propagates_before_builtin_configuration(self):
@@ -191,6 +194,13 @@ class PluginInstallerTests(unittest.TestCase):
         self.assertIn('@deepseek-ai/dsh-experimental-auto-review', bundles)
         self.assertIn('@deepseek-ai/dsh-experimental-voice-input-bundle', bundles)
         self.assertEqual(self.package()['dsh']['profile']['other'], {'keep': True})
+
+    def test_patch_failure_aborts_both_installers(self):
+        self.seed(['custom'])
+        self.env['FAKE_PATCH_FAIL'] = '29'
+        for parent in (False, True):
+            self.run_script(parent=parent, status=29)
+        self.assertFalse((self.root / 'data/dsh.conf').exists())
 
     def test_invalid_version_and_bad_arguments_do_not_write(self):
         before = self.snapshot()

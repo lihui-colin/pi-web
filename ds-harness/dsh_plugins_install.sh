@@ -28,6 +28,10 @@ if [[ -n "$expected_version" ]] && ! "$dry_run"; then
     exit 2
 fi
 command -v node >/dev/null 2>&1 || { printf '缺少命令：node。\n' >&2; exit 1; }
+if ! "$dry_run"; then
+    command -v python3 >/dev/null 2>&1 || { printf '缺少命令：python3（用于 DS Bot 兼容补丁）。\n' >&2; exit 1; }
+    [[ -f "$script_dir/patches/ds_bot_apply.py" ]] || { printf '缺少 DS Bot 统一补丁文件。\n' >&2; exit 1; }
+fi
 export DSH_HOME="$script_dir/data/.dsh"
 export DSH_AGENTS_HOME="$script_dir/data/.agents"
 profile_dir="$DSH_HOME/profiles/web"
@@ -138,4 +142,7 @@ if (!fs.existsSync(file)) {
 }
 BUNDLES_NODE
 fi
-exit "$status"
+if (( status != 0 )); then exit "$status"; fi
+# Always validate/apply the full patch set, even when downloads were skipped.
+# A mismatched release must fail installation rather than silently omit fixes.
+run python3 -B "$script_dir/patches/ds_bot_apply.py"

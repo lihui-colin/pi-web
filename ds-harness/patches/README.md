@@ -1,44 +1,39 @@
-# DS Bot 本地兼容补丁
+# DS Bot 统一补丁
 
-当前统一入口支持 **ds-bot 0.2.6 + DSH chat/conversation 0.2.2-alpha.2**，默认使用本服务的 web profile。先核验所有包版本和代码匹配点，再写入；未知版本或结构会停止，不自动重启服务。
+所有补丁实现、版本校验、备份与回滚都集中在 **`ds_bot_apply.py`**，仅支持 **ds-bot 0.2.6 + DSH chat/conversation 0.2.2-alpha.2**。旧版本分支、独立补丁脚本和旧 Hero 实验入口已删除。未知版本或匹配点变化会停止，不猜测兼容性。
+
+## 安装与检查
+
+主安装器 `dsh_install.sh` 调用插件安装器 `dsh_plugins_install.sh`；插件安装成功后，后者自动执行统一补丁。首次安装、`--upgrade`、插件已安装而跳过下载时都会执行，防止重新安装覆盖补丁或遗漏共用输入框修复。补丁失败会使安装返回非零退出码；`--dry-run` 只打印计划，不修改文件。
 
 ```sh
-# 应用全部已核查修复
+bash ds-harness/dsh_install.sh
+# 单独补装插件并应用全部补丁
+bash ds-harness/dsh_plugins_install.sh
+# 手动应用／只检查全部补丁
 python3 ds-harness/patches/ds_bot_apply.py
-# 只检查，不写文件；缺失补丁返回 1
 python3 ds-harness/patches/ds_bot_apply.py --check
-# 手机回车换行（DSH 和 DS Bot 共用组件，独立应用）
-python3 ds-harness/patches/dsh_composer_enter.py
-python3 ds-harness/patches/dsh_composer_enter.py --check
 # 回归测试
-python3 -B -m unittest discover -s ds-harness -p 'test_ds_bot_*.py'
+python3 -B -m unittest discover -s ds-harness -p 'test_ds_bot*.py'
 python3 -B -m unittest discover -s ds-harness -p 'test_dsh_composer_enter.py'
+python3 -B -m unittest discover -s ds-harness -p 'test_dsh_plugins_install.py'
 ```
 
-## 当前修复
+默认定位本服务的 web profile 与 PATH 中的 DSH 安装；测试或明确的自定义安装可传 `--bot-dir` 和 `--host-dir`（DSH 的 `node_modules/@deepseek-ai` 目录）。升级到其他版本前必须重新核对上游实现；安装器仍按现有策略选择依赖版本，不会为了通过补丁检查静默降级。
 
-- **历史入口**：`ds_bot_history_native.py` 让有历史分段的空会话进入正常聊天视图，在原生 ChatFlow 前挂载 DS Bot 的 `EarlierParts`。保留消息列居中、分页和插槽所有权，不新增 CSS、Hero 历史容器或固定高度。会话数据不变。
-- **接口兼容**：`ds_bot_prompt.py` 仅在提示词组装结果包含 tools 数组时过滤工具；保留 sections 过滤、tools.restrict 和执行 guard。支持 0.2.5 / 0.2.6。新版宿主的 scope-local 工具声明不能再通过该钩子隐藏。
-- **手机与侧栏**：`ds_bot_mobile.py` 修复移动侧栏网格和抽屉占位，保留侧栏名称、群聊头像位置及操作按钮浮层。在不超过640px的触屏上放宽回复气泡至可用消息宽度，桌面保持原有宽度规则。支持 0.2.4 / 0.2.5 / 0.2.6，可幂等迁移此前仅保留操作按钮的中间版本。
+## 包含的修复
 
-旧 `ds_bot_history.py` 仅供历史记录与匹配锚点使用，不要重新执行：其 Hero 布局会导致空白、限高和样式冲突。原生补丁遇到仍含旧 Hero 补丁的包会停止，需先恢复对应发布包再应用，不叠加两套入口。
+- **历史记录**：通过原生 ChatFlow 展示归档分段，空会话有历史时进入正常聊天视图；保留分页和插槽所有权，不恢复旧 Hero 容器。
+- **提示词接口**：当前 DSH 在 prompt waterfall 结束后附加工具，补丁不再在该钩子访问 tools；保留 sections 过滤、tools.restrict 与执行 guard。已打补丁的当前 0.2.6 安装会转换为同一实现，不支持旧宿主接口。
+- **布局**：修复移动侧栏网格、抽屉占位、窄侧栏名称、群聊头像和操作按钮；手机长回复使用可用宽度。手机与 PC 输入框均为上下两行，工具按钮间距 8px。
+- **共用输入框**：普通 DSH 和 ds-bot 手机 Enter 只换行，点击按钮发送；PC 保留 Enter 发送、Shift+Enter 换行。复用宿主移动设备检测，保留输入法组合保护和 `beforeinput` 换行处理。
 
-## 上游核查与生效方式
+## 校验与生效
 
-2026-11-03 核对 DSH conversation 0.2.2-alpha.2：共用 `registerComposerKeymap` 的 Enter 处理直接提交，没有移动端分支；底层编辑器已经支持换行。`dsh_composer_enter.py` 复用宿主 `isMobileDevice()` 判断，在输入法组合保护之后阻止手机 Enter 的默认行为并派发编辑器换行命令，点击发送按钮仍正常提交。PC Enter/Shift+Enter、底层 `beforeinput` 换行逻辑保持原样。补丁独立于 DS Bot，两个聊天界面均覆盖，未知版本或代码结构拒绝应用。
+先核验全部包版本和四个目标文件，再统一写入。每个目标在同目录暂存后原子替换；原件与清单备份到 `ds-harness/log/patch-backups/`，后续写入失败会回滚已完成的替换。进程被强制终止或断电后，先检查备份及 `--check` 结果。
 
-注意：当前运行实例会在内存中保留前端 bundle。修改磁盘后必须确认实际 `/plugins/` 响应已包含补丁；仅刷新页面不保证生效。若实例未启用前端热加载，需要在确认活跃任务和中断影响后安排维护重载，不能直接重启正在执行任务的实例。
+安装器不启停服务。运行实例可能缓存前端 bundle 或服务端模块，安装成功不代表线上已更新；应检查实际 `/plugins/` 响应。需要重载时先检查活跃任务、保存恢复信息，再安排维护，不能默认重启。
 
-2026-11-02 核对已安装发布包：DS Bot 0.2.6 仍只在 handoff 消息分支挂载历史；DSH conversation 按当前空分段进入 Hero 并跳过 Views，ChatFlow 未提供历史前置插槽；DS Bot 的提示词钩子仍直接读取 `assembled.tools.filter()`，而当前 DSH 在 waterfall 结束后才附加 tools。移动端修改对应的原始匹配点也仍存在。
+核查依据：2026-11-02/03 的本机发布包中，DS Bot 0.2.6 仍依赖 handoff 展示历史、直接访问 prompt tools 并采用同行输入布局；DSH 0.2.2-alpha.2 的输入键盘逻辑没有手机 Enter 分支。这些匹配点经严格校验，未来版本需重新核查。
 
-前端补丁修改发布包，待运行实例重新加载前端资源后刷新浏览器；服务端提示词补丁需模块重载或维护重启。安装器不自动执行本补丁，升级覆盖后先核对新版本，再运行检查。应用时在每个目标目录暂存完整文件，再原子替换；原件和目标清单保存在 `ds-harness/log/patch-backups/`。后续写入失败会回滚已完成的替换，回滚失败时按错误提示和备份清单恢复。突然断电或进程被强制终止仍可能中断多文件应用，恢复后先运行检查。
-
-## 验证记录
-
-2026-11-03 手机回车补丁：20 项相关单元测试通过，包含手机 Enter/null 事件、输入法组合与选词保护、PC Enter/Shift+Enter/Ctrl+Enter/重复按键。浏览器测试在隔离上下文中替换前端响应、拦截提交回调计数，分别验证普通 DSH 和 DS Bot：Android 模拟环境 Enter 插入换行且提交次数为 0，桌面 Enter 调用提交、Shift+Enter 只换行；没有向模型发送测试消息。此验证不代表运行实例的资源缓存已重载。
-
-同日经用户授权重启 25228：重启前列表中 181 个会话均未运行，使用独立维护进程完成 stop/start，HTTPS 返回 200。随后断言线上返回的 bundle 已包含补丁（不再注入修复代码），普通 DSH 与 Chief 聊天框的手机换行、PC 快捷键均通过；测试仍拦截提交回调，未发送模型请求。25028、25128 的 PID 与启动时间未变化。
-
-0.2.6 在实际25228入口以桌面1602×900、触屏390×844验证：Chief 历史分页由18条增至31条，桌面切换其他会话再返回正常；无页面错误和横向溢出。桌面消息列960px、长回复气泡768px，手机消息列及长回复气泡均为273px。测试未发送聊天消息或重启服务。
-
-旧版排查、重启注意事项和会话存储格式见 [迁移记录](../MIGRATION.md)。
+2026-11-03 经授权重启 25228 后，普通 DSH 与 Chief 均完成线上手机换行和 PC 快捷键验证，未发送模型测试消息；25028/25128 的进程未变化。合并补丁的回归覆盖独立单文件执行、四个目标全量应用、缺失输入框补丁检测、幂等性、未知版本拒绝、失败不写入及安装入口调用。历史排查记录见 [迁移文档](../MIGRATION.md)。

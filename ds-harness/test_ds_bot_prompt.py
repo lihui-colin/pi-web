@@ -1,11 +1,11 @@
-"""Compatibility regression: old assemblies include tools; new ones do not."""
+"""Current DSH prompt waterfall does not own the provider tool list."""
 import subprocess
 import unittest
-from patches.ds_bot_prompt import OLD, patch
+from patches.ds_bot_apply import PROMPT_OLD as OLD, PROMPT_APPLIED_026, patch_prompt as patch
 
 
 class PromptPatchTests(unittest.TestCase):
-    def test_old_and_new_assembly_contracts(self):
+    def test_current_assembly_contract(self):
         callback = """async function filter(next) {
           const assembled = await next();
           return {
@@ -25,8 +25,6 @@ assert.equal('tools' in modern, false);
 assert.deepEqual(modern.sections, [{name:'persona'}]);
 assert.equal(modern.contexts, base.contexts);
 assert.equal(modern.variables, base.variables);
-const legacy = await filter(async () => ({...base, tools:[{name:'subagent'}, {name:'bash'}]}));
-assert.deepEqual(legacy.tools, [{name:'bash'}]);
 assert.equal(base.sections.length, 2);
 """
         subprocess.run(['node', '--input-type=module', '-e', script], check=True)
@@ -36,6 +34,9 @@ assert.equal(base.sections.length, 2);
         self.assertEqual(patch(fixed), fixed)
         with self.assertRaises(ValueError):
             patch('unknown source')
+
+    def test_existing_026_patch_converges_to_current_host_only(self):
+        self.assertEqual(patch(PROMPT_APPLIED_026), patch(OLD))
 
 
 if __name__ == '__main__':

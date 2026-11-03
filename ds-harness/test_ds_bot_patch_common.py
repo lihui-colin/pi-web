@@ -4,8 +4,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from patches import ds_bot_history_native as history, ds_bot_prompt as prompt
-from patches import ds_bot_patch_common as common
+from patches import ds_bot_apply as history, ds_bot_apply as prompt
+from patches import ds_bot_apply as common
 
 
 class ValidationTests(unittest.TestCase):
@@ -14,18 +14,17 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(common.replace_once('old+fix', 'old', 'old+fix'), 'old+fix')
 
     def test_mixed_and_duplicate_patches_are_rejected(self):
-        for source in [prompt.NEW + prompt.NEW, prompt.NEW + prompt.OLD]:
+        for source in [prompt.PROMPT_NEW + prompt.PROMPT_NEW, prompt.PROMPT_NEW + prompt.PROMPT_OLD]:
             with self.subTest(source=source), self.assertRaises(ValueError):
-                prompt.patch(source)
-        for source in [history.HERO_NEW * 2, history.HERO_NEW + history.HERO]:
+                prompt.patch_prompt(source)
+        for source in [history.HISTORY_HERO_NEW * 2, history.HISTORY_HERO_NEW + history.HISTORY_HERO]:
             with self.subTest(source=source), self.assertRaises(ValueError):
-                history.patch(source, [(history.HERO, history.HERO_NEW)])
+                history.patch_history(source, [(history.HISTORY_HERO, history.HISTORY_HERO_NEW)])
 
     def test_legacy_hero_integration_is_rejected(self):
-        from patches import ds_bot_history as legacy
-        source = '\n'.join([legacy.ANCHOR, legacy.OLD, legacy.HOOK])
         with self.assertRaisesRegex(ValueError, 'Legacy Hero'):
-            history.patch(legacy.patch(source), [(history.ANCHOR, history.INSERT + history.ANCHOR)])
+            history.patch_history('function BotHeroHistory(', history.HISTORY_BOT_REPLACEMENTS)
+
 
 
 class PublicationTests(unittest.TestCase):

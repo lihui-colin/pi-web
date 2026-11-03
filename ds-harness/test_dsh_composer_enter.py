@@ -1,7 +1,7 @@
 import json
 import subprocess
 import unittest
-from patches import dsh_composer_enter as p
+from patches import ds_bot_apply as p
 
 # Original Enter callback from DSH conversation 0.2.2-alpha.2.
 UPSTREAM = '''(event) => {
@@ -22,10 +22,10 @@ UPSTREAM = '''(event) => {
 
 class ComposerEnterTests(unittest.TestCase):
     def test_idempotent_and_unknown_bundle_rejected(self):
-        fixed = p.patch(UPSTREAM)
-        self.assertEqual(p.patch(fixed), fixed)
+        fixed = p.patch_composer(UPSTREAM)
+        self.assertEqual(p.patch_composer(fixed), fixed)
         with self.assertRaises(ValueError):
-            p.patch('unknown editor')
+            p.patch_composer('unknown editor')
 
     def test_mobile_newlines_desktop_submission_and_ime(self):
         script = r"""
@@ -73,7 +73,7 @@ check(false, {repeat:true}, 0);
 check(false, {isComposing:true}, 0);
 check(false, {}, 0, {composing:true});
 check(false, {}, 0, {popup:true});
-""".replace('CALLBACK', json.dumps(p.patch(UPSTREAM)))
+""".replace('CALLBACK', json.dumps(p.patch_composer(UPSTREAM)))
         subprocess.run(['node', '-e', script], check=True, capture_output=True, text=True)
 
 if __name__ == '__main__':

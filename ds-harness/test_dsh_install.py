@@ -32,6 +32,8 @@ def copy_installers(root):
     project.mkdir()
     for source in (SCRIPT, NGINX_SCRIPT, PLUGIN_SCRIPT):
         shutil.copy2(source, project / source.name)
+    (project / 'patches').mkdir()
+    (project / 'patches/ds_bot_apply.py').write_text('print("PATCH_BUNDLE_APPLIED")\n')
     return project
 
 

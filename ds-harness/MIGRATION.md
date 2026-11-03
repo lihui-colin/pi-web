@@ -1,3 +1,5 @@
+> 当前安装会自动执行单文件补丁 `patches/ds_bot_apply.py`，只支持 ds-bot 0.2.6 + DSH 0.2.2-alpha.2。以下旧版本问题仅为历史记录，不提供旧版本兼容。操作以 [统一补丁说明](patches/README.md) 为准。
+
 # DSH 升级与迁移记录
 
 ## 当前生效范围（2026-11-02，ds-bot 0.2.6）
@@ -10,7 +12,7 @@
 
 ### Chief 原生消息区历史入口
 
-撤销旧入口后，空分段的 Chief 没有交接消息，原版界面没有历史入口。现使用 `python3 ds-harness/patches/ds_bot_history_native.py`：Bot 报告历史分段是否存在，宿主在有历史时进入正常 active 会话并允许原生 Views 渲染；历史在原有 ChatFlow 前加载。没有新增 CSS、Hero 容器、固定高度或气泡规则。此补丁核验 ds-bot 0.2.6、DSH chat/conversation 0.2.2-alpha.2 的全部匹配点后再写入，保留原生插槽所有权。
+撤销旧入口后，空分段的 Chief 没有交接消息，原版界面没有历史入口。现使用 `python3 ds-harness/patches/ds_bot_apply.py`：Bot 报告历史分段是否存在，宿主在有历史时进入正常 active 会话并允许原生 Views 渲染；历史在原有 ChatFlow 前加载。没有新增 CSS、Hero 容器、固定高度或气泡规则。此补丁核验 ds-bot 0.2.6、DSH chat/conversation 0.2.2-alpha.2 的全部匹配点后再写入，保留原生插槽所有权。
 
 实际 25228 浏览器验证：桌面1602×900历史列960px且居中，手机390×844历史列273px；原生 scrollBody 滚动，历史消息由18条分页到31条；桌面切换群聊再回 Chief 正常。两种视口没有用户气泡横向溢出、页面横向溢出或 pageerror。前端刷新即可生效，聊天数据未修改。
 
@@ -38,7 +40,7 @@
 
 ```sh
 # 仓库根目录执行
-python3 ds-harness/patches/ds_bot_prompt.py
+# 历史独立脚本已移除；当前版本改用 patches/ds_bot_apply.py
 ```
 
 脚本只接受 ds-bot 0.2.5，遇到未知源代码结构会停止。修改的是服务端模块，必须让模块重新加载；现场配置不监听插件源码，因此安排了维护重启。已验证旧、新两类组装输入及当前安装 DSH 的实际 SystemPrompt 实现，未用自动发送聊天消息作为验证。
@@ -54,7 +56,7 @@ python3 ds-harness/patches/ds_bot_prompt.py
 本地适配：DSH ChatFlow 增加可选 `conversation.chat.before` 插槽；ds-bot 根据会话已有分段加载历史，交接行不再重复挂载。空会话的 Hero 区域另用现有 `conversation.hero.options` 插槽显示历史，避免删除最后一个失败回合后看不到旧分段。保留宿主原有消息、工具、回合渲染和子插槽所有权。
 
 ```sh
-python3 ds-harness/patches/ds_bot_history.py
+# 历史实验脚本已移除，不再应用
 ```
 
 该脚本同时修改 ds-bot 0.2.5 的 `client.js` 和当前全局 DSH 中 `dsh-client-ui-chat@0.2.2-alpha.2/lib/client.js`，先核验两个包的版本和匹配片段再写入。前端修改刷新页面即可加载，不需要重启服务。
