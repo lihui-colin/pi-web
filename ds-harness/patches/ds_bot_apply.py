@@ -227,6 +227,81 @@ def patch_mobile(text):
     return text
 
 
+# Restore the host's existing width controls on desktop; do not implement another dragger.
+WIDTH_HANDLES = '[class*="_widthHandle"]{display:none!important}'
+WIDTH_HANDLES_FIXED = '''/* Keep touch/narrow layouts unchanged; desktop uses DSH's native handles. */
+@media (max-width:1023px),(pointer:coarse),(hover:none){
+''' + WIDTH_HANDLES + '\n}'
+
+WIDTH_BODY = '[class*="_body"]:has(> [class*="_scrollBody"]){--dsh-chat-content-width:min(960px,100%)}'
+WIDTH_BODY_FIXED = WIDTH_BODY + '''
+/* DS Bot registers these properties as non-inheriting for resize performance.
+   Opt the desktop body back into the host root's live width axis only. */
+@media (min-width:1024px) and (pointer:fine) and (hover:hover){
+  [class*="_body"]:has(> [class*="_scrollBody"]){
+    --dsh-conversation-column-width:inherit;
+    --dsh-chat-user-width:inherit;
+    --dsh-chat-content-width:var(--dsh-chat-user-width,clamp(680px,calc(var(--dsh-conversation-column-width,0px) * .64),920px));
+  }
+}
+'''
+
+WIDTH_COMPOSER = '[class*="_root"]:has(> [data-composer-card])>[data-composer-card]{max-width:min(992px,100%)!important}'
+WIDTH_COMPOSER_FIXED = WIDTH_COMPOSER + '''
+@media (min-width:1024px) and (pointer:fine) and (hover:hover){
+  [class*="_root"]:has(> [data-composer-card])>[data-composer-card]{max-width:min(var(--dsh-composer-card-max-width,992px),100%)!important}
+}
+'''
+
+
+# Bubble replies share the transcript's right edge with outgoing messages.
+ALIGN_ANCHOR = 'body[data-bt-layout=flat] .bt-tools::after{display:none}'
+ALIGN_CSS = '''
+/* Keep reply bubbles and left-aligned text; use the full transcript width. */
+body[data-bt-layout=bubble] .bt-astack{align-items:stretch}
+body[data-bt-layout=bubble] .bt-astack>.bt-msg{align-items:stretch;min-width:0;max-width:100%}
+body[data-bt-layout=bubble] .bt-msg-line{min-width:0}
+body[data-bt-layout=bubble] .bt-msg-line>.bt-bubble{flex:1;min-width:0}
+/* Both layouts keep message actions in a separate flow row below the reply. */
+body[data-bt-layout] .bt-msg>.bt-msg-line{flex-wrap:wrap;row-gap:4px}
+body[data-bt-layout] .bt-msg>.bt-msg-line>.bt-tools{position:static;flex:0 0 100%;justify-content:flex-start;margin:0;transform:none;padding:0;border-radius:0;background:none;box-shadow:none}
+body[data-bt-layout] .bt-msg>.bt-msg-line>.bt-tools::after{display:none}
+'''
+
+
+MORE_BUTTON = '''    (0, import_react17.createElement)("button", { type: "button", className: "bt-tool", "aria-label": t("More message actions"), title: t("More"), "aria-haspopup": "menu", "aria-expanded": panel?.kind === "more", onClick: (event) => open("more", event) }, copied ? (0, import_react17.createElement)(CheckIcon) : (0, import_react17.createElement)(DotsIcon)),'''
+DIRECT_BUTTONS = '''    (0, import_react17.createElement)("button", { type: "button", className: "bt-tool", "aria-label": copied ? t("Copied") : t("Copy"), title: copied ? t("Copied") : t("Copy"), onClick: copy2 }, (0, import_react17.createElement)(copied ? CheckIcon : CopyIcon)),
+    (0, import_react17.createElement)("button", { type: "button", className: "bt-tool", "aria-label": t("Download"), title: t("Download"), onClick: download2 }, (0, import_react17.createElement)(DownloadIcon)),'''
+MORE_ITEM = '''  const item = (label, Icon, run2) => (0, import_react17.createElement)("button", { key: label, type: "button", role: "menuitem", onClick: () => {
+    close();
+    run2();
+  } }, (0, import_react17.createElement)(Icon), label);'''
+MORE_PORTAL = '''    panel?.kind === "more" ? (0, import_react_dom.createPortal)((0, import_react17.createElement)(
+      "div",
+      { ref: pop, className: "bt-menu", role: "menu", "aria-label": t("Message actions"), style: place },
+      item(t("Copy"), CopyIcon, copy2),
+      item(t("Download"), DownloadIcon, download2)
+    ), document.body) : null'''
+MESSAGE_ACTION_REPLACEMENTS = [
+    (MORE_BUTTON, DIRECT_BUTTONS),
+    (MORE_ITEM, '  // Copy and download are direct message actions.'),
+    (MORE_PORTAL, '    // Message actions no longer need a More popup.'),
+    ('''    const below = rect.bottom + 220 < viewBottom();
+    return panel.kind === "react" ? { left: Math.min(Math.max(rect.left + rect.width / 2, STRIP_HALF), window.innerWidth - STRIP_HALF), top: rect.top - 6, "--bt-origin": "bottom center" } : { left: Math.min(rect.left, window.innerWidth - 208), ...below ? { top: rect.bottom + 4 } : { bottom: viewBottom() - rect.top + 4, "--bt-origin": "bottom left" } };''',
+     '''    return { left: Math.min(Math.max(rect.left + rect.width / 2, STRIP_HALF), window.innerWidth - STRIP_HALF), top: rect.top - 6, "--bt-origin": "bottom center" };'''),
+]
+
+
+def patch_presentation(text):
+    for old, new in [
+        (WIDTH_HANDLES, WIDTH_HANDLES_FIXED), (WIDTH_BODY, WIDTH_BODY_FIXED),
+        (WIDTH_COMPOSER, WIDTH_COMPOSER_FIXED), (ALIGN_ANCHOR, ALIGN_ANCHOR + ALIGN_CSS),
+        *MESSAGE_ACTION_REPLACEMENTS,
+    ]:
+        text = replace_once(text, old, new)
+    return text
+
+
 # Prompt compatibility
 PROMPT_OLD = '        tools: assembled.tools.filter(tool => !HIDDEN_TOOLS.includes(tool.name)),'
 
@@ -264,6 +339,21 @@ def patch_composer(text):
     return replace_once(text, COMPOSER_ANCHOR, COMPOSER_REPLACEMENT)
 
 
+# Phone browsers keep only the Chat view tab; other views stay in the More menu.
+VIEW_LIMIT_OLD = '''\t\t\t\tconst updateLimit = () => {
+\t\t\t\t\tsetVisibleViewLimit(Math.max(1, Math.floor((row.clientWidth - 48) / 120)));
+\t\t\t\t};'''
+
+VIEW_LIMIT_NEW = '''\t\t\t\tconst updateLimit = () => {
+\t\t\t\t\t// Phone browsers show only Chat. Trajectory, Git, Statistics and other views stay in More.
+\t\t\t\t\tconst phone = (0, _deepseek_ai_dsh_client_ui_primitives.isMobileDevice)() && window.matchMedia("(max-width: 1023px)").matches;
+\t\t\t\t\tsetVisibleViewLimit(phone ? 1 : Math.max(1, Math.floor((row.clientWidth - 48) / 120)));
+\t\t\t\t};'''
+
+def patch_view_tabs(text):
+    return replace_once(text, VIEW_LIMIT_OLD, VIEW_LIMIT_NEW)
+
+
 HISTORY_BOT_REPLACEMENTS = [
     (HISTORY_ANCHOR, HISTORY_INSERT + HISTORY_ANCHOR),
     (HISTORY_OLD, HISTORY_NEW), (HISTORY_HOOK, HISTORY_HOOK_NEW),
@@ -295,15 +385,18 @@ def plan_changes(bot=None, host=None):
         if (manifest.get('name'), manifest.get('version')) != (name, version):
             raise ValueError(f'Unsupported package {manifest.get("name")}@{manifest.get("version")}; expected {name}@{version}. Review upstream before applying.')
     transforms = [
-        (bot / 'client.js', lambda text: patch_mobile(patch_history(text, HISTORY_BOT_REPLACEMENTS))),
-        (bot / 'src/host/tools.js', patch_prompt),
-        (host / 'dsh-client-ui-chat/lib/client.js', lambda text: patch_history(text, HISTORY_CHAT_REPLACEMENTS)),
-        (host / 'dsh-client-ui-conversation/lib/client.js', lambda text: patch_composer(patch_history(text, HISTORY_CONVERSATION_REPLACEMENTS))),
+        (bot / 'client.js', [lambda text: patch_history(text, HISTORY_BOT_REPLACEMENTS), patch_mobile, patch_presentation]),
+        (bot / 'src/host/tools.js', [patch_prompt]),
+        (host / 'dsh-client-ui-chat/lib/client.js', [lambda text: patch_history(text, HISTORY_CHAT_REPLACEMENTS)]),
+        (host / 'dsh-client-ui-conversation/lib/client.js', [lambda text: patch_history(text, HISTORY_CONVERSATION_REPLACEMENTS), patch_composer, patch_view_tabs]),
     ]
     changes = []
-    for path, transform in transforms:
+    for path, steps in transforms:
         original = path.read_text()
-        changes.append((path, original, transform(original)))
+        fixed = original
+        for transform in steps:
+            fixed = transform(fixed)
+        changes.append((path, original, fixed))
     return changes
 
 

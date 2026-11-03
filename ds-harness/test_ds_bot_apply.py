@@ -27,11 +27,12 @@ class CompletePatchTests(unittest.TestCase):
         sources = {
             self.bot / 'client.js': '\n'.join([a for a, _ in p.HISTORY_BOT_REPLACEMENTS] + [
                 p.MOBILE_GRID, p.MOBILE_TRACK, p.MOBILE_GROUP_OLD, p.MOBILE_META_CSS,
-                p.MOBILE_RAIL_CSS, p.MOBILE_COMPOSER]),
+                p.MOBILE_RAIL_CSS, p.MOBILE_COMPOSER, p.WIDTH_HANDLES, p.WIDTH_BODY, p.WIDTH_COMPOSER,
+                p.ALIGN_ANCHOR] + [a for a, _ in p.MESSAGE_ACTION_REPLACEMENTS]),
             self.bot / 'src/host/tools.js': p.PROMPT_OLD,
             self.host / 'dsh-client-ui-chat/lib/client.js': '\n'.join(a for a, _ in p.HISTORY_CHAT_REPLACEMENTS),
             self.host / 'dsh-client-ui-conversation/lib/client.js': '\n'.join(
-                [a for a, _ in p.HISTORY_CONVERSATION_REPLACEMENTS] + [p.COMPOSER_ANCHOR]),
+                [a for a, _ in p.HISTORY_CONVERSATION_REPLACEMENTS] + [p.COMPOSER_ANCHOR, p.VIEW_LIMIT_OLD]),
         }
         for path, source in sources.items():
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -55,7 +56,13 @@ class CompletePatchTests(unittest.TestCase):
         self.run_cli('--check')
         self.assertIn(p.MOBILE_COMPOSER_CSS, (self.bot / 'client.js').read_text())
         self.assertIn(p.HISTORY_INSERT, (self.bot / 'client.js').read_text())
-        self.assertIn(p.COMPOSER_REPLACEMENT, (self.host / 'dsh-client-ui-conversation/lib/client.js').read_text())
+        self.assertIn(p.WIDTH_BODY_FIXED, (self.bot / 'client.js').read_text())
+        self.assertIn(p.ALIGN_CSS, (self.bot / 'client.js').read_text())
+        self.assertIn(p.DIRECT_BUTTONS, (self.bot / 'client.js').read_text())
+        conversation = (self.host / 'dsh-client-ui-conversation/lib/client.js').read_text()
+        self.assertIn(p.COMPOSER_REPLACEMENT, conversation)
+        self.assertIn(p.VIEW_LIMIT_NEW, conversation)
+        self.assertNotIn('phone ? 1 : Math.max(1, Math.floor((row.clientWidth - 48) / 120))', conversation.replace(p.VIEW_LIMIT_NEW, '', 1))
         before = {path: path.stat().st_mtime_ns for path in self.sources}
         self.run_cli()
         self.assertEqual(before, {path: path.stat().st_mtime_ns for path in self.sources})
@@ -67,6 +74,17 @@ class CompletePatchTests(unittest.TestCase):
         self.run_cli('--check', status=1)
         self.run_cli()
         self.run_cli('--check')
+
+    def test_existing_install_gets_width_controls(self):
+        self.run_cli()
+        target = self.bot / 'client.js'
+        target.write_text(target.read_text().replace(p.WIDTH_HANDLES_FIXED, p.WIDTH_HANDLES)
+                          .replace(p.WIDTH_BODY_FIXED, p.WIDTH_BODY)
+                          .replace(p.WIDTH_COMPOSER_FIXED, p.WIDTH_COMPOSER))
+        self.run_cli('--check', status=1)
+        self.run_cli()
+        self.run_cli('--check')
+        self.assertIn(p.WIDTH_HANDLES_FIXED, target.read_text())
 
     def test_bad_last_target_prevents_all_writes(self):
         target = self.host / 'dsh-client-ui-conversation/lib/client.js'
