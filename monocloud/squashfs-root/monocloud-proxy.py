@@ -122,9 +122,11 @@ def write_config(nodes, port, bind, selected):
     for name in ordered:
         lines.append(f"      - {yaml_quote(name)}")
     smart_overlay = os.path.join(STATE_DIR, "official-smart", "overlay.yaml")
+    rule_source = None
     if os.path.isfile(smart_overlay):
         with open(smart_overlay, encoding="utf-8") as fh:
             lines.append(fh.read())
+        rule_source = smart_overlay
     else:
         lines.extend(["find-process-mode: off", "rules:", "  - MATCH,PROXY", ""])
     os.makedirs(RUNTIME_DIR, mode=0o700, exist_ok=True)
@@ -134,6 +136,7 @@ def write_config(nodes, port, bind, selected):
     os.chmod(tmp, 0o600)
     os.replace(tmp, CONFIG_FILE)
     os.chmod(CONFIG_FILE, 0o600)
+    return rule_source
 
 
 def read_pid():
@@ -185,7 +188,7 @@ def start(port, bind, node):
     service, nodes = fetch_nodes(session)
     names = [item.get("alias") or item["hostname"] for item in nodes]
     selected = node or names[0]
-    write_config(nodes, port, bind, selected)
+    rule_source = write_config(nodes, port, bind, selected)
     test = subprocess.run(
         [CORE, "-t", "-f", CONFIG_FILE, "-d", RUNTIME_DIR],
         capture_output=True,
@@ -214,6 +217,11 @@ def start(port, bind, node):
     print(f"Plan: {plan}")
     print(f"Node: {selected}")
     print(f"Other nodes: {', '.join(name for name in names if name != selected)}")
+    print(f"Config: {CONFIG_FILE}")
+    if rule_source:
+        print(f"Rules: {rule_source}")
+    else:
+        print("Rules: built-in MATCH,PROXY (all traffic via proxy)")
     print(f"Log: {LOG_FILE}")
 
 
