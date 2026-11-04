@@ -1,6 +1,6 @@
 # DeepSeek Harness
 
-顶层仅保留主安装和服务管理脚本；辅助脚本、源码、补丁、测试与配置模板位于 `srcs/`，运行数据、依赖和日志仍使用服务目录下原有位置。
+顶层保留主安装、服务管理和代理配置脚本；其他辅助脚本、源码、补丁、测试与配置模板位于 `srcs/`，运行数据、依赖和日志仍使用服务目录下原有位置。
 
 本目录管理 `magpie → DSH 回环后端 → Nginx HTTPS 入口`。运行需要 Linux ≥5.3（允许 pidfd 系统调用）、Bash、Node.js ≥24、npm、curl、Python ≥3.10、OpenSSL 和 `flock`（util-linux）命令行工具。启停前检查 pidfd 能力；Python 未提供包装时优先使用 libc，x86_64/aarch64 还支持原生系统调用。Nginx 由安装器构建到本目录 `data/.local/nginx/`，启动器固定使用这份程序，运行文件也保存在项目内。
 
@@ -116,13 +116,13 @@ magpie dsh effort high
 Codex CLI 通过 `HTTPS_PROXY`、`HTTP_PROXY`、`ALL_PROXY` 和 `NO_PROXY` 走代理。Magpie 里的 Codex 若在 provider 上单独配置了 `proxy`，则优先于这些环境变量。`dsh_web_run.sh start` 读取 `data/dsh.conf` 的 `outbound_proxy` 和 `no_proxy`，在拉起服务前写入三处：新进程的 `HTTPS_PROXY`、`HTTP_PROXY`、`ALL_PROXY`、`NO_PROXY`；`data/proxy.env`；Magpie 的全局 `settings.json` 和 Codex provider 的 `proxy`。未配置 `outbound_proxy` 时才回退到已有的 `data/proxy.env`。已运行的进程不会自动改用新环境。`no_proxy` 默认包含 `127.0.0.1,localhost,::1`，避免本机回环再绕外网代理。
 
 ```bash
-bash ds-harness/srcs/dsh_proxy.sh set http://<代理主机>:<端口>
-bash ds-harness/srcs/dsh_proxy.sh show
-source ds-harness/srcs/dsh_proxy.sh
-bash ds-harness/srcs/dsh_proxy.sh run -- codex
+bash ds-harness/dsh_proxy.sh set http://<代理主机>:<端口>
+bash ds-harness/dsh_proxy.sh show
+source ds-harness/dsh_proxy.sh
+bash ds-harness/dsh_proxy.sh run -- codex
 ```
 
-清除出站代理使用 `bash ds-harness/srcs/dsh_proxy.sh clear`：删除 `data/proxy.env`、`data/dsh.conf` 的 `outbound_proxy/no_proxy`、Magpie `settings.json` 的全局 `proxy` 和 `providers.json` 中所有 provider 的 `proxy`，保留其他设置。加 `--env-only` 时保留 Magpie 配置。配置文件缺失或重复清理均可正常完成。此命令不会重启服务，也无法修改父 shell 或已运行进程的环境；若启动终端仍导出了代理变量，需要先在该终端执行 `unset HTTPS_PROXY HTTP_PROXY ALL_PROXY NO_PROXY https_proxy http_proxy all_proxy no_proxy outbound_proxy`，避免下次启动继续继承旧代理。
+清除出站代理使用 `bash ds-harness/dsh_proxy.sh clear`：删除 `data/proxy.env`、`data/dsh.conf` 的 `outbound_proxy/no_proxy`、Magpie `settings.json` 的全局 `proxy` 和 `providers.json` 中所有 provider 的 `proxy`，保留其他设置。加 `--env-only` 时保留 Magpie 配置。配置文件缺失或重复清理均可正常完成。此命令不会重启服务，也无法修改父 shell 或已运行进程的环境；若启动终端仍导出了代理变量，需要先在该终端执行 `unset HTTPS_PROXY HTTP_PROXY ALL_PROXY NO_PROXY https_proxy http_proxy all_proxy no_proxy outbound_proxy`，避免下次启动继续继承旧代理。
 
 ## 数据目录
 

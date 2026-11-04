@@ -5,17 +5,17 @@
 # 本脚本不启停服务。已运行的 magpie serve 要等下次启动才继承新环境。
 #
 # 用法：
-#   bash ds-harness/srcs/dsh_proxy.sh set [--env-only] [--no-proxy 列表] <url>
-#   bash ds-harness/srcs/dsh_proxy.sh clear [--env-only]
-#   bash ds-harness/srcs/dsh_proxy.sh show
-#   bash ds-harness/srcs/dsh_proxy.sh env
-#   bash ds-harness/srcs/dsh_proxy.sh run -- <命令> [参数…]
-#   source ds-harness/srcs/dsh_proxy.sh
+#   bash ds-harness/dsh_proxy.sh set [--env-only] [--no-proxy 列表] <url>
+#   bash ds-harness/dsh_proxy.sh clear [--env-only]
+#   bash ds-harness/dsh_proxy.sh show
+#   bash ds-harness/dsh_proxy.sh env
+#   bash ds-harness/dsh_proxy.sh run -- <命令> [参数…]
+#   source ds-harness/dsh_proxy.sh
 # url 仅接受 http://、https:// 或 socks5://。
 # set 写入 data/proxy.env，并把同一地址写入 Magpie Codex provider。
 # --env-only 只写环境文件，不改 ~/.config/magpie/providers.json。
 
-dsh_proxy_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+dsh_proxy_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 proxy_env_file() {
     printf '%s\n' "${DSH_PROXY_ENV_FILE:-$dsh_proxy_root/data/proxy.env}"

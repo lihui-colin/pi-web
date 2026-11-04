@@ -1,6 +1,6 @@
 # Paseo 部署
 
-顶层仅保留主安装和服务管理脚本；辅助脚本、源码、补丁、测试与配置模板位于 `srcs/`，运行数据、依赖和日志仍使用服务目录下原有位置。
+顶层保留主安装、服务管理和代理配置脚本；其他辅助脚本、源码、补丁、测试与配置模板位于 `srcs/`，运行数据、依赖和日志仍使用服务目录下原有位置。
 
 ## 安装与配置
 
@@ -28,11 +28,12 @@ Nginx 从固定版本源码构建，校验 SHA-256 并保留许可证，已有�
 可用脚本设置或删除 `data/paseo.conf` 中的代理字段（保留 IP 和端口）：
 
 ```bash
-bash paseo-ws/srcs/paseo-proxy.sh set http://127.0.0.1:7890
-bash paseo-ws/srcs/paseo-proxy.sh delete
+bash paseo-ws/paseo-proxy.sh set http://127.0.0.1:7890
+bash paseo-ws/paseo-proxy.sh clear
+bash paseo-ws/paseo-proxy.sh show
 ```
 
-脚本支持从任意工作目录调用，不自动重启服务，也不修改 shell 或 provider 的环境配置。删除字段不等于强制直连：后续启动仍可能继承启动环境中的代理变量。
+配置命令与 DSH 统一为 `set`、`clear`、`show`；不带参数默认 `show`，`help` 查看用法，旧 `delete` 命令仍作为 `clear` 的别名。`show` 隐藏代理认证信息。脚本支持从任意工作目录调用，不自动重启服务，也不修改 shell 或 provider 的环境配置。删除字段不等于强制直连：后续启动仍可能继承启动环境中的代理变量。
 
 在 `data/paseo.conf` 中设置 `networkProxy`，例如：
 
