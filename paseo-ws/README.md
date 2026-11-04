@@ -23,6 +23,15 @@ Nginx 从固定版本源码构建，校验 SHA-256 并保留许可证，已有�
 
 ## Provider 网络代理
 
+可用脚本设置或删除 `data/paseo.conf` 中的代理字段（保留 IP 和端口）：
+
+```bash
+bash paseo-ws/paseo-proxy.sh set http://127.0.0.1:7890
+bash paseo-ws/paseo-proxy.sh delete
+```
+
+脚本支持从任意工作目录调用，不自动重启服务，也不修改 shell 或 provider 的环境配置。删除字段不等于强制直连：后续启动仍可能继承启动环境中的代理变量。
+
 在 `data/paseo.conf` 中设置 `networkProxy`，例如：
 
 ```json

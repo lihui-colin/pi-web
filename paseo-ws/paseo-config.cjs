@@ -42,8 +42,7 @@ async function initializeAccess(data) {
   }
 }
 
-function accessConfig(data) {
-  const config = JSON.parse(fs.readFileSync(path.join(data, 'paseo.conf'), 'utf8'));
+function accessConfig(data, config = JSON.parse(fs.readFileSync(path.join(data, 'paseo.conf'), 'utf8'))) {
   const { ip, port, networkProxy = '' } = config;
   if (Object.keys(config).some(key => !['ip', 'port', 'networkProxy'].includes(key)) ||
       typeof ip !== 'string' || !net.isIP(ip) ||
@@ -63,6 +62,16 @@ function accessConfig(data) {
     }
   }
   return { ...config, networkProxy };
+}
+
+function updateNetworkProxy(data, value) {
+  const file = path.join(data, 'paseo.conf');
+  if (!fs.lstatSync(file).isFile()) throw new Error('paseo.conf 必须是普通文件。');
+  const config = JSON.parse(fs.readFileSync(file, 'utf8'));
+  if (value === undefined) delete config.networkProxy;
+  else config.networkProxy = value;
+  accessConfig(data, config);
+  writeJson(file, config);
 }
 
 function endpoint(data, mode) {
@@ -178,6 +187,11 @@ async function main() {
     console.log([value.listen, value.url, path.join(data, 'tls', value.tlsName, 'fullchain.pem')].join('\n'));
   } else if (action === 'network-proxy') {
     process.stdout.write(accessConfig(data).networkProxy);
+  } else if (action === 'set-network-proxy') {
+    if (process.argv.length !== 5 || !mode) throw new Error('请提供非空代理 URL。');
+    updateNetworkProxy(data, mode);
+  } else if (action === 'delete-network-proxy') {
+    updateNetworkProxy(data);
   } else if (action === 'access') {
     await initializeAccess(data);
   } else if (action === 'init') {
