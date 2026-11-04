@@ -1,0 +1,9 @@
+{
+  "name": "@local/dsh-codegraph",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Connect the locally installed CodeGraph MCP server to DSH",
+  "type": "module",
+  "files": ["cordis.patch.yml"],
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
+}

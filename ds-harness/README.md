@@ -122,6 +122,8 @@ source ds-harness/srcs/dsh_proxy.sh
 bash ds-harness/srcs/dsh_proxy.sh run -- codex
 ```
 
+清除出站代理使用 `bash ds-harness/srcs/dsh_proxy.sh clear`：删除 `data/proxy.env`、`data/dsh.conf` 的 `outbound_proxy/no_proxy`、Magpie `settings.json` 的全局 `proxy` 和 `providers.json` 中所有 provider 的 `proxy`，保留其他设置。加 `--env-only` 时保留 Magpie 配置。配置文件缺失或重复清理均可正常完成。此命令不会重启服务，也无法修改父 shell 或已运行进程的环境；若启动终端仍导出了代理变量，需要先在该终端执行 `unset HTTPS_PROXY HTTP_PROXY ALL_PROXY NO_PROXY https_proxy http_proxy all_proxy no_proxy outbound_proxy`，避免下次启动继续继承旧代理。
+
 ## 数据目录
 
 DSH 0.2.2 系列与 ds-bot 0.2.5 的兼容问题、补丁应用及升级验收见 [迁移文档](MIGRATION.md)。现场核验版本为 DSH 0.2.2-alpha.2。

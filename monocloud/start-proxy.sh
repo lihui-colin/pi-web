@@ -6,6 +6,6 @@ set -e
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 PORT="${PORT:-7078}"
 BIND="${BIND:-0.0.0.0}"
-NODE="${NODE:-Relay-JP2}"
+NODE="${NODE:-Relay-SG2}"
 
 exec "$ROOT/monocloud" proxy restart --port "$PORT" --bind "$BIND" --node "$NODE"

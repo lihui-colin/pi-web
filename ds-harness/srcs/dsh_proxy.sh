@@ -126,6 +126,7 @@ dsh_conf_file() {
 update_dsh_outbound_proxy() {
     local url="$1" no_proxy="$2" conf
     conf="$(dsh_conf_file)"
+    [[ -n "$url" || -e "$conf" || -L "$conf" ]] || return 0
     [[ -f "$conf" && ! -L "$conf" ]] || { fail "找不到可写的启动配置：$conf"; return 1; }
     python3 - "$conf" "$url" "$no_proxy" <<'PY'
 import os, sys
@@ -163,9 +164,9 @@ PY
 }
 
 update_magpie_codex_proxy() {
-    local url="$1" providers
+    local url="$1" scope="${2:-codex}" providers
     providers="$(magpie_providers_file)"
-    python3 - "$providers" "$url" <<'PY'
+    python3 - "$providers" "$url" "$scope" <<'PY'
 import json, os, sys
 from pathlib import Path
 path, url = Path(sys.argv[1]), sys.argv[2]
@@ -186,13 +187,14 @@ if not isinstance(providers, list):
     raise SystemExit("providers.json 的 providers 必须是数组。")
 found = False
 for item in providers:
-    if isinstance(item, dict) and item.get("id") == "codex":
+    if isinstance(item, dict) and (sys.argv[3] == "all" or item.get("id") == "codex"):
         found = True
         if url:
             item["proxy"] = url
         else:
             item.pop("proxy", None)
-        break
+        if url:
+            break
 if not found and url:
     providers.append({"id": "codex", "proxy": url})
 temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -206,7 +208,7 @@ PY
 update_magpie_settings_proxy() {
     local url="$1" settings
     settings="$(dirname -- "$(magpie_providers_file)")/settings.json"
-    [[ -e "$settings" ]] || return 0
+    [[ -e "$settings" || -L "$settings" ]] || return 0
     [[ -f "$settings" && ! -L "$settings" ]] || { fail "Magpie settings.json 不是普通文件：$settings"; return 1; }
     python3 - "$settings" "$url" <<'PY'
 import json, os, sys
@@ -319,17 +321,19 @@ clear_proxy() {
     done
     file="$(proxy_env_file)"
     [[ ! -L "$file" ]] || { fail '代理环境文件不能是符号链接。'; return 1; }
-    rm -f "$file"
+    rm -f "$file" || return 1
     update_dsh_outbound_proxy "" "" || return 1
     if (( env_only )); then
-        printf '已删除环境文件和启动配置中的 outbound_proxy。未修改 Magpie provider。\n'
+        printf '已删除环境文件和启动配置中的 outbound_proxy。未修改 Magpie 配置。\n'
     else
-        if [[ -f "$(magpie_providers_file)" ]]; then
-            update_magpie_codex_proxy "" || return 1
+        if [[ -e "$(magpie_providers_file)" || -L "$(magpie_providers_file)" ]]; then
+            update_magpie_codex_proxy "" all || return 1
         fi
-        printf '已删除环境文件、启动配置中的 outbound_proxy，并清除 Magpie Codex provider 的单独代理。\n'
+        update_magpie_settings_proxy "" || return 1
+        printf '已删除环境文件、启动配置中的 outbound_proxy/no_proxy，并清除 Magpie 全局及所有 provider 的代理。\n'
     fi
-    printf '%s\n' '已运行的进程仍保留旧环境，直到它们下次启动。'
+    unset HTTPS_PROXY HTTP_PROXY ALL_PROXY NO_PROXY https_proxy http_proxy all_proxy no_proxy outbound_proxy
+    printf '%s\n' '已运行的进程和父 shell 仍保留旧环境；本命令不会修改它们的环境或重启服务。'
 }
 
 run_with_proxy() {
@@ -351,7 +355,8 @@ usage() {
         '      source dsh_proxy.sh' \
         'set 写入 data/proxy.env 和 data/dsh.conf 的 outbound_proxy，并设置 Magpie Codex provider。' \
         'dsh_web_run.sh start 会把 outbound_proxy 导出给新启动的 Magpie、DSH 和入口代理。' \
-        '--env-only 不修改 Magpie provider。不启停服务。'
+        'clear 清除环境文件、启动配置、Magpie 全局及所有 provider 的代理。' \
+        '--env-only 不修改 Magpie 配置。不启停服务。'
 }
 
 main() {

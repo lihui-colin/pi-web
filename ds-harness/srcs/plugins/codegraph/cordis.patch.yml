@@ -1,0 +1,10 @@
+- insert:
+    - id: codegraph-mcp
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: codegraph
+        transport: stdio
+        command: codegraph
+        args: [serve, --mcp]
+        cwd: /home/lihui/pi-web-opt
+        failOnStartupError: true
