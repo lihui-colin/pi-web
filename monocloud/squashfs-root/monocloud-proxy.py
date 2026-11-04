@@ -96,7 +96,6 @@ def write_config(nodes, port, bind, selected):
         "mode: rule",
         "log-level: info",
         "ipv6: false",
-        "find-process-mode: off",
         "proxies:",
     ]
     for node in nodes:
@@ -122,7 +121,12 @@ def write_config(nodes, port, bind, selected):
     )
     for name in ordered:
         lines.append(f"      - {yaml_quote(name)}")
-    lines.extend(["rules:", "  - MATCH,PROXY", ""])
+    smart_overlay = os.path.join(STATE_DIR, "official-smart", "overlay.yaml")
+    if os.path.isfile(smart_overlay):
+        with open(smart_overlay, encoding="utf-8") as fh:
+            lines.append(fh.read())
+    else:
+        lines.extend(["find-process-mode: off", "rules:", "  - MATCH,PROXY", ""])
     os.makedirs(RUNTIME_DIR, mode=0o700, exist_ok=True)
     tmp = CONFIG_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
