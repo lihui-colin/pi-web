@@ -30,7 +30,7 @@ function fixture(t, withOfficialConfig = true) {
 const fs = require('node:fs'), path = require('node:path');
 const root = process.env.PASEO_TEST_ROOT, args = process.argv.slice(2);
 const command = path.basename(process.argv[1]);
-fs.appendFileSync(root+'/calls', JSON.stringify({command,args})+'\\n');
+fs.appendFileSync(root+'/calls', JSON.stringify({command,args,proxy: Object.fromEntries(['HTTP_PROXY','HTTPS_PROXY','http_proxy','https_proxy','NO_PROXY','no_proxy'].map(key => [key, process.env[key]]))})+'\\n');
 const stateFile = root+'/state.json', pidFile = root+'/data/nginx/nginx.pid';
 if (command === 'paseo') {
   const home = args[args.indexOf('--home')+1];
@@ -62,6 +62,47 @@ if (command === 'paseo') {
     calls() { return fs.readFileSync(path.join(root, 'calls'), 'utf8').trim().split('\n').map(JSON.parse); },
   };
 }
+
+test('network proxy reaches daemon startup in both web modes without changing control requests', t => {
+  for (const mode of ['--proxy', '--no-proxy']) {
+    const service = fixture(t);
+    const networkProxy = 'http://user:p%40ss@127.0.0.1:17890';
+    fs.writeFileSync(path.join(service.data, 'paseo.conf'), JSON.stringify({ ip: '127.0.0.1', port: 31415, networkProxy }));
+    const result = service.run('start', mode);
+    assert.equal(result.status, 0, result.stderr);
+    const start = service.calls().find(call => call.command === 'paseo' && call.args[1] === 'start');
+    for (const key of ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']) assert.equal(start.proxy[key], networkProxy);
+    assert.equal(start.proxy.NO_PROXY, start.proxy.no_proxy);
+    assert.ok(start.proxy.NO_PROXY.startsWith('localhost,127.0.0.1,::1'));
+    for (const key of ['NO_PROXY', 'no_proxy']) {
+      if (process.env[key]) assert.ok(start.proxy.NO_PROXY.includes(process.env[key]));
+    }
+    const curl = service.calls().find(call => call.command === 'curl');
+    assert.equal(curl.proxy.HTTP_PROXY, process.env.HTTP_PROXY);
+    assert.ok(curl.args.includes('--noproxy'));
+    const official = fs.readFileSync(path.join(service.data, '.paseo/config.json'), 'utf8');
+    assert.ok(!official.includes(networkProxy));
+  }
+});
+
+test('empty network proxy preserves inherited environment', t => {
+  const service = fixture(t);
+  fs.writeFileSync(path.join(service.data, 'paseo.conf'), JSON.stringify({ ip: '127.0.0.1', port: 31415, networkProxy: '' }));
+  const result = service.run('start', '--no-proxy');
+  assert.equal(result.status, 0, result.stderr);
+  const start = service.calls().find(call => call.command === 'paseo' && call.args[1] === 'start');
+  for (const [key, value] of Object.entries(start.proxy)) assert.equal(value, process.env[key]);
+});
+
+test('invalid network proxy fails before starting services without revealing credentials', t => {
+  const service = fixture(t);
+  fs.writeFileSync(path.join(service.data, 'paseo.conf'), JSON.stringify({ ip: '127.0.0.1', port: 31415, networkProxy: 'socks5://user:secret@localhost:7890' }));
+  const result = service.run('start');
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /networkProxy/);
+  assert.ok(!result.stderr.includes('secret'));
+  assert.ok(!fs.existsSync(path.join(service.root, 'calls')));
+});
 
 test('HTTPS start rejects missing or empty TLS files before calling services', t => {
   for (const file of ['fullchain.pem', 'privkey.pem']) {
@@ -113,6 +154,56 @@ test('HTTPS lifecycle uses the official home, local certificates and proxy reloa
   const config = JSON.parse(fs.readFileSync(path.join(service.data, '.paseo/config.json')));
   assert.equal(path.resolve(service.data, '.paseo', config.log.file.path), `${service.root}/log/daemon.log`);
   assert.ok(!fs.existsSync(path.join(service.root, 'state.json')));
+});
+
+test('empty PID file recovers live master and permits stop then start', t => {
+  const service = fixture(t);
+  fs.mkdirSync(path.join(service.data, 'nginx'), { recursive: true });
+  const pidFile = path.join(service.data, 'nginx/nginx.pid');
+  fs.writeFileSync(pidFile, '');
+  let result = service.run('start');
+  assert.equal(result.status, 0, result.stderr);
+  const pid = fs.readFileSync(pidFile, 'utf8');
+  fs.writeFileSync(pidFile, '');
+  result = service.run('start');
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(fs.existsSync(`/proc/${pid.trim()}/exe`));
+  result = service.run('stop');
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(fs.readFileSync(path.join(service.root, 'signals'), 'utf8'), 'quit\n');
+  fs.writeFileSync(pidFile, '');
+  result = service.run('start');
+  assert.equal(result.status, 0, result.stderr);
+  result = service.run('stop');
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test('stop recovers duplicate exact masters with an empty PID file', t => {
+  const service = fixture(t);
+  let result = service.run('start');
+  assert.equal(result.status, 0, result.stderr);
+  const pidFile = path.join(service.data, 'nginx/nginx.pid');
+  const first = fs.readFileSync(pidFile, 'utf8').trim();
+  fs.unlinkSync(pidFile); // The fixture waits for the new master's PID file.
+  const executable = path.join(service.root, 'runtime/nginx/sbin/nginx');
+  result = spawnSync(executable, ['-p', `${service.data}/nginx/`, '-c', `${service.data}/nginx.conf`, '-e', `${service.data}/nginx/error.log`], {
+    encoding: 'utf8', timeout: 5000, env: { ...process.env, PASEO_TEST_ROOT: service.root },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const second = fs.readFileSync(pidFile, 'utf8').trim();
+  assert.notEqual(first, second);
+  fs.writeFileSync(pidFile, '');
+  result = service.run('start');
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Multiple nginx masters/);
+  result = service.run('stop');
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(fs.readFileSync(path.join(service.root, 'signals'), 'utf8'), 'quit\nquit\n');
+  for (const pid of [first, second]) assert.ok(!fs.existsSync(`/proc/${pid}/exe`));
+  result = service.run('start');
+  assert.equal(result.status, 0, result.stderr);
+  result = service.run('stop');
+  assert.equal(result.status, 0, result.stderr);
 });
 
 test('HTTP mode skips Nginx and uses the configured direct listener', t => {

@@ -2,9 +2,46 @@
 import errno
 from pathlib import Path
 import signal
+import tempfile
 import unittest
 from unittest.mock import patch
 from paseo_nginx import Nginx
+
+
+class IdentityTests(unittest.TestCase):
+    def test_adopts_only_exact_current_or_legacy_instance_command(self):
+        with tempfile.TemporaryDirectory(prefix='paseo-identity-') as root:
+            nginx = Nginx(root)
+            nginx.run.mkdir(parents=True)
+            nginx.exe.parent.mkdir(parents=True)
+            nginx.exe.write_text('fixture')
+            (nginx.run / 'nginx.pid').write_text('12345')
+            stat = nginx.exe.stat()
+            current = {'pid': 12345, 'start': '100', 'boot': 'boot',
+                       'exe': [stat.st_dev, stat.st_ino]}
+            for log in [nginx.args[-1], str(nginx.run / 'error.log')]:
+                args = nginx.args.copy()
+                args[-1] = log
+                snapshot = {**current, 'command': 'nginx: master process ' + ' '.join(args)}
+                with patch.object(nginx, 'snapshot', return_value=snapshot):
+                    self.assertEqual(nginx.verified(), snapshot)
+                    self.assertEqual(nginx.verified(), snapshot)
+                nginx.identity.unlink()
+            for index, value in [(-1, str(nginx.run / 'other.log')),
+                                 (4, str(nginx.data / 'other.conf')),
+                                 (2, str(nginx.data / 'other') + '/')]:
+                args = nginx.args.copy()
+                args[index] = value
+                snapshot = {**current, 'command': 'nginx: master process ' + ' '.join(args)}
+                with patch.object(nginx, 'snapshot', return_value=snapshot):
+                    with self.assertRaisesRegex(RuntimeError, 'does not identify'):
+                        nginx.verified()
+                self.assertFalse(nginx.identity.exists())
+            snapshot = {**current, 'exe': [0, 0],
+                        'command': 'nginx: master process ' + ' '.join(nginx.args)}
+            with patch.object(nginx, 'snapshot', return_value=snapshot):
+                with self.assertRaisesRegex(RuntimeError, 'does not identify'):
+                    nginx.verified()
 
 
 class SignalTests(unittest.TestCase):

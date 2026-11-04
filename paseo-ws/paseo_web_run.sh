@@ -86,7 +86,22 @@ case "$1" in
     # 读取实际运行状态，禁止隐式重启或改写运行中实例的监听设置。
     STATE="$(daemon status --json)"
     node "$ROOT/paseo-config.cjs" prepare "$DATA" "$MODE" "$STATE"
-    daemon start
+    NETWORK_PROXY="$(node "$ROOT/paseo-config.cjs" network-proxy "$DATA")"
+    if [[ -n "$NETWORK_PROXY" ]]; then
+      if [[ "$STATE" == *'"running"'* ]]; then
+        printf '服务已运行：networkProxy 仅在后端重新启动时应用；请在允许中断会话时先 stop 再 start。\n' >&2
+      fi
+      # Scope proxy overrides to the daemon and its children, keeping local control traffic direct.
+      (
+        export HTTP_PROXY="$NETWORK_PROXY" HTTPS_PROXY="$NETWORK_PROXY"
+        export http_proxy="$NETWORK_PROXY" https_proxy="$NETWORK_PROXY"
+        export NO_PROXY="localhost,127.0.0.1,::1${NO_PROXY:+,$NO_PROXY}${no_proxy:+,$no_proxy}"
+        export no_proxy="$NO_PROXY"
+        daemon start
+      )
+    else
+      daemon start
+    fi
     CURL_ARGS=(--noproxy '*' --fail --silent --show-error --max-time 15)
     if [[ "$MODE" == proxy ]]; then
       nginx_control start

@@ -182,6 +182,35 @@ start() {
         status=$?
         [[ "$status" == 1 ]] || return "$status"
     fi
+    # data/dsh.conf 的 outbound_proxy 优先。没有时才读取 data/proxy.env。
+    # 只影响本次启动的新进程；已在运行的服务不会重新加载环境。
+    if [[ -n "${outbound_proxy:-}" ]]; then
+        [[ "$outbound_proxy" =~ ^(http|https|socks5)://[^[:space:]\'\"\`$]+$ ]] || {
+            fail 'outbound_proxy 必须是 http://、https:// 或 socks5:// 地址。'
+            return 1
+        }
+        [[ -n "${no_proxy:-}" ]] || no_proxy='127.0.0.1,localhost,::1'
+        [[ "$no_proxy" =~ ^[A-Za-z0-9._:%*,:-]+$ ]] || { fail 'no_proxy 含无效字符。'; return 1; }
+        [[ -f "$script_dir/dsh_proxy.sh" ]] || { fail '配置了 outbound_proxy，但缺少 dsh_proxy.sh。'; return 1; }
+        # source 是特殊内建命令，前缀赋值会留在当前 shell，所以加载后立刻取消。
+        DSH_PROXY_NO_AUTOLOAD=1
+        # shellcheck disable=SC1091
+        source "$script_dir/dsh_proxy.sh"
+        unset DSH_PROXY_NO_AUTOLOAD
+        apply_configured_proxy "$outbound_proxy" "$no_proxy" || return 1
+        printf '出站代理：%s\n' "$(redact_proxy_url "$outbound_proxy")"
+        if pid="$(service_pid magpie-serve)"; then
+            printf 'Magpie 已在运行（PID: %s）。代理配置已写入，当前进程要到下次重新启动才使用。\n' "$pid" >&2
+        else
+            status=$?
+            [[ "$status" == 1 ]] || return "$status"
+        fi
+    elif [[ -f "$script_dir/data/proxy.env" ]]; then
+        [[ -f "$script_dir/dsh_proxy.sh" ]] || { fail '找到 data/proxy.env，但缺少 dsh_proxy.sh。'; return 1; }
+        # shellcheck disable=SC1091
+        source "$script_dir/dsh_proxy.sh"
+        printf '出站代理：%s\n' "$(redact_proxy_url "${HTTPS_PROXY:-${ALL_PROXY:-}}")"
+    fi
     start_service magpie-serve magpie serve || return 1
     start_service dsh-web dsh web --port "$upstream_port" --host 127.0.0.1 \
         --trusted-host "${public_host}:${port}" --trusted-host "127.0.0.1:${upstream_port}" \

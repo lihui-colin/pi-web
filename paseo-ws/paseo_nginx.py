@@ -32,11 +32,54 @@ class Nginx:
                 'start': stat[19], 'exe': [exe.st_dev, exe.st_ino],
                 'command': (proc / 'cmdline').read_bytes().rstrip(bytes([0])).decode()}
 
-    def verified(self):
+    def instance_commands(self):
+        legacy_args = self.args.copy()
+        legacy_args[-1] = str(self.run / 'error.log')
+        return {'nginx: master process ' + ' '.join(args)
+                for args in (self.args, legacy_args)}
+
+    def discover(self):
+        """Recover only exact instance masters when nginx left no usable PID."""
         try:
-            raw = (self.run / 'nginx.pid').read_text().strip()
+            expected = self.exe.stat()
         except FileNotFoundError:
-            return None
+            return []
+        commands = self.instance_commands()
+        found = []
+        for proc in Path('/proc').iterdir():
+            if not proc.name.isdecimal():
+                continue
+            try:
+                # Most processes are not ours; inspect their command first.
+                command = (proc / 'cmdline').read_bytes().rstrip(bytes([0])).decode()
+                if command not in commands:
+                    continue
+                current = self.snapshot(int(proc.name))
+            except (FileNotFoundError, ProcessLookupError, PermissionError, UnicodeError):
+                continue
+            if current['command'] in commands and current['exe'] == [expected.st_dev, expected.st_ino]:
+                found.append(current)
+        return found
+
+    def read_pid(self):
+        try:
+            return (self.run / 'nginx.pid').read_text().strip()
+        except FileNotFoundError:
+            return ''
+
+    def verified(self):
+        raw = self.read_pid()
+        if not raw:
+            found = self.discover()
+            if len(found) > 1:
+                raise RuntimeError('Multiple nginx masters for this instance; run stop before start.')
+            if not found:
+                return None
+            current = found[0]
+            if self.snapshot(current['pid']) != current:
+                raise RuntimeError('Nginx identity changed during recovery.')
+            self.save_identity(current)
+            return current
         if not raw.isdecimal() or int(raw) <= 1:
             raise RuntimeError('Invalid nginx PID file; refusing to signal or start.')
         pid = int(raw)
@@ -45,8 +88,12 @@ class Nginx:
         except (FileNotFoundError, ProcessLookupError):
             return None
         expected = self.exe.stat()
+        # Adopt masters launched before error logs moved out of data/nginx.
+        # Only this exact historical command is accepted; executable and all
+        # instance paths must still match, and the full snapshot remains pinned.
+        commands = self.instance_commands()
         if (current['exe'] != [expected.st_dev, expected.st_ino] or
-                current['command'] != 'nginx: master process ' + ' '.join(self.args)):
+                current['command'] not in commands):
             raise RuntimeError('Nginx PID does not identify this instance master; refusing to signal or start.')
         try:
             saved = json.loads(self.identity.read_text())
@@ -119,9 +166,18 @@ class Nginx:
         raise RuntimeError('Nginx did not create a verified master.')
 
     def quit(self):
-        current = self.verified()
-        if current is None:
-            return
+        if not self.read_pid():
+            # A config test can leave an empty PID file. Recover all exact
+            # masters, including a historical duplicate, without guessing PIDs.
+            currents = self.discover()
+        else:
+            current = self.verified()
+            currents = [] if current is None else [current]
+        for current in currents:
+            self.quit_master(current)
+        self.identity.unlink(missing_ok=True)
+
+    def quit_master(self, current):
         self.send(current, signal.SIGQUIT)
         for _ in range(50):
             try:

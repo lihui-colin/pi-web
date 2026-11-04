@@ -8,7 +8,7 @@ async function initializeAccess(data) {
   if (fs.lstatSync(file, { throwIfNoEntry: false })) return;
   const reader = require('node:readline').createInterface({ input: process.stdin, crlfDelay: Infinity });
   const lines = reader[Symbol.asyncIterator]();
-  const config = {};
+  const config = { networkProxy: '' };
   const fields = [
     ['ip', 'IP 地址', '10.30.0.25', value => net.isIP(value), '请输入有效的 IPv4 或 IPv6 地址。'],
     ['port', '端口号', '25227', value => /^\d{1,5}$/.test(value) && +value > 0 && +value <= 65535 && +value !== 25226,
@@ -42,14 +42,31 @@ async function initializeAccess(data) {
   }
 }
 
-function endpoint(data, mode) {
+function accessConfig(data) {
   const config = JSON.parse(fs.readFileSync(path.join(data, 'paseo.conf'), 'utf8'));
-  const { ip, port } = config;
-  if (Object.keys(config).some(key => !['ip', 'port'].includes(key)) ||
+  const { ip, port, networkProxy = '' } = config;
+  if (Object.keys(config).some(key => !['ip', 'port', 'networkProxy'].includes(key)) ||
       typeof ip !== 'string' || !net.isIP(ip) ||
       !Number.isInteger(port) || port < 1 || port > 65535) {
-    throw new Error('paseo.conf 只能包含 ip（IP 地址）和 port（1–65535 的整数）。');
+    throw new Error('paseo.conf 支持 ip（IP 地址）、port（1–65535 的整数）和 networkProxy（代理 URL）。');
   }
+  if (typeof networkProxy !== 'string' || /[\s\x00-\x1f\x7f]/.test(networkProxy)) {
+    throw new Error('networkProxy 必须为空字符串或有效的 HTTP/HTTPS 代理 URL，不能包含空白或控制字符。');
+  }
+  if (networkProxy) {
+    try {
+      const url = new URL(networkProxy);
+      if (!['http:', 'https:'].includes(url.protocol) || !url.hostname ||
+          url.pathname !== '/' || url.search || url.hash) throw new Error();
+    } catch {
+      throw new Error('networkProxy 必须是有效的 HTTP/HTTPS 代理 URL（不含路径、查询或片段）。');
+    }
+  }
+  return { ...config, networkProxy };
+}
+
+function endpoint(data, mode) {
+  const { ip, port } = accessConfig(data);
   if (!['proxy', 'direct'].includes(mode)) throw new Error('未知监听模式。');
   if (mode === 'proxy' && port === 25226) throw new Error('HTTPS 端口不能与后端端口 25226 相同。');
   const ipv6 = net.isIP(ip) === 6;
@@ -159,6 +176,8 @@ async function main() {
   if (action === 'endpoint') {
     const value = endpoint(data, mode);
     console.log([value.listen, value.url, path.join(data, 'tls', value.tlsName, 'fullchain.pem')].join('\n'));
+  } else if (action === 'network-proxy') {
+    process.stdout.write(accessConfig(data).networkProxy);
   } else if (action === 'access') {
     await initializeAccess(data);
   } else if (action === 'init') {

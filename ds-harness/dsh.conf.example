@@ -10,3 +10,7 @@ server_ip=10.30.0.25
 # 请先运行 dsh_cert.sh；无需配置 tls_cert / tls_key，旧字段会被忽略。
 # dsh_web_run.sh start 会从启动 URL 提取并安全更新此值。
 dsh_token=''
+# 启动 magpie、dsh web 和入口代理时导出的出站代理。留空表示不设置。
+# Magpie 中 Codex provider 自己的 proxy 仍优先于这里的环境变量。
+# outbound_proxy='http://127.0.0.1:7890'
+# no_proxy='127.0.0.1,localhost,::1'

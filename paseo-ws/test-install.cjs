@@ -27,7 +27,7 @@ test('access initialization handles piped input and never replaces existing file
       assert.ok(!fs.existsSync(file));
       continue;
     }
-    assert.deepEqual(JSON.parse(fs.readFileSync(file)), expected);
+    assert.deepEqual(JSON.parse(fs.readFileSync(file)), { ...expected, networkProxy: '' });
     assert.equal(fs.statSync(file).mode & 0o777, 0o600);
     fs.writeFileSync(file, 'existing configuration');
     assert.equal(run('').status, 0);
@@ -60,7 +60,7 @@ test('installer creates both configurations and preserves custom configuration o
   let result = run('10.30.0.25\n25027\n');
   assert.equal(result.status, 0, result.stderr);
   const accessFile = path.join(root, 'data/paseo.conf');
-  assert.deepEqual(JSON.parse(fs.readFileSync(accessFile)), {ip: '10.30.0.25', port: 25027});
+  assert.deepEqual(JSON.parse(fs.readFileSync(accessFile)), {ip: '10.30.0.25', port: 25027, networkProxy: ''});
   const file = path.join(root, 'data/.paseo/config.json');
   assert.equal(JSON.parse(fs.readFileSync(file)).daemon.relay.enabled, false);
   assert.equal(fs.statSync(file).mode & 0o777, 0o600);

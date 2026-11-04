@@ -111,6 +111,15 @@ magpie dsh effort high
 
 `magpie dsh`、`magpie dsh model`、`magpie dsh effort` 查看当前配置；`magpie dsh effort default` 恢复原推理强度，`magpie dsh default` 取消接管并恢复此前配置。已有会话和 DS Bot 各自可能保留模型设置，切换后需分别核对。跨机器迁移账号可使用 `magpie backup` / `magpie restore` 加密备份。
 
+Codex CLI 通过 `HTTPS_PROXY`、`HTTP_PROXY`、`ALL_PROXY` 和 `NO_PROXY` 走代理。Magpie 里的 Codex 若在 provider 上单独配置了 `proxy`，则优先于这些环境变量。`dsh_web_run.sh start` 读取 `data/dsh.conf` 的 `outbound_proxy` 和 `no_proxy`，在拉起服务前写入三处：新进程的 `HTTPS_PROXY`、`HTTP_PROXY`、`ALL_PROXY`、`NO_PROXY`；`data/proxy.env`；Magpie 的全局 `settings.json` 和 Codex provider 的 `proxy`。未配置 `outbound_proxy` 时才回退到已有的 `data/proxy.env`。已运行的进程不会自动改用新环境。`no_proxy` 默认包含 `127.0.0.1,localhost,::1`，避免本机回环再绕外网代理。
+
+```bash
+bash ds-harness/dsh_proxy.sh set http://<代理主机>:<端口>
+bash ds-harness/dsh_proxy.sh show
+source ds-harness/dsh_proxy.sh
+bash ds-harness/dsh_proxy.sh run -- codex
+```
+
 ## 数据目录
 
 DSH 0.2.2 系列与 ds-bot 0.2.5 的兼容问题、补丁应用及升级验收见 [迁移文档](MIGRATION.md)。现场核验版本为 DSH 0.2.2-alpha.2。

@@ -10,16 +10,36 @@
 
 Nginx 从固定版本源码构建，校验 SHA-256 并保留许可证，已有安装校验后复用。首次构建需要 `cc`、`make`、`perl`、`curl`、`tar`、Python 3；`PASEO_NGINX_BUILD_JOBS` 默认 4。可用 `bash paseo-ws/paseo_nginx_install.sh --dry-run` 查看安装计划。
 
-如果 `data/paseo.conf` 不存在，安装脚本会提示输入 IP 和端口（回车使用 `10.30.0.25`、`25227`），验证后创建仅含这两个字段、权限为 `600` 的 JSON 文件。支持 IPv4/IPv6；端口不能与后端 `25226` 冲突。已有配置不覆盖，也不再询问；没有标准输入时明确报错，不写入不完整配置。
+如果 `data/paseo.conf` 不存在，安装脚本会提示输入 IP 和端口（回车使用 `10.30.0.25`、`25227`），验证后创建包含这两个字段及空 `networkProxy`、权限为 `600` 的 JSON 文件。支持 IPv4/IPv6；端口不能与后端 `25226` 冲突。已有配置不覆盖，也不再询问；没有标准输入时明确报错，不写入不完整配置。
 
 安装脚本会自动从 `config.json.example` 初始化缺失的官方完整配置 `data/.paseo/config.json`（目录权限 `700`、文件权限 `600`）；已有文件保持不变。对于此前已安装但缺少配置的实例，首次 `start` 确认服务已停止后也会自动补建，无需重新安装或手工复制。符号链接配置会被拒绝，避免覆盖访问配置或其他文件。
 
-- `data/paseo.conf`：只包含访问地址 `ip` 和 `port`，默认 `10.30.0.25:25227`。
+- `data/paseo.conf`：包含访问地址 `ip` 和 `port`（默认 `10.30.0.25:25227`），以及可选的出站网络代理 `networkProxy`。
 - `data/.paseo/`：官方数据目录（`PASEO_HOME`），包含完整配置 `config.json`、会话、认证和模型。代理 CLI 需另行安装并认证；任务工作目录由会话指定。
 - `log/daemon.log`：后端日志及轮转文件所在目录，通过官方 `log.file.path` 配置。停止后的下一次 `start` 会保留旧主日志到 `log/legacy-*/daemon.log`，并将旧位置 `data/.paseo/daemon.log` 链接到新日志，以兼容上游固定写入旧路径的退出记录；已有历史轮转文件不自动移动。运行中的后端不迁移日志。
 - `data/tls/<ip>/`：从 `ds-harness/data/tls/<ip>/` 复制的 `fullchain.pem` 与 `privkey.pem`，IPv6 目录名将冒号替换为下划线。HTTPS 启动时若文件缺失、为空或不可读，立即退出并提示复制，不自动启动 DSH 或生成证书。
 - `data/nginx.conf`：由 `nginx.conf.template` 生成；Nginx PID、进程启动身份记录 `master.json` 和临时文件在 `data/nginx/`，错误日志在 `log/nginx/error.log`。Paseo 与 DSH 各自使用独立的 Nginx 二进制、配置、进程、PID 和日志目录，分别启停。
 - `data/`、`log/`、`runtime/` 和 `.npm-cache/` 不纳入 Git。
+
+## Provider 网络代理
+
+在 `data/paseo.conf` 中设置 `networkProxy`，例如：
+
+```json
+{
+  "ip": "10.30.0.25",
+  "port": 25227,
+  "networkProxy": "http://127.0.0.1:7890"
+}
+```
+
+支持 HTTP/HTTPS 代理 URL（可带认证信息，不支持路径、查询参数或片段）；地址须能从 Paseo 后端访问，`127.0.0.1` 指后端服务器。缺省或空字符串表示不覆盖启动环境中的代理设置，并非强制直连。
+
+`start` 将非空值通过大小写两套 `HTTP_PROXY` / `HTTPS_PROXY` 环境变量传给后端，其启动的 provider CLI 可继承使用；具体代理支持取决于 CLI，自定义 provider 的 `env` 可以覆盖继承值。`NO_PROXY` / `no_proxy` 合并已有绕过列表并加入 `localhost,127.0.0.1,::1`，保护本地控制连接。代理地址不会写入官方 `config.json`。
+
+此配置在后端进程启动时生效；已运行时再次 `start` 不会更新进程环境，`paseo reload` 也不会应用这一启动项。修改后需在允许中断会话时先 `stop` 再 `start`。`--proxy` / `--no-proxy` 和 `reload-proxy` 仅控制 Nginx 入站代理，HTTP 直连模式同样支持 `networkProxy`。本设置作用于后端及其子进程，不限于模型请求。
+
+官方逐 provider 配置方式参见 [Custom providers](https://paseo.sh/docs/custom-providers.md)。
 
 ## 服务管理
 
@@ -40,9 +60,11 @@ bash paseo-ws/paseo_web_run.sh stop
 
 ## DSH 插件模型目录
 
-`paseo-dsh` 使用 `$DSH_HOME/profiles/paseo/cordis.patch.yml`；未设置 `DSH_HOME` 时与上游一致，使用 `~/.dsh`。可通过 `DSH_PASEO_PROFILE` 选择其他 profile。DSH Web 使用自己的 `web` profile，新增模型不会自动同步到 Paseo。Paseo 的模型定义及其引用的凭据需要在自身配置中独立配置，例如 `xinmian/grok-4.7` 引用 `XINMIAN_API_KEY`；不要将 DSH Web 的数据目录当作默认值。
+`paseo-dsh` 使用 `$DSH_HOME/profiles/paseo/cordis.patch.yml`；可通过 `DSH_PASEO_PROFILE` 选择其他 profile。DSH Web 使用自己的 `web` profile，新增模型不会自动同步到 Paseo。模型定义及其引用的凭据需要在选定的 DSH home 中配置，例如 `xinmian/grok-4.7` 引用 `XINMIAN_API_KEY`；默认使用本仓库的 `ds-harness/data/.dsh`。
 
-`patch-dsh-catalog.cjs` 修复 `paseo-dsh 0.2.17` 的冷启动目录查询：让 `paseo/catalog` 和 `initialize` 一样等待 `loader.await()`，防止凭据服务尚未加载时漏报自定义模型。已核查[上游实现](https://github.com/liuxing7954/paseo-dsh/blob/c642c604aeb5b409a6237ca3ef54fdb82801677d/dsh-bridge/lib/index.js#L83)，该提交仅对 initialize 等待。补丁同时更新当前桥接入口与插件内嵌资源；安装脚本会应用，也可在插件安装/升级后运行 `node paseo-ws/patch-dsh-catalog.cjs`（使用与运行中插件一致的 `DSH_HOME` 和 `DSH_PASEO_PROFILE`；默认 home 为 `~/.dsh`）。结构不匹配会停止，需重新核查上游。无需重启服务；变更后需刷新 Paseo 的全局 provider snapshot：在 Providers 中打开 DeepSeek Harness (native)，点击 Refresh；客户端 API 为 `refreshProvidersSnapshot({ providers: ['deepseek-harness-native'] })`，不传 `cwd`。传 `cwd` 只刷新对应项目的快照，设置页仍可能显示旧列表。验证时需打开实际提供商详情，核对该 profile 实际配置的模型列表及 reasoning 档位，例如 `xinmian/grok-4.7`，不要仅确认提供商出现在列表中。插件自身目录另有最长五分钟缓存。
+`patch-dsh-catalog.cjs` 优先采用显式 `DSH_HOME`；未设置时，根据脚本所在的 `paseo-ws/` 目录计算 `../ds-harness/data/.dsh`，不依赖当前工作目录或用户主目录，也不需要本地绝对路径配置文件。安装/应用补丁时将解析后的目录写成 DSH 插件自身的启动默认值，运行时显式 `DSH_HOME` 仍优先；Paseo 主进程和其他插件环境不修改。不复制凭据或会话数据。移动仓库或升级插件后需重新应用补丁，确认 DSH 会话空闲后执行插件 reload；目录变更影响模型、凭据和历史会话位置，不能仅刷新模型快照。
+
+`patch-dsh-catalog.cjs` 修复 `paseo-dsh 0.2.17` 的冷启动目录查询：让 `paseo/catalog` 和 `initialize` 一样等待 `loader.await()`，防止凭据服务尚未加载时漏报自定义模型。已核查[上游实现](https://github.com/liuxing7954/paseo-dsh/blob/c642c604aeb5b409a6237ca3ef54fdb82801677d/dsh-bridge/lib/index.js#L83)，该提交仅对 initialize 等待。补丁同时更新当前桥接入口与插件内嵌资源；安装脚本会应用，也可在插件安装/升级后运行 `node paseo-ws/patch-dsh-catalog.cjs`（使用与运行中插件一致的 `DSH_HOME` 和 `DSH_PASEO_PROFILE`；默认 home 为本仓库的 `ds-harness/data/.dsh`）。结构不匹配会停止，需重新核查上游。无需重启服务；变更后需刷新 Paseo 的全局 provider snapshot：在 Providers 中打开 DeepSeek Harness (native)，点击 Refresh；客户端 API 为 `refreshProvidersSnapshot({ providers: ['deepseek-harness-native'] })`，不传 `cwd`。传 `cwd` 只刷新对应项目的快照，设置页仍可能显示旧列表。验证时需打开实际提供商详情，核对该 profile 实际配置的模型列表及 reasoning 档位，例如 `xinmian/grok-4.7`，不要仅确认提供商出现在列表中。插件自身目录另有最长五分钟缓存。
 
 ## Web UI 补丁
 

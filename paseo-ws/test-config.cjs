@@ -84,6 +84,18 @@ test('reject invalid addresses, ports, extra keys, and proxy port conflicts', t 
   }
 });
 
+test('networkProxy accepts HTTP proxies and rejects malformed values', t => {
+  const home = fixture(t);
+  for (const networkProxy of ['', 'http://127.0.0.1:7890', 'https://user:pass@[::1]:8443']) {
+    fs.writeFileSync(path.join(home, 'paseo.conf'), JSON.stringify({ ip: '127.0.0.1', port: 31415, networkProxy }));
+    assert.equal(endpoint(home, 'direct').listen, '0.0.0.0:31415');
+  }
+  for (const networkProxy of [null, true, 7890, 'localhost:7890', 'socks5://localhost:7890', 'http://localhost:99999', 'http://localhost/path', 'http://localhost?x=1', 'http://localhost#x', 'http://localhost\n', ' http://localhost']) {
+    fs.writeFileSync(path.join(home, 'paseo.conf'), JSON.stringify({ ip: '127.0.0.1', port: 31415, networkProxy }));
+    assert.throws(() => endpoint(home, 'proxy'), /networkProxy/);
+  }
+});
+
 test('prepare preserves provider settings and the two-field user configuration', t => {
   const home = fixture(t);
   const before = fs.readFileSync(path.join(home, 'paseo.conf'), 'utf8');
