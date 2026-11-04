@@ -61,6 +61,7 @@ class PluginInstallerTests(unittest.TestCase):
         (self.root / 'srcs/patches/ds_bot_apply.py').write_text(
             'import os, sys\nprint("PATCH_BUNDLE_APPLIED")\nsys.exit(int(os.environ.get("FAKE_PATCH_FAIL", "0")))\n')
         (self.root / 'srcs/patches/dsh_mobile_apply.py').write_text('print("MOBILE_PATCH_APPLIED")\n')
+        (self.root / 'srcs/patches/dsh_terminal_apply.py').write_text('print("TERMINAL_PATCH_APPLIED")\n')
         (fixture_file(self.root, 'dsh_nginx_install.sh')).write_text('#!/bin/bash\nexit 0\n')
         self.fake('dsh', '#!' + shutil.which('python3') + '\n' + FAKE_DSH)
         for name in ('npm', 'curl'):
@@ -111,7 +112,9 @@ class PluginInstallerTests(unittest.TestCase):
                 for p in self.root.rglob('*') if p.is_file()}
 
     def test_new_profile_installs_nine_enables_eight(self):
-        self.assertIn("PATCH_BUNDLE_APPLIED", self.run_script())
+        output = self.run_script()
+        self.assertIn("PATCH_BUNDLE_APPLIED", output)
+        self.assertIn("TERMINAL_PATCH_APPLIED", output)
         pkg = self.package()
         self.assertEqual(set(pkg['dependencies']), set(PLUGINS))
         self.assertEqual(set(pkg['dsh']['profile']['bundles']) & set(PLUGINS),

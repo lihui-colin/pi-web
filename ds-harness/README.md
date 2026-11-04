@@ -74,7 +74,7 @@ MAGPIE_PROXY=http://<代理主机>:<端口> bash ds-harness/dsh_install.sh
 
 代理地址中的 `127.0.0.1` 指服务器自身。官方 `MAGPIE_MIRROR` 仅替换 GitHub 二进制下载地址，无法解决 `usemagpie.ai` 官网不可达的问题。
 
-统一补丁会在主安装／插件安装完成后自动应用，包含 ds-bot 历史、布局、提示词和普通 DSH 共用输入框修复；当前仅支持 ds-bot 0.2.6 与 DSH 0.2.2-alpha.2。版本不匹配或补丁失败会中止安装。详见 [统一补丁说明](srcs/patches/README.md)。
+统一补丁会在主安装／插件安装完成后自动应用，包含 ds-bot 历史、布局、提示词、普通 DSH 共用输入框以及终端重连修复；当前仅支持 ds-bot 0.2.6 与 DSH 0.2.2-alpha.2。版本不匹配或补丁失败会中止安装。详见 [统一补丁说明](srcs/patches/README.md)。
 
 ## 证书
 

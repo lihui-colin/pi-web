@@ -1,10 +1,10 @@
-# DS Bot 统一补丁
+# DSH 本地补丁
 
-**`ds_bot_apply.py`** 负责 DS Bot 与共用输入框补丁，支持 **ds-bot 0.2.6 + DSH chat/conversation 0.2.2-alpha.2**；**`dsh_mobile_apply.py`** 负责 **dsh-web-mobile 3.2.1** 的界面调整及其所需的宿主页签宽度折叠逻辑。两者共用原子写入、备份与回滚函数，未知版本或匹配点变化会停止。
+**`ds_bot_apply.py`** 负责 DS Bot 与共用输入框补丁，支持 **ds-bot 0.2.6 + DSH chat/conversation 0.2.2-alpha.2**；**`dsh_mobile_apply.py`** 负责 **dsh-web-mobile 3.2.1** 的界面调整及其所需的宿主页签宽度折叠逻辑。**`dsh_terminal_apply.py`** 负责 DSH 终端重连与选区复制兼容，支持 **DSH 0.2.2-alpha.2、xterm/headless 6.0.0 与 addon-serialize 0.14.0**。三个补丁共用原子写入、备份与回滚函数，未知版本或匹配点变化会停止。
 
 ## 安装与检查
 
-主安装器 `dsh_install.sh` 调用插件安装器 `dsh_plugins_install.sh`；插件安装成功后，后者依次执行 DS Bot 和 mobile 补丁。首次安装、`--upgrade`、插件已安装而跳过下载时都会执行，防止重新安装覆盖补丁或遗漏共用输入框修复。补丁失败会使安装返回非零退出码；`--dry-run` 只打印计划，不修改文件。
+主安装器 `dsh_install.sh` 调用插件安装器 `dsh_plugins_install.sh`；插件安装成功后，后者依次执行 DS Bot、mobile 和 terminal 补丁。首次安装、`--upgrade`、插件已安装而跳过下载时都会执行，防止重新安装覆盖补丁或遗漏共用输入框修复。补丁失败会使安装返回非零退出码；`--dry-run` 只打印计划，不修改文件。
 
 ```sh
 bash ds-harness/dsh_install.sh
@@ -15,11 +15,14 @@ python3 ds-harness/srcs/patches/ds_bot_apply.py
 python3 ds-harness/srcs/patches/ds_bot_apply.py --check
 python3 ds-harness/srcs/patches/dsh_mobile_apply.py
 python3 ds-harness/srcs/patches/dsh_mobile_apply.py --check
+python3 ds-harness/srcs/patches/dsh_terminal_apply.py
+python3 ds-harness/srcs/patches/dsh_terminal_apply.py --check
 # 回归测试
 python3 -B -m unittest discover -s ds-harness/srcs -p 'test_ds_bot*.py'
 python3 -B -m unittest discover -s ds-harness/srcs -p 'test_dsh_composer_enter.py'
 python3 -B -m unittest discover -s ds-harness/srcs -p 'test_dsh_plugins_install.py'
 python3 -B -m unittest discover -s ds-harness/srcs -p 'test_dsh_mobile_apply.py'
+python3 -B -m unittest discover -s ds-harness/srcs -p 'test_dsh_terminal_apply.py'
 ```
 
 默认定位本服务的 web profile 与 PATH 中的 DSH 安装；测试或明确的自定义安装可传 `--bot-dir` 和 `--host-dir`（DSH 的 `node_modules/@deepseek-ai` 目录）。升级到其他版本前必须重新核对上游实现；安装器仍按现有策略选择依赖版本，不会为了通过补丁检查静默降级。
@@ -73,3 +76,16 @@ python3 -B -m unittest discover -s ds-harness/srcs -p 'test_dsh_mobile_apply.py'
 移动补丁维护：顶栏样式共用选择器前缀与规则生成函数，保持输出 CSS 字节和选择器权重不变；保留已发布补丁的迁移，移除未发布的临时图标位置迁移。已核验原始 3.2.1、已发布补丁和当前安装三种输入均生成相同结果，重复应用不写入，未知锚点仍拒绝。
 
 页签宽度补丁仅在运行时检测到 mobile 的 frame 标记且匹配 `(max-width:1023px) and (pointer:coarse)` 时使用实际宽度测量；无插件标记、桌面或非触屏布局直接走宿主原有 120px 估算规则。监听插件标记和媒体查询变化，启停插件或切换布局时重新计算。归属与运行时范围回归覆盖原版、旧补丁迁移、缺少宿主修复检测、宿主校验失败不写入，以及三种非移动组合的原生回退。
+
+
+## 终端与 Codex CLI 重连
+
+`dsh_terminal_apply.py` 在安装和插件更新后自动执行，也可单独执行；`--host-dir` 可指向隔离的 DSH `node_modules/@deepseek-ai`。它先核验终端前端、控制器和 xterm 版本及全部锚点，再一起发布三个文件。原件和清单保存在 `ds-harness/log/patch-backups/`；`--check` 检查所有目标。宿主服务已经加载的模块不会因写入文件而更新，需在确认活跃会话及中断影响后安排维护窗口，按服务管理约定先停再启动并检查就绪；浏览器需要刷新。补丁本身不会重启服务。
+
+上游 DSH 0.2.2-alpha.2 已使用 xterm headless 和 serialize addon 为重连提供有界屏幕快照，并在浏览器使用 xterm 6 和 FitAddon；因此沿用其快照、流控和尺寸管理，不复制 Pi Web 的历史缓冲实现。核查本机 xterm serialize 0.14.0，快照保留备用屏幕及多数输入模式，但遗漏鼠标 SGR/像素编码、光标隐藏状态和同步输出模式；补丁补齐这三项。前两项只能从 headless 6.0.0 的内部状态读取，因此严格限定版本，升级时须重新核查上游实现。
+
+参考 Pi Web 的终端重绘处理，客户端等快照解析完成后临时改变一列并于 100ms 后恢复，让增量更新的 TUI 重绘。尺寸变化遵循宿主上下限；待宿主确认期间强制发送恢复尺寸，避免旧状态误判为无需恢复。不可见、只读和断连时等待可控制的视图；切换或销毁时恢复临时尺寸，屏幕变化期间采用最新布局。
+
+选区复制：上游终端未注册 OSC 52 处理器。补丁参考 Pi Web，接收实时输出中的 UTF-8 复制请求并调用浏览器剪贴板；只对可见、拥有控制权的当前视图生效。复制成功显示 `Copied`，自动写入被拒绝时显示手动 `Copy` 按钮；忽略读取请求、无效内容和历史快照，卸载时清理处理器和提示。
+
+验证：真实 Codex CLI 0.166.0 在隔离的临时配置及 PTY 中显示登录界面，快照恢复并执行重绘后，与持续连接的 xterm/headless 屏幕逐行一致。另用指向本地不可用地址的测试 provider 启动主界面，确认它启用备用屏幕和 SGR 鼠标模式，发送鼠标拖选后实际产生 OSC 52；没有发送模型消息。自动测试覆盖 SGR 鼠标滚轮及按键编码、分段 OSC 52、UTF-8、复制失败重试、快照不会复制、重绘时序、断连、只读、隐藏、尺寸边界、旧尺寸确认和补丁幂等性。Chromium 因环境缺少动态库未能启动，尚未完成真实 DSH 浏览器和已登录 Codex 会话验证。
