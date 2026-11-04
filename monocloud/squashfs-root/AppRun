@@ -1,0 +1,93 @@
+#!/bin/sh
+set -e
+
+APPDIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+OWD="${OWD:-$PWD}"
+export OWD
+
+usage() {
+	cat <<EOF
+MonoCloud 1.0.3 command-line launcher
+
+This build is the Linux desktop client, unpacked so it can run on a server
+without a graphical session.
+
+Usage:
+  monocloud login                Sign in with email and password
+  monocloud logout               Forget the saved session
+  monocloud whoami               Show the signed-in account
+  monocloud proxy [start|stop|status|restart]
+                                 Local HTTP/SOCKS forward port (default 127.0.0.1:7890)
+  monocloud core [options]       Run the built-in core in the foreground
+  monocloud service <command>    Permission-service helper
+  monocloud gui [args]           Start the GTK desktop client (needs DISPLAY)
+  monocloud help                 Show this help
+
+Login reads the password from the terminal without echoing it.
+Flags, if you do not want the prompts:
+  monocloud login --email you@example.com
+  monocloud login --email you@example.com --sub-user
+
+Core options are the upstream mihomo flags. Common ones:
+  monocloud core -h
+  monocloud core -v
+  monocloud core -t -f /path/to/config.yaml
+  monocloud core -d /var/lib/monocloud -f /var/lib/monocloud/config.yaml
+
+Service commands:
+  run | install | uninstall | status | check | check-tun
+EOF
+}
+
+launch_gui() {
+	usr="$APPDIR/usr"
+	export PATH="$usr/bin:$PATH"
+	export LD_LIBRARY_PATH="$usr/lib:$usr/lib/x86_64-linux-gnu:$usr/lib/aarch64-linux-gnu:$usr/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+	export XDG_DATA_DIRS="$usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+	export GSETTINGS_SCHEMA_DIR="$usr/share/glib-2.0/schemas"
+	for bundle in "$usr"/lib*/webkit*gtk-*/injected-bundle/*.so "$usr"/lib*/*/webkit*gtk-*/injected-bundle/*.so; do
+		if [ -e "$bundle" ]; then
+			export WEBKIT_INJECTED_BUNDLE_PATH="${bundle%/*}/"
+			break
+		fi
+	done
+	if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
+		echo "monocloud gui: no DISPLAY or WAYLAND_DISPLAY. On a server use: monocloud core -h" >&2
+		exit 1
+	fi
+	cd "$usr/lib"
+	exec "$usr/bin/monocloud" "$@"
+}
+
+cmd="${1:-help}"
+case "$cmd" in
+	login|logout|whoami)
+		action="$1"
+		shift
+		exec python3 "$APPDIR/monocloud-login.py" "$action" "$@"
+		;;
+	proxy)
+		shift
+		exec python3 "$APPDIR/monocloud-proxy.py" "$@"
+		;;
+	core)
+		shift
+		exec "$APPDIR/usr/bin/monocloud-core" "$@"
+		;;
+	service)
+		shift
+		exec "$APPDIR/usr/bin/monocloud-service" "$@"
+		;;
+	gui)
+		shift
+		launch_gui "$@"
+		;;
+	help|-h|--help)
+		usage
+		;;
+	*)
+		echo "monocloud: unknown command: $cmd" >&2
+		usage >&2
+		exit 2
+		;;
+esac

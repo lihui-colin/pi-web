@@ -1,0 +1,6 @@
+*.AppImage
+config/
+squashfs-root/**
+!squashfs-root/AppRun
+!squashfs-root/monocloud-login.py
+!squashfs-root/monocloud-proxy.py

@@ -1,0 +1,4 @@
+#!/bin/sh
+set -e
+APPDIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/squashfs-root"
+exec "$APPDIR/AppRun" "$@"
