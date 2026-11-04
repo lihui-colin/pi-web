@@ -3,14 +3,14 @@
 # OpenSSL, PCRE2 and zlib are linked statically by Nginx's upstream build rules.
 set -euo pipefail
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 local_root="$script_dir/runtime"
 prefix="$local_root/nginx"
 dry_run=false
 case "${1:-}" in
     --dry-run) dry_run=true ;;
     -h|--help)
-        printf '%s\n' '用法：bash paseo-ws/paseo_nginx_install.sh [--dry-run]' \
+        printf '%s\n' '用法：bash paseo-ws/srcs/paseo_nginx_install.sh [--dry-run]' \
             '安装到脚本目录下 runtime/nginx；不使用 sudo、APT、Homebrew 或系统 Nginx。' \
             '首次构建需要 cc、make、perl、curl、tar、Python 3；PASEO_NGINX_BUILD_JOBS 默认 4。'
         exit 0 ;;

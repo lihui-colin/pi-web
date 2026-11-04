@@ -40,8 +40,8 @@ class CompletePatchTests(unittest.TestCase):
             path.write_text(source)
         self.sources = sources
         # Copy only the one script: no imports from retired patch modules may be needed.
-        self.script = self.root / 'patches/ds_bot_apply.py'
-        self.script.parent.mkdir()
+        self.script = self.root / 'srcs/patches/ds_bot_apply.py'
+        self.script.parent.mkdir(parents=True)
         shutil.copy2(p.__file__, self.script)
 
     def run_cli(self, *args, status=0):

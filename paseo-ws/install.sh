@@ -5,24 +5,24 @@ umask 077
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PREFIX="$ROOT/runtime"
 
-source "$ROOT/node-runtime.sh"
+source "$ROOT/srcs/node-runtime.sh"
 if ! paseo_select_node; then
   # An explicit invalid override is a configuration error, not permission to ignore it.
   if [[ ${PASEO_NODE_BIN+x} ]]; then exit 1; fi
   printf '未找到独立 Node.js，正在为 Paseo 安装官方 Node.js 24 LTS…\n'
-  bash "$ROOT/install-node.sh"
+  bash "$ROOT/srcs/install-node.sh"
   paseo_select_node
 fi
 printf '使用 Node.js %s：%s\n' "$(node --version)" "$(command -v node)"
-bash "$ROOT/init-access-config.sh"
-node "$ROOT/paseo-config.cjs" init "$ROOT/data"
+bash "$ROOT/srcs/init-access-config.sh"
+node "$ROOT/srcs/paseo-config.cjs" init "$ROOT/data"
 
 # 仅安装环境，不启动或停止服务；已有配置保持不变。
-bash "$ROOT/paseo_nginx_install.sh"
+bash "$ROOT/srcs/paseo_nginx_install.sh"
 mkdir -p -- "$PREFIX"
 npm install --global --prefix "$PREFIX" --cache "$ROOT/.npm-cache" --engine-strict '@getpaseo/cli'
-node "$ROOT/patch-web-ui.cjs"
-node "$ROOT/patch-dsh-catalog.cjs"
+node "$ROOT/srcs/patch-web-ui.cjs"
+node "$ROOT/srcs/patch-dsh-catalog.cjs"
 
 printf '\n安装完成。运行环境：%s\n' "$PREFIX"
 printf '启动：bash %q start\n' "$ROOT/paseo_web_run.sh"

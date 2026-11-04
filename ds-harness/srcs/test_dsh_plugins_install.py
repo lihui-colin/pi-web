@@ -1,3 +1,4 @@
+from test_support import source_file, fixture_file
 #!/usr/bin/env python3
 """Isolated installer tests: only fake dsh and temporary profiles are modified."""
 import json
@@ -55,12 +56,12 @@ class PluginInstallerTests(unittest.TestCase):
             self.assertIsNotNone(executable, name)
             (self.bin / name).symlink_to(executable)
         for name in ('dsh_install.sh', 'dsh_plugins_install.sh'):
-            shutil.copy2(ROOT / name, self.root / name)
-        (self.root / 'patches').mkdir()
-        (self.root / 'patches/ds_bot_apply.py').write_text(
+            shutil.copy2(source_file(name), fixture_file(self.root, name))
+        (self.root / 'srcs/patches').mkdir(parents=True, exist_ok=True)
+        (self.root / 'srcs/patches/ds_bot_apply.py').write_text(
             'import os, sys\nprint("PATCH_BUNDLE_APPLIED")\nsys.exit(int(os.environ.get("FAKE_PATCH_FAIL", "0")))\n')
-        (self.root / 'patches/dsh_mobile_apply.py').write_text('print("MOBILE_PATCH_APPLIED")\n')
-        (self.root / 'dsh_nginx_install.sh').write_text('#!/bin/bash\nexit 0\n')
+        (self.root / 'srcs/patches/dsh_mobile_apply.py').write_text('print("MOBILE_PATCH_APPLIED")\n')
+        (fixture_file(self.root, 'dsh_nginx_install.sh')).write_text('#!/bin/bash\nexit 0\n')
         self.fake('dsh', '#!' + shutil.which('python3') + '\n' + FAKE_DSH)
         for name in ('npm', 'curl'):
             self.fake(name, '#!/bin/bash\necho unexpected external command >&2\nexit 99\n')
@@ -79,7 +80,7 @@ class PluginInstallerTests(unittest.TestCase):
 
     def run_script(self, *args, parent=False, status=0):
         script = 'dsh_install.sh' if parent else 'dsh_plugins_install.sh'
-        result = subprocess.run([str(self.bin / 'bash'), str(self.root / script), *args],
+        result = subprocess.run([str(self.bin / 'bash'), str(fixture_file(self.root, script)), *args],
                                 env=self.env, text=True, capture_output=True, timeout=20)
         self.assertEqual(result.returncode, status, result.stdout + result.stderr)
         return result.stdout

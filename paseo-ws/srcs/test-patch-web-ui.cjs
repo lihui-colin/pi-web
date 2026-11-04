@@ -34,8 +34,9 @@ test('missing commit metadata warns even when version matches', () => {
 test('CLI warns before patching and preserves structural failure checks', t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'paseo-patch-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(root, 'srcs'), { recursive: true });
   for (const file of ['patch-web-ui.cjs', 'patch-web-ui.baseline.json']) {
-    fs.copyFileSync(path.join(__dirname, file), path.join(root, file));
+    fs.copyFileSync(path.join(__dirname, ['install.sh', 'paseo_web_run.sh'].includes(file) ? '..' : '.', file), path.join(root, ['install.sh', 'paseo_web_run.sh'].includes(file) ? '.' : 'srcs', file));
   }
   const server = path.join(root, 'runtime/lib/node_modules/@getpaseo/cli/node_modules/@getpaseo/server');
   const web = path.join(server, 'dist/server/web-ui');
@@ -45,7 +46,7 @@ test('CLI warns before patching and preserves structural failure checks', t => {
   const html = '<head></head><script src="/_expo/static/js/web/index-123.js"></script>';
   fs.writeFileSync(path.join(web, 'index.html'), html);
   fs.writeFileSync(path.join(assets, 'index-123.js'), 'upstream structure changed');
-  const result = spawnSync(process.execPath, [path.join(root, 'patch-web-ui.cjs')], { encoding: 'utf8' });
+  const result = spawnSync(process.execPath, [path.join(root, 'srcs/patch-web-ui.cjs')], { encoding: 'utf8' });
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /\[WARN\].*无法核对 commit ID/);
   assert.match(result.stderr, /Upstream bootstrap structure changed/);

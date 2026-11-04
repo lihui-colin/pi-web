@@ -24,7 +24,7 @@ from dsh_runtime import redact_tokens
 
 
 def require_local_nginx():
-    prefix = Path(__file__).resolve().parent / "data/.local/nginx"
+    prefix = Path(__file__).resolve().parents[1] / "data/.local/nginx"
     nginx = prefix / "sbin/nginx"
     install = "run dsh_nginx_install.sh to install the project-local Nginx"
     if not nginx.is_file() or not os.access(nginx, os.X_OK):
@@ -275,7 +275,7 @@ def main():
     parser.add_argument("--tls-key", required=True, type=Path)
     args = parser.parse_args()
     config_path = args.config.resolve()
-    script_dir = Path(__file__).resolve().parent
+    script_dir = Path(__file__).resolve().parents[1]
     config_root = script_dir if config_path == script_dir / 'data/dsh.conf' else config_path.parent
     logs = config_root / "log"
     runtime = logs / f".nginx-{args.listen_port}"

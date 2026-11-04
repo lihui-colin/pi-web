@@ -1,4 +1,4 @@
-> 当前安装会自动执行单文件补丁 `patches/ds_bot_apply.py`，只支持 ds-bot 0.2.6 + DSH 0.2.2-alpha.2。以下旧版本问题仅为历史记录，不提供旧版本兼容。操作以 [统一补丁说明](patches/README.md) 为准。
+> 当前安装会自动执行单文件补丁 `srcs/patches/ds_bot_apply.py`，只支持 ds-bot 0.2.6 + DSH 0.2.2-alpha.2。以下旧版本问题仅为历史记录，不提供旧版本兼容。操作以 [统一补丁说明](srcs/patches/README.md) 为准。
 
 # DSH 升级与迁移记录
 
@@ -6,13 +6,13 @@
 
 已撤销旧 Hero 历史区布局；Chief 历史使用下文原生消息流入口。头像位置、侧栏名称样式、移动侧栏网格、抽屉占位及操作按钮位置修复继续保留。用户随后反馈手机气泡未铺满，现仅对不超过640px的触屏恢复气泡 max-width:100%，桌面保持原样。实际390px视口：历史列273px、长回复气泡273px；桌面历史列960px、气泡768px，无横向溢出。
 
-修复统一落在 `patches/ds_bot_apply.py`，先核验全部目标再写入；`--check` 只检查当前是否完整应用。旧 Hero 实验改动已从本轮仓库变更中清理。
+修复统一落在 `srcs/patches/ds_bot_apply.py`，先核验全部目标再写入；`--check` 只检查当前是否完整应用。旧 Hero 实验改动已从本轮仓库变更中清理。
 
 提示词接口兼容补丁已适配并应用到 0.2.6，接口测试通过。它属于服务端修改，需要模块重载后生效；本次没有重启服务。以下旧 Hero 历史补丁说明是排查记录，不代表当前仍启用；不要重新执行 `ds_bot_history.py`。
 
 ### Chief 原生消息区历史入口
 
-撤销旧入口后，空分段的 Chief 没有交接消息，原版界面没有历史入口。现使用 `python3 ds-harness/patches/ds_bot_apply.py`：Bot 报告历史分段是否存在，宿主在有历史时进入正常 active 会话并允许原生 Views 渲染；历史在原有 ChatFlow 前加载。没有新增 CSS、Hero 容器、固定高度或气泡规则。此补丁核验 ds-bot 0.2.6、DSH chat/conversation 0.2.2-alpha.2 的全部匹配点后再写入，保留原生插槽所有权。
+撤销旧入口后，空分段的 Chief 没有交接消息，原版界面没有历史入口。现使用 `python3 ds-harness/srcs/patches/ds_bot_apply.py`：Bot 报告历史分段是否存在，宿主在有历史时进入正常 active 会话并允许原生 Views 渲染；历史在原有 ChatFlow 前加载。没有新增 CSS、Hero 容器、固定高度或气泡规则。此补丁核验 ds-bot 0.2.6、DSH chat/conversation 0.2.2-alpha.2 的全部匹配点后再写入，保留原生插槽所有权。
 
 实际 25228 浏览器验证：桌面1602×900历史列960px且居中，手机390×844历史列273px；原生 scrollBody 滚动，历史消息由18条分页到31条；桌面切换群聊再回 Chief 正常。两种视口没有用户气泡横向溢出、页面横向溢出或 pageerror。前端刷新即可生效，聊天数据未修改。
 
@@ -40,7 +40,7 @@
 
 ```sh
 # 仓库根目录执行
-# 历史独立脚本已移除；当前版本改用 patches/ds_bot_apply.py
+# 历史独立脚本已移除；当前版本改用 srcs/patches/ds_bot_apply.py
 ```
 
 脚本只接受 ds-bot 0.2.5，遇到未知源代码结构会停止。修改的是服务端模块，必须让模块重新加载；现场配置不监听插件源码，因此安排了维护重启。已验证旧、新两类组装输入及当前安装 DSH 的实际 SystemPrompt 实现，未用自动发送聊天消息作为验证。
@@ -81,8 +81,8 @@
 
 1. 保存配置、插件版本、会话和附件；数据只使用本服务目录。确定维护窗口，在独立维护进程中执行停服、变更、启动及就绪检查。
 2. 核对上游是否已修复，再决定应用上述补丁。补丁未自动接入安装器；重新安装 DSH 或 ds-bot 会覆盖修改。
-3. 执行 `python3 -m unittest discover -s ds-harness -p 'test_ds_bot_*.py'`，检查补丁幂等性与未知结构拒绝行为。
+3. 执行 `python3 -m unittest discover -s ds-harness/srcs -p 'test_ds_bot_*.py'`，检查补丁幂等性与未知结构拒绝行为。
 4. 按需执行 `bash ds-harness/dsh_web_run.sh stop`、`bash ds-harness/dsh_web_run.sh start`。不要把重启当作默认验证步骤；不要使用 Pi Web 或 Paseo 的脚本。
 5. 核查真实 HTTPS 入口、插件激活、Chief 历史显示与翻页、会话切换。若清理过失败回合，再检查错误提示消失且历史保留。
 
-详细补丁说明见 [patches/README.md](patches/README.md)。现场诊断、维护日志和数据备份放在 `log/`，不提交 Git。
+详细补丁说明见 [srcs/patches/README.md](srcs/patches/README.md)。现场诊断、维护日志和数据备份放在 `log/`，不提交 Git。

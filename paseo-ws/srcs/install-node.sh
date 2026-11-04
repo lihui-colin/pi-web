@@ -2,7 +2,7 @@
 # Bootstrap the private runtime; the caller selects it afterwards.
 set -Eeuo pipefail
 umask 077
-ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 RUNTIME="$ROOT/runtime"
 fail() { printf 'Node bootstrap: %s\n' "$*" >&2; exit 1; }
 for tool in curl tar python3 uname; do

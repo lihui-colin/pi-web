@@ -2,7 +2,7 @@
 # 安装当前团队使用的 DSH 与插件，DSH/第三方插件使用 latest，官方 Codex 插件与 DSH 同版。
 # 适用于 Linux/macOS；需要 Node.js >=24、npm、curl 和 sh。
 # 用法：bash ds-harness/dsh_install.sh [--dry-run] [--upgrade]
-# HTTPS 证书由同目录 dsh_cert.sh 单独生成。
+# HTTPS 证书由srcs/dsh_cert.sh 单独生成。
 # 数据固定放在脚本同级 data/.dsh，共享 agent 配置放在 data/.agents。
 # 不启动/停止服务，不迁移 DSH 会话数据，不写入 API Key。
 set -euo pipefail
@@ -23,7 +23,7 @@ while (( $# )); do
                 '不会安装系统包或使用系统 Nginx；已有本地 Nginx 只检查版本 >=1.24 和 HTTP SSL 模块。' \
                 'DSH/第三方插件使用 latest，官方 Codex 插件与 DSH 同版；保留已有额外插件启用状态，新 profile 默认启用八个。' \
                 '安装结束时创建 data/dsh.conf：已有配置保留，否则从控制台输入 IP 和端口。' \
-                'HTTPS 证书请单独运行 bash ds-harness/dsh_cert.sh 创建。' \
+                'HTTPS 证书请单独运行 bash ds-harness/srcs/dsh_cert.sh 创建。' \
                 '数据固定放在脚本同级 data/.dsh，共享 agent 配置放在 data/.agents。' \
                 'Magpie 安装最多尝试 3 次；支持 MAGPIE_PROXY 代理及 MAGPIE_MIRROR 镜像前缀。' \
                 '请在新机器或目标 DSH 已停机时安装；本脚本不启停服务。' \
@@ -86,9 +86,9 @@ install_magpie() (
 
 # 本地依赖安装器不使用 PATH 中的系统 Nginx。
 if "$dry_run"; then
-    bash "$script_dir/dsh_nginx_install.sh" --dry-run
+    bash "$script_dir/srcs/dsh_nginx_install.sh" --dry-run
 else
-    bash "$script_dir/dsh_nginx_install.sh"
+    bash "$script_dir/srcs/dsh_nginx_install.sh"
 fi
 
 printf '目标数据目录：%s\n' "$DSH_HOME"
@@ -143,7 +143,7 @@ if "$dry_run"; then
     fi
 fi
 if "$upgrade"; then plugin_args+=(--upgrade); fi
-bash "$script_dir/dsh_plugins_install.sh" "${plugin_args[@]}"
+bash "$script_dir/srcs/dsh_plugins_install.sh" "${plugin_args[@]}"
 
 # 官方实验功能随 DSH 分发，不另行固定旧版依赖。
 # 补齐内置 bundle，并保留额外插件启用状态及其他已有 bundle 配置。
@@ -223,7 +223,7 @@ else
         '安装完成，未启动或重启任何服务。' \
         '请另外恢复 DSH 用户数据、模型配置、magpie 账号与密钥、共享 Skills 和项目文件。' \
         'magpie 支持 magpie backup / magpie restore 迁移加密备份。' \
-        'HTTPS 证书请另行运行 bash ds-harness/dsh_cert.sh，启动时按 server_ip 自动选择 data/tls/<地址>/。' \
+        'HTTPS 证书请另行运行 bash ds-harness/srcs/dsh_cert.sh，启动时按 server_ip 自动选择 data/tls/<地址>/。' \
         '配置完成后可运行 magpie serve，并使用项目 HTTPS 启动脚本启动 DSH。' \
         '直接启动 dsh web 时，请传 --tls-cert <配置的证书路径> --tls-key <配置的私钥路径>。' \
         '客户端需信任本地 CA；网页语音还需要麦克风权限及语音服务配置。' \

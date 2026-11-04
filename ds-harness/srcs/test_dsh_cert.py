@@ -1,3 +1,4 @@
+from test_support import source_file, fixture_file
 """Standalone HTTPS certificate tests using temporary directories only."""
 from pathlib import Path
 import os
@@ -12,7 +13,7 @@ import tempfile
 import time
 import unittest
 
-SCRIPT = Path(__file__).with_name('dsh_cert.sh')
+SCRIPT = source_file('dsh_cert.sh')
 
 
 class CertificateTests(unittest.TestCase):
@@ -422,7 +423,7 @@ fs.rmSync = function(p, options) {
         self.assertEqual(first.wait(timeout=60), 0)
 
     def test_default_config_and_certificates_use_data_directory(self):
-        script = self.root / 'dsh_cert.sh'
+        script = fixture_file(self.root, 'dsh_cert.sh')
         script.write_bytes(SCRIPT.read_bytes())
         config = self.root / 'data/dsh.conf'
         config.parent.mkdir()
@@ -447,7 +448,7 @@ fs.rmSync = function(p, options) {
         self.assertFalse(output.exists())
 
     def test_missing_default_config_reports_data_path(self):
-        script = self.root / 'dsh_cert.sh'
+        script = fixture_file(self.root, 'dsh_cert.sh')
         script.write_bytes(SCRIPT.read_bytes())
         result = subprocess.run(['bash', str(script), '--dry-run'],
                                 text=True, capture_output=True)

@@ -15,6 +15,7 @@ function fixture(t, withOfficialConfig = true) {
     } catch {}
     fs.rmSync(root, { recursive: true, force: true });
   });
+  fs.mkdirSync(path.join(root, 'srcs'));
   const data = path.join(root, 'data');
   fs.mkdirSync(path.join(data, '.paseo'), { recursive: true });
   fs.writeFileSync(path.join(data, 'paseo.conf'), '{"ip":"127.0.0.1","port":31415}');
@@ -24,7 +25,7 @@ function fixture(t, withOfficialConfig = true) {
   for (const file of ['fullchain.pem', 'privkey.pem']) fs.writeFileSync(path.join(tls, file), 'test fixture');
   if (withOfficialConfig) fs.copyFileSync(path.join(__dirname, 'config.json.example'), path.join(data, '.paseo/config.json'));
   for (const file of ['paseo_nginx.py', 'paseo_web_run.sh', 'node-runtime.sh', 'paseo-config.cjs', 'nginx.conf.template', 'config.json.example']) {
-    fs.copyFileSync(path.join(__dirname, file), path.join(root, file));
+    fs.copyFileSync(path.join(__dirname, ['install.sh', 'paseo_web_run.sh'].includes(file) ? '..' : '.', file), path.join(root, ['install.sh', 'paseo_web_run.sh'].includes(file) ? '.' : 'srcs', file));
   }
   const mock = `#!${process.execPath}
 const fs = require('node:fs'), path = require('node:path');

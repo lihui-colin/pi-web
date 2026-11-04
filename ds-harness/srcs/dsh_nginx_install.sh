@@ -3,15 +3,15 @@
 # OpenSSL, PCRE2 and zlib are linked statically by Nginx's upstream build rules.
 set -euo pipefail
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 local_root="$script_dir/data/.local"
 prefix="$local_root/nginx"
 dry_run=false
 case "${1:-}" in
     --dry-run) dry_run=true ;;
     -h|--help)
-        printf '%s\n' '用法：bash ds-harness/dsh_nginx_install.sh [--dry-run]' \
-            '安装到脚本目录下 data/.local/nginx；不使用 sudo、APT、Homebrew 或系统 Nginx。' \
+        printf '%s\n' '用法：bash ds-harness/srcs/dsh_nginx_install.sh [--dry-run]' \
+            '安装到服务目录下 data/.local/nginx；不使用 sudo、APT、Homebrew 或系统 Nginx。' \
             '首次构建需要 cc、make、perl、curl、tar、Python 3；DSH_NGINX_BUILD_JOBS 默认 4。'
         exit 0 ;;
     '') ;;

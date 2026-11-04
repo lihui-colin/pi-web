@@ -17,3 +17,5 @@
 - 重启前保存工作、执行进度和恢复步骤。若当前任务通过该服务的会话执行，应使用独立于该服务会话的维护进程完成停止、启动和就绪检查，不能依赖被终止的会话继续执行后续步骤。
 - 确需重启时，先停止服务，再开启服务，并检查服务是否就绪。Pi Web 使用 `pi-web/scripts/pi-web-run-jmfederico.sh`；DSH 使用 `ds-harness/dsh_web_run.sh stop` 和 `ds-harness/dsh_web_run.sh start`，不要混用两个服务的脚本。
 - Paseo 服务统一通过 `paseo-ws/paseo_web_run.sh` 管理，使用 `start`、`stop`、`status`；`paseo-ws/install.sh` 仅用于安装环境。访问配置为 `paseo-ws/data/paseo.conf`（`ip`、`port` 和可选出站网络代理 `networkProxy`），Paseo 官方数据目录为 `paseo-ws/data/.paseo`（`PASEO_HOME`），完整配置为 `paseo-ws/data/.paseo/config.json`；`data/` 与 `runtime/` 不纳入 Git，后端监听 `127.0.0.1:25226`；独立 Nginx 提供 `https://10.30.0.25:25227/`，使用独立的 `paseo-ws/data/tls/10.30.0.25` 证书。管理脚本统一启停后端与 Nginx，安装脚本调用 Paseo 自身的 Nginx 本地安装器，不依赖其他服务目录。
+
+- Paseo 与 DSH 的辅助脚本、源码、补丁、测试和配置模板统一位于各自 `srcs/`。顶层仅保留 `paseo-ws/install.sh`、`paseo-ws/paseo_web_run.sh`、`ds-harness/dsh_install.sh` 和 `ds-harness/dsh_web_run.sh` 作为安装与服务管理入口；数据、日志及安装依赖路径不变。验证使用 `node --test paseo-ws/srcs/test-*.cjs`、`python3 -B paseo-ws/srcs/test-nginx.py` 和 `python3 -B -m unittest discover -s ds-harness/srcs -p "test_*.py"`。

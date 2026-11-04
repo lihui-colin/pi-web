@@ -54,7 +54,8 @@ test('CLI defaults to repository DSH home regardless of cwd and honors explicit 
     const entry = path.join(path.dirname(path.dirname(asset)), 'index.server.ts');
     const entrySource = 'export default function contribute(server: PluginServerContext) {\n}\n';
     fs.writeFileSync(entry, entrySource);
-    const script = path.join(service, 'patch-dsh-catalog.cjs');
+    const script = path.join(service, 'srcs/patch-dsh-catalog.cjs');
+    fs.mkdirSync(path.dirname(script), { recursive: true });
     fs.copyFileSync(path.join(__dirname, 'patch-dsh-catalog.cjs'), script);
     const env = { ...process.env, HOME: home };
     delete env.DSH_HOME; delete env.DSH_PASEO_PROFILE;

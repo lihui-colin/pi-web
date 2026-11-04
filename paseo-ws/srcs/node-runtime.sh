@@ -58,7 +58,7 @@ paseo_select_node() {
   fi
 
   # A bootstrapped runtime remains stable across later shell/Conda activation changes.
-  bin=$(cd -- "${BASH_SOURCE[0]%/*}" && pwd -P)/runtime/node/bin
+  bin=$(cd -- "${BASH_SOURCE[0]%/*}/.." && pwd -P)/runtime/node/bin
   if _paseo_node_works "$bin"; then
     export PATH="$bin:${PATH-}"
     return 0

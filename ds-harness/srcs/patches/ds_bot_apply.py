@@ -27,7 +27,7 @@ def publish(changes, backup_root=None):
         return
     if any(path.read_text() != original for path, original, _ in changes):
         raise ValueError('Target changed during validation; rerun without overwriting it')
-    backup_root = backup_root or Path(__file__).resolve().parents[1] / 'log/patch-backups'
+    backup_root = backup_root or Path(__file__).resolve().parents[2] / 'log/patch-backups'
     backup_root.mkdir(parents=True, exist_ok=True)
     backup = Path(tempfile.mkdtemp(prefix='ds-bot-', dir=backup_root))
     staged = []
@@ -362,7 +362,7 @@ HISTORY_CONVERSATION_REPLACEMENTS = [
 
 
 def plan_changes(bot=None, host=None):
-    bot = Path(bot) if bot is not None else Path(__file__).resolve().parents[1] / 'data/.dsh/profiles/web/node_modules/ds-bot'
+    bot = Path(bot) if bot is not None else Path(__file__).resolve().parents[2] / 'data/.dsh/profiles/web/node_modules/ds-bot'
     if host is None:
         executable = shutil.which('dsh')
         if executable is None:

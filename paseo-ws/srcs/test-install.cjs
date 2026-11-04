@@ -43,17 +43,18 @@ test('access initialization handles piped input and never replaces existing file
 test('installer creates both configurations and preserves custom configuration on reinstall', t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'paseo-install-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(root, 'srcs'), { recursive: true });
   for (const file of ['install.sh', 'init-access-config.sh', 'paseo-config.cjs', 'config.json.example']) {
-    fs.copyFileSync(path.join(__dirname, file), path.join(root, file));
+    fs.copyFileSync(path.join(__dirname, ['install.sh', 'paseo_web_run.sh'].includes(file) ? '..' : '.', file), path.join(root, ['install.sh', 'paseo_web_run.sh'].includes(file) ? '.' : 'srcs', file));
   }
   fs.mkdirSync(path.join(root, 'bin'));
   fs.symlinkSync(process.execPath, path.join(root, 'bin/node'));
   fs.writeFileSync(path.join(root, 'bin/npm'), '#!/usr/bin/env bash\nexit 0\n', {mode: 0o755});
   // Keep network/package installation out of this configuration lifecycle test.
-  fs.writeFileSync(path.join(root, 'node-runtime.sh'), 'paseo_select_node() { export PATH="$ROOT/bin:$PATH"; }\n');
-  fs.writeFileSync(path.join(root, 'paseo_nginx_install.sh'), 'exit 0\n');
-  fs.writeFileSync(path.join(root, 'patch-web-ui.cjs'), '');
-  fs.writeFileSync(path.join(root, 'patch-dsh-catalog.cjs'), '');
+  fs.writeFileSync(path.join(root, 'srcs/node-runtime.sh'), 'paseo_select_node() { export PATH="$ROOT/bin:$PATH"; }\n');
+  fs.writeFileSync(path.join(root, 'srcs/paseo_nginx_install.sh'), 'exit 0\n');
+  fs.writeFileSync(path.join(root, 'srcs/patch-web-ui.cjs'), '');
+  fs.writeFileSync(path.join(root, 'srcs/patch-dsh-catalog.cjs'), '');
   const run = input => spawnSync('bash', [path.join(root, 'install.sh')], {
     input, encoding: 'utf8', timeout: 10000,
   });

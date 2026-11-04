@@ -29,7 +29,7 @@ case "$ACTION" in
   *) usage >&2; exit 2 ;;
 esac
 
-source "$ROOT/node-runtime.sh"
+source "$ROOT/srcs/node-runtime.sh"
 paseo_select_node
 
 if [[ ! -x "$PASEO" ]]; then
@@ -48,14 +48,14 @@ daemon() {
 }
 
 nginx_control() {
-  python3 "$ROOT/paseo_nginx.py" "$1" "$ROOT" 9>&-
+  python3 "$ROOT/srcs/paseo_nginx.py" "$1" "$ROOT" 9>&-
 }
 nginx_running() {
   nginx_control running
 }
 case "$1" in
   start)
-    ENDPOINT="$(node "$ROOT/paseo-config.cjs" endpoint "$DATA" "$MODE")"
+    ENDPOINT="$(node "$ROOT/srcs/paseo-config.cjs" endpoint "$DATA" "$MODE")"
     mapfile -t ENDPOINT_FIELDS <<< "$ENDPOINT"
     URL="${ENDPOINT_FIELDS[1]}"
     CA_CERT="${ENDPOINT_FIELDS[2]}"
@@ -85,8 +85,8 @@ case "$1" in
     fi
     # 读取实际运行状态，禁止隐式重启或改写运行中实例的监听设置。
     STATE="$(daemon status --json)"
-    node "$ROOT/paseo-config.cjs" prepare "$DATA" "$MODE" "$STATE"
-    NETWORK_PROXY="$(node "$ROOT/paseo-config.cjs" network-proxy "$DATA")"
+    node "$ROOT/srcs/paseo-config.cjs" prepare "$DATA" "$MODE" "$STATE"
+    NETWORK_PROXY="$(node "$ROOT/srcs/paseo-config.cjs" network-proxy "$DATA")"
     if [[ -n "$NETWORK_PROXY" ]]; then
       if [[ "$STATE" == *'"running"'* ]]; then
         printf '服务已运行：networkProxy 仅在后端重新启动时应用；请在允许中断会话时先 stop 再 start。\n' >&2

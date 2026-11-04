@@ -16,3 +16,6 @@ node_modules/
 /paseo-ws/log/
 /paseo-ws/runtime/
 /paseo-ws/.npm-cache/
+
+# Python helper bytecode is generated locally.
+/paseo-ws/**/__pycache__/

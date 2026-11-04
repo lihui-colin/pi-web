@@ -1,5 +1,7 @@
 # DeepSeek Harness
 
+顶层仅保留主安装和服务管理脚本；辅助脚本、源码、补丁、测试与配置模板位于 `srcs/`，运行数据、依赖和日志仍使用服务目录下原有位置。
+
 本目录管理 `magpie → DSH 回环后端 → Nginx HTTPS 入口`。运行需要 Linux ≥5.3（允许 pidfd 系统调用）、Bash、Node.js ≥24、npm、curl、Python ≥3.10、OpenSSL 和 `flock`（util-linux）命令行工具。启停前检查 pidfd 能力；Python 未提供包装时优先使用 libc，x86_64/aarch64 还支持原生系统调用。Nginx 由安装器构建到本目录 `data/.local/nginx/`，启动器固定使用这份程序，运行文件也保存在项目内。
 
 ## 首次部署
@@ -9,7 +11,7 @@
 ```bash
 bash ds-harness/dsh_install.sh
 # 安装结束后按提示输入 IP 和端口，创建 data/dsh.conf
-bash ds-harness/dsh_cert.sh
+bash ds-harness/srcs/dsh_cert.sh
 ./ds-harness/dsh_web_run.sh start
 ```
 
@@ -28,12 +30,12 @@ bash ds-harness/dsh_install.sh --upgrade
 
 默认复用已有的 DSH、pnpm 和 magpie，只补装缺失插件；`--upgrade` 更新 DSH、pnpm、Magpie 和插件。官方 Codex 插件版本与 DSH 对齐，保留上游兼容性检查，同版包缺失或不兼容时停止安装。安装器在安装结束时检查 `data/dsh.conf`：存在则原样保留；只有旧位置 `dsh.conf` 时复制到新位置并保留原文件；两处都没有时提示输入 IPv4/IPv6 地址及 HTTPS 端口（回车默认 `25228`）。无效输入会重新询问，输入结束或中断时不创建半成品；新文件权限为 `600`。`--dry-run` 不询问、不创建配置。安装器不生成证书、不启停服务；安装或更新应在目标 DSH 停机时执行。
 
-额外插件由独立脚本 `dsh_plugins_install.sh` 管理，主安装器会调用它。已有 DSH 环境只安装或更新插件时，可以单独运行：
+额外插件由独立脚本 `srcs/dsh_plugins_install.sh` 管理，主安装器会调用它。已有 DSH 环境只安装或更新插件时，可以单独运行：
 
 ```bash
-bash ds-harness/dsh_plugins_install.sh --dry-run
-bash ds-harness/dsh_plugins_install.sh
-bash ds-harness/dsh_plugins_install.sh --upgrade
+bash ds-harness/srcs/dsh_plugins_install.sh --dry-run
+bash ds-harness/srcs/dsh_plugins_install.sh
+bash ds-harness/srcs/dsh_plugins_install.sh --upgrade
 ```
 
 脚本管理以下 9 个额外安装包：
@@ -52,14 +54,14 @@ bash ds-harness/dsh_plugins_install.sh --upgrade
 
 已有 profile 保留额外插件的启用／停用状态和其他 bundle。默认跳过已完整安装的插件，Codex 插件版本仍与当前 DSH 对齐；第三方插件首次安装和 `--upgrade` 使用 `latest`，实际安装版本由包清单与锁文件记录。`--dry-run` 仅预览，不安装包、不写入 profile。独立脚本不安装 DSH、Nginx 或 Magpie，也不启停服务。
 
-`ds-bot` 的本地界面补丁仍需单独应用，插件安装器不会自动执行。重新安装或更新插件可能覆盖补丁；当前补丁仅适用于 0.2.4，其他版本须重新检查兼容性。参见 [补丁说明](patches/README.md)。
+`ds-bot` 的本地界面补丁仍需单独应用，插件安装器不会自动执行。重新安装或更新插件可能覆盖补丁；当前补丁仅适用于 0.2.4，其他版本须重新检查兼容性。参见 [补丁说明](srcs/patches/README.md)。
 
-Nginx 固定安装到 `ds-harness/data/.local/nginx/sbin/nginx`；即使系统已有 Nginx，也不会复用系统版本。`dsh_nginx_install.sh` 使用 [Nginx 官方构建流程](https://nginx.org/en/docs/configure.html)，固定 Nginx 1.30.6、OpenSSL 3.5.9、PCRE2 10.49、zlib 1.3.2，下载后先校验 SHA-256。三项库静态链接，不再依赖容器中额外安装的共享库；编译成功、版本和 SSL 模块检查通过后才发布完整安装目录。
+Nginx 固定安装到 `ds-harness/data/.local/nginx/sbin/nginx`；即使系统已有 Nginx，也不会复用系统版本。`srcs/dsh_nginx_install.sh` 使用 [Nginx 官方构建流程](https://nginx.org/en/docs/configure.html)，固定 Nginx 1.30.6、OpenSSL 3.5.9、PCRE2 10.49、zlib 1.3.2，下载后先校验 SHA-256。三项库静态链接，不再依赖容器中额外安装的共享库；编译成功、版本和 SSL 模块检查通过后才发布完整安装目录。
 
 首次构建需要 `cc`、`make`、`perl`、`curl`、`tar`、Python 3，默认 4 个并行任务，可用 `DSH_NGINX_BUILD_JOBS` 调整。缺少构建工具时直接报错；不使用 sudo、APT 或 Homebrew，不写系统目录、不启停服务。已有本地 Nginx 不随 `--upgrade` 更新，只检查版本 ≥1.24 和 HTTP SSL 模块；`--dry-run` 不下载、不编译、不创建目录。只补装 Nginx 时可单独执行：
 
 ```bash
-bash ds-harness/dsh_nginx_install.sh
+bash ds-harness/srcs/dsh_nginx_install.sh
 ```
 
 容器部署需把项目目录或父目录放在持久卷中，并保留隐藏目录 `data/.local/`。在相同架构、兼容 glibc/动态加载器的基础镜像中，容器重建后可直接复用本地二进制；切换不兼容的基础镜像需重新构建。安装成功后仅保留 `data/.local/nginx/sbin/nginx` 和 `licenses/`，清理默认配置、示例页面、默认日志目录及本次源码下载缓存；已有有效安装再次运行安装器也会执行清理，`--dry-run` 只预览。构建失败时保留已下载源码供重试。`data/.local/` 不入 Git，重新克隆仓库时需运行安装器。
@@ -72,13 +74,13 @@ MAGPIE_PROXY=http://<代理主机>:<端口> bash ds-harness/dsh_install.sh
 
 代理地址中的 `127.0.0.1` 指服务器自身。官方 `MAGPIE_MIRROR` 仅替换 GitHub 二进制下载地址，无法解决 `usemagpie.ai` 官网不可达的问题。
 
-统一补丁会在主安装／插件安装完成后自动应用，包含 ds-bot 历史、布局、提示词和普通 DSH 共用输入框修复；当前仅支持 ds-bot 0.2.6 与 DSH 0.2.2-alpha.2。版本不匹配或补丁失败会中止安装。详见 [统一补丁说明](patches/README.md)。
+统一补丁会在主安装／插件安装完成后自动应用，包含 ds-bot 历史、布局、提示词和普通 DSH 共用输入框修复；当前仅支持 ds-bot 0.2.6 与 DSH 0.2.2-alpha.2。版本不匹配或补丁失败会中止安装。详见 [统一补丁说明](srcs/patches/README.md)。
 
 ## 证书
 
 ```bash
-bash ds-harness/dsh_cert.sh --dry-run
-bash ds-harness/dsh_cert.sh --config /path/to/dsh.conf --tls-dir /path/to/tls --tls-host extra.example.com
+bash ds-harness/srcs/dsh_cert.sh --dry-run
+bash ds-harness/srcs/dsh_cert.sh --config /path/to/dsh.conf --tls-dir /path/to/tls --tls-host extra.example.com
 ```
 
 证书脚本只生成或校验证书，不修改配置、不启停服务。默认读取 `data/dsh.conf`，输出到 `data/tls/<server_ip>/`；自定义 `--config` 时默认输出到该配置所在目录的 `tls/<server_ip>/`。`--tls-dir` 改变输出根目录，`--tls-host` 添加额外 SAN。自定义导出后，启动前仍需将证书部署到本项目 `data/tls/<地址>/`。旧部署可将脚本同级的 `tls/` 整体移到 `data/tls/`，保留原证书、私钥和权限，无需重新签发。
@@ -114,10 +116,10 @@ magpie dsh effort high
 Codex CLI 通过 `HTTPS_PROXY`、`HTTP_PROXY`、`ALL_PROXY` 和 `NO_PROXY` 走代理。Magpie 里的 Codex 若在 provider 上单独配置了 `proxy`，则优先于这些环境变量。`dsh_web_run.sh start` 读取 `data/dsh.conf` 的 `outbound_proxy` 和 `no_proxy`，在拉起服务前写入三处：新进程的 `HTTPS_PROXY`、`HTTP_PROXY`、`ALL_PROXY`、`NO_PROXY`；`data/proxy.env`；Magpie 的全局 `settings.json` 和 Codex provider 的 `proxy`。未配置 `outbound_proxy` 时才回退到已有的 `data/proxy.env`。已运行的进程不会自动改用新环境。`no_proxy` 默认包含 `127.0.0.1,localhost,::1`，避免本机回环再绕外网代理。
 
 ```bash
-bash ds-harness/dsh_proxy.sh set http://<代理主机>:<端口>
-bash ds-harness/dsh_proxy.sh show
-source ds-harness/dsh_proxy.sh
-bash ds-harness/dsh_proxy.sh run -- codex
+bash ds-harness/srcs/dsh_proxy.sh set http://<代理主机>:<端口>
+bash ds-harness/srcs/dsh_proxy.sh show
+source ds-harness/srcs/dsh_proxy.sh
+bash ds-harness/srcs/dsh_proxy.sh run -- codex
 ```
 
 ## 数据目录
@@ -139,7 +141,7 @@ test ! -e ds-harness/data/.agents && cp -a "$HOME/.agents" ds-harness/data/.agen
 
 ## 启停与运行文件
 
-`dsh_web_run.sh` 负责启停顺序和启动锁；`dsh_runtime.py` 负责进程身份、token、旧运行文件迁移和启动配置校验；`dsh_nginx.py` 负责代理配置和 Nginx 监督。部署时保留这些文件在同一目录。
+`dsh_web_run.sh` 负责启停顺序和启动锁；`srcs/dsh_runtime.py` 负责进程身份、token、旧运行文件迁移和启动配置校验；`srcs/dsh_nginx.py` 负责代理配置和 Nginx 监督。部署时保留顶层入口与 `srcs/` 的相对目录结构。
 
 重复 `start` 会复用身份匹配且 token 已就绪的进程；代理单独退出后，再次 `start` 会复用 DSH 的实际回环端口。整个 `start/stop` 流程共用 `log/.launcher.lock` 的内核文件锁；已有操作进行中时，新调用立即失败并提示重试。锁在操作结束时自动释放，后台服务和日志读取器不继承锁。锁文件应长期保留，运行中不要删除。不要另外启动一套 `magpie serve` 或 `dsh web`。
 
@@ -167,7 +169,7 @@ magpie healthcheck
 
 ## Nginx 代理
 
-`dsh_nginx.py` 仅生成/校验配置、管理 Nginx 前台进程并脱敏错误日志。HTTPS、HTTP/WebSocket、连接池、TLS 会话缓存和流式传输均由 Nginx 处理；请求/响应缓冲关闭，DSH 原有 gzip 透传。
+`srcs/dsh_nginx.py` 仅生成/校验配置、管理 Nginx 前台进程并脱敏错误日志。HTTPS、HTTP/WebSocket、连接池、TLS 会话缓存和流式传输均由 Nginx 处理；请求/响应缓冲关闭，DSH 原有 gzip 透传。
 
 监督进程为 Nginx 注册 Linux 父进程退出信号；监督进程被强杀时，内核向 master 发送 TERM，由 Nginx 停止 worker 并释放端口。项目 Nginx 不能设置 set-ID 位或文件 capabilities，因为提权 exec 会清除该保护；启动检查会明确拒绝此类二进制。
 
@@ -182,7 +184,7 @@ Cookie 使用 DSH 原生 authority 哈希命名，只向后端传递本实例登
 ## 验证
 
 ```bash
-python3 -B -m unittest discover -s ds-harness -p 'test_*.py' -v
+python3 -B -m unittest discover -s ds-harness/srcs -p 'test_*.py' -v
 bash -n ds-harness/dsh_web_run.sh
 ```
 

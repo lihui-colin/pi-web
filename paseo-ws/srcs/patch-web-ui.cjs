@@ -18,7 +18,7 @@ function checkCompatibility(installed, warn = console.warn) {
 }
 
 function main() {
-  const serverRoot = path.join(__dirname, 'runtime/lib/node_modules/@getpaseo/cli/node_modules/@getpaseo/server');
+  const serverRoot = path.join(__dirname, '../runtime/lib/node_modules/@getpaseo/cli/node_modules/@getpaseo/server');
   const installed = JSON.parse(fs.readFileSync(path.join(serverRoot, 'package.json'), 'utf8'));
   checkCompatibility(installed);
   const root = path.join(serverRoot, 'dist/server/web-ui');

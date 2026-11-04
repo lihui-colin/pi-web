@@ -1,3 +1,4 @@
+from test_support import source_file, fixture_file
 """Exercise launcher lifecycle with temporary services, without touching live sessions."""
 
 import io
@@ -122,7 +123,7 @@ main "$action"
             script = root / 'dsh_web_run.sh'
             copy_test_launcher(root)
             # Isolate address validation from Nginx availability and socket permissions.
-            (root / 'dsh_nginx.py').write_text('def require_local_nginx(): pass\n')
+            (fixture_file(root, 'dsh_nginx.py')).write_text('def require_local_nginx(): pass\n')
             binaries = root / 'bin'
             binaries.mkdir()
             for name in ('dsh', 'magpie', 'hostname'):
@@ -268,7 +269,7 @@ main start
             root = Path(temporary)
             script = root / "dsh_web_run.sh"
             for name in ("dsh_web_run.sh", "dsh_runtime.py", "dsh_nginx.py"):
-                shutil.copy2(Path(__file__).with_name(name), root / name)
+                shutil.copy2(source_file(name), fixture_file(root, name))
             binaries = root / "bin"
             binaries.mkdir()
             fallback = binaries / "nginx"
@@ -307,7 +308,7 @@ main start
             root = Path(temporary)
             script = root / 'dsh_web_run.sh'
             copy_test_launcher(root)
-            shutil.copy2(Path(__file__).with_name('dsh_nginx.py'), root / 'dsh_nginx.py')
+            shutil.copy2(source_file('dsh_nginx.py'), fixture_file(root, 'dsh_nginx.py'))
             copy_test_nginx(root)
             seed = root / 'seed'
             seed.mkdir()
@@ -365,7 +366,7 @@ main start
         with tempfile.TemporaryDirectory(prefix="dsh-launcher-") as temporary:
             root = Path(temporary)
             for name in ("dsh_web_run.sh", "dsh_runtime.py", "dsh_nginx.py"):
-                shutil.copy2(Path(__file__).with_name(name), root / name)
+                shutil.copy2(source_file(name), fixture_file(root, name))
             copy_test_nginx(root)
             binaries = root / "bin"
             binaries.mkdir()
@@ -519,7 +520,7 @@ main start
             root = Path(temporary)
             script = root / 'dsh_web_run.sh'
             copy_test_launcher(root)
-            (root / 'dsh_nginx.py').write_text('def require_local_nginx(): pass\n')
+            (fixture_file(root, 'dsh_nginx.py')).write_text('def require_local_nginx(): pass\n')
             tls = root / 'data/tls/127.0.0.1'
             tls.mkdir(parents=True)
             cert, key = create_test_certificate(tls)
@@ -584,7 +585,7 @@ class ProcessHelperTests(unittest.TestCase):
     """Execute the runtime helpers/branches without relying on the /proc namespace."""
 
     def setUp(self):
-        source = Path(__file__).with_name('dsh_runtime.py').read_text()
+        source = source_file('dsh_runtime.py').read_text()
         self.ns = {'__name__': 'test_runtime'}
         exec(compile(source, 'dsh_runtime.py', 'exec'), self.ns)
 

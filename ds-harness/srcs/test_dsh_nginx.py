@@ -1,3 +1,4 @@
+from test_support import source_file, fixture_file
 """Isolated integration tests for the generated Nginx HTTPS proxy."""
 
 import http.client
@@ -64,7 +65,7 @@ class NginxBinaryTests(unittest.TestCase):
             binary = root / 'data/.local/nginx/sbin/nginx'
             binary.parent.mkdir(parents=True)
             binary.write_text('#!/bin/sh\nexit 99\n')
-            with mock.patch('dsh_nginx.__file__', str(root / 'dsh_nginx.py')), \
+            with mock.patch('dsh_nginx.__file__', str(fixture_file(root, 'dsh_nginx.py'))), \
                     mock.patch('dsh_nginx.subprocess.run') as execute:
                 for mode in (0o4755, 0o2755):
                     with self.subTest(mode=oct(mode)):
@@ -84,7 +85,7 @@ class NginxBinaryTests(unittest.TestCase):
                 root = Path(temporary) / "project"
                 root.mkdir()
                 for name in ("dsh_nginx.py", "dsh_runtime.py"):
-                    shutil.copy2(Path(__file__).with_name(name), root / name)
+                    shutil.copy2(source_file(name), fixture_file(root, name))
                 outside = Path(temporary) / "outside"
                 binary = outside / ".local/nginx/sbin/nginx"
                 binary.parent.mkdir(parents=True)
@@ -98,7 +99,7 @@ class NginxBinaryTests(unittest.TestCase):
                 link.symlink_to(target, target_is_directory=target.is_dir())
                 result = subprocess.run(
                     [sys.executable, "-B", "-c", "from dsh_nginx import require_local_nginx; require_local_nginx()"],
-                    cwd=root, text=True, capture_output=True, timeout=10,
+                    cwd=root / "srcs", text=True, capture_output=True, timeout=10,
                 )
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("outside its installation directory", result.stderr)
@@ -109,7 +110,7 @@ class NginxBinaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="dsh-nginx-local-link-") as temporary:
             root = Path(temporary)
             for name in ("dsh_nginx.py", "dsh_runtime.py"):
-                shutil.copy2(Path(__file__).with_name(name), root / name)
+                shutil.copy2(source_file(name), fixture_file(root, name))
             binary = root / "data/.local/nginx/sbin/nginx-versioned"
             binary.parent.mkdir(parents=True)
             binary.write_text("#!/bin/sh\nprintf 'nginx/1.30.0' >&2\n")
@@ -117,7 +118,7 @@ class NginxBinaryTests(unittest.TestCase):
             binary.with_name("nginx").symlink_to(binary.name)
             result = subprocess.run(
                 [sys.executable, "-B", "-c", "from dsh_nginx import require_local_nginx; print(require_local_nginx())"],
-                cwd=root, text=True, capture_output=True, timeout=10,
+                cwd=root / "srcs", text=True, capture_output=True, timeout=10,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.strip(), str(binary))
@@ -125,9 +126,9 @@ class NginxBinaryTests(unittest.TestCase):
     def test_direct_entry_rejects_unusable_local_binary_without_path_fallback(self):
         with tempfile.TemporaryDirectory(prefix="dsh-nginx-binary-") as temporary:
             root = Path(temporary)
-            script = root / "dsh_nginx.py"
+            script = fixture_file(root, 'dsh_nginx.py')
             for name in ("dsh_nginx.py", "dsh_runtime.py"):
-                shutil.copy2(Path(__file__).with_name(name), root / name)
+                shutil.copy2(source_file(name), fixture_file(root, name))
             binaries = root / "bin"
             binaries.mkdir()
             fallback = binaries / "nginx"
@@ -196,7 +197,7 @@ class SupervisorTests(unittest.TestCase):
                 reservation.bind(("127.0.0.1", 0))
                 port = reservation.getsockname()[1]
             runtime = root / "log" / f".nginx-{port}"
-            command = [sys.executable, "-B", str(Path(__file__).with_name("dsh_nginx.py")),
+            command = [sys.executable, "-B", str(source_file("dsh_nginx.py")),
                        "--listen-host", "127.0.0.1", "--listen-port", str(port),
                        "--upstream-host", "127.0.0.1", "--upstream-port", "1",
                        "--public-host", f"localhost:{port}", "--config", str(config),

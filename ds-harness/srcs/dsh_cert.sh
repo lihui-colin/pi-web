@@ -3,7 +3,7 @@
 # 不安装程序，不修改配置，不启停服务，不覆盖已有证书。
 set -euo pipefail
 umask 077
-script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 config_file="$script_dir/data/dsh.conf"
 tls_dir=''
 tls_hosts=()
@@ -24,9 +24,9 @@ while (( $# )); do
             shift 2 ;;
         -h|--help)
             printf '%s\n' \
-                '用法：bash ds-harness/dsh_cert.sh [--dry-run] [--config 文件] [--tls-dir 根目录] [--tls-host 额外IP或域名]' \
-                '需要 Node.js >=24 和 OpenSSL。默认读取脚本目录下 data/dsh.conf 的 server_ip。' \
-                '默认配置的证书保存在脚本目录下 data/tls/<server_ip>/；自定义 --config 则保存在配置目录下 tls/<server_ip>/。' \
+                '用法：bash ds-harness/srcs/dsh_cert.sh [--dry-run] [--config 文件] [--tls-dir 根目录] [--tls-host 额外IP或域名]' \
+                '需要 Node.js >=24 和 OpenSSL。默认读取服务目录下 data/dsh.conf 的 server_ip。' \
+                '默认配置的证书保存在服务目录下 data/tls/<server_ip>/；自定义 --config 则保存在配置目录下 tls/<server_ip>/。' \
                 'IPv6 目录名中的冒号替换为下划线。' \
                 '--tls-dir 指定保存根目录，仍会追加地址子目录；--tls-host 可重复添加 SAN。' \
                 '只读取 server_ip；启动脚本从同目录 data/tls/<地址>/ 自动加载，不使用旧 tls_cert/tls_key。' \
@@ -51,7 +51,7 @@ import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 const [configArg, dirOverride, preview, ...extraHosts] = process.argv.slice(2);
 const config = path.resolve(configArg);
-if (!fs.existsSync(config)) throw new Error(`缺少 DSH 配置：${config}。请先从脚本目录下 dsh.conf.example 复制到 ${config} 并填写 server_ip（默认配置为 data/dsh.conf）。`);
+if (!fs.existsSync(config)) throw new Error(`缺少 DSH 配置：${config}。请先从 srcs/dsh.conf.example 复制到 ${config} 并填写 server_ip（默认配置为 data/dsh.conf）。`);
 let serverIp;
 for (const line of fs.readFileSync(config, 'utf8').split(/\r?\n/)) {
   const m = line.match(/^\s*(server_ip)\s*=\s*(.*?)\s*$/);

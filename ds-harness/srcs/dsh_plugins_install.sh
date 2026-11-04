@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 安装 web profile 的九个额外插件；已有 profile 保留启用/禁用状态。
 set -euo pipefail
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 dry_run=false
 upgrade=false
 expected_version=''
@@ -14,10 +14,10 @@ while (( $# )); do
             expected_version="$2"; shift 2 ;;
         -h|--help)
             printf '%s\n' \
-                '用法：bash ds-harness/dsh_plugins_install.sh [--dry-run] [--upgrade]' \
+                '用法：bash ds-harness/srcs/dsh_plugins_install.sh [--dry-run] [--upgrade]' \
                 '默认补装九个额外插件；--upgrade 重新安装，第三方使用 latest，Codex 与实际 DSH 同版。' \
                 '已有 web profile 保留启用/禁用状态；新 profile 启用除 dsh-ide-git 外的八个插件。' \
-                '数据固定放在脚本同级 data/.dsh；不配置内置 bundle，不启停服务。' \
+                '数据固定放在服务目录下 data/.dsh；不配置内置 bundle，不启停服务。' \
                 '--expected-dsh-version 仅供父安装器 dry-run 传入预期版本或占位符。'
             exit 0 ;;
         *) printf '未知参数：%s\n' "$1" >&2; exit 2 ;;
@@ -30,7 +30,7 @@ fi
 command -v node >/dev/null 2>&1 || { printf '缺少命令：node。\n' >&2; exit 1; }
 if ! "$dry_run"; then
     command -v python3 >/dev/null 2>&1 || { printf '缺少命令：python3（用于 DS Bot 兼容补丁）。\n' >&2; exit 1; }
-    [[ -f "$script_dir/patches/ds_bot_apply.py" ]] || { printf '缺少 DS Bot 统一补丁文件。\n' >&2; exit 1; }
+    [[ -f "$script_dir/srcs/patches/ds_bot_apply.py" ]] || { printf '缺少 DS Bot 统一补丁文件。\n' >&2; exit 1; }
 fi
 export DSH_HOME="$script_dir/data/.dsh"
 export DSH_AGENTS_HOME="$script_dir/data/.agents"
@@ -145,5 +145,5 @@ fi
 if (( status != 0 )); then exit "$status"; fi
 # Always validate/apply the full patch set, even when downloads were skipped.
 # A mismatched release must fail installation rather than silently omit fixes.
-run python3 -B "$script_dir/patches/ds_bot_apply.py"
-run python3 -B "$script_dir/patches/dsh_mobile_apply.py"
+run python3 -B "$script_dir/srcs/patches/ds_bot_apply.py"
+run python3 -B "$script_dir/srcs/patches/dsh_mobile_apply.py"

@@ -24,8 +24,8 @@ function patchHome(source, home) {
   return source.replace(anchor + '\n', anchor + '\n  // PASEO_DSH_HOME\n  process.env.DSH_HOME ??= ' + JSON.stringify(home) + ';\n');
 }
 function main() {
-  const plugins = path.join(__dirname, 'data/.paseo/plugins/dsh-paseo');
-  const dshHome = process.env.DSH_HOME ?? path.resolve(__dirname, '../ds-harness/data/.dsh');
+  const plugins = path.join(__dirname, '../data/.paseo/plugins/dsh-paseo');
+  const dshHome = process.env.DSH_HOME ?? path.resolve(__dirname, '../../ds-harness/data/.dsh');
   if (typeof dshHome !== 'string' || !path.isAbsolute(dshHome)) throw new Error('Invalid configured DSH home');
   const targets = [];
   if (fs.existsSync(plugins)) for (const version of fs.readdirSync(plugins)) {

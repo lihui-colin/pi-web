@@ -1,3 +1,4 @@
+from test_support import source_file, fixture_file
 """Isolated installer tests: no network, real builds, or service changes."""
 import hashlib
 import io
@@ -12,9 +13,9 @@ import tarfile
 import tempfile
 import unittest
 
-SCRIPT = Path(__file__).resolve().with_name('dsh_install.sh')
-NGINX_SCRIPT = SCRIPT.with_name('dsh_nginx_install.sh')
-PLUGIN_SCRIPT = SCRIPT.with_name('dsh_plugins_install.sh')
+SCRIPT = source_file('dsh_install.sh')
+NGINX_SCRIPT = source_file('dsh_nginx_install.sh')
+PLUGIN_SCRIPT = source_file('dsh_plugins_install.sh')
 NAMES = ['@deepseek-ai/dsh-subagent-codex', 'ds-bot', 'dsh-web-mobile', 'dshmarket', 'dsh-ide-git', 'dsh-sidebar-enhancement', 'dsh-sidebar-plus', '@huanlin/dsh-plugin-input-history', '@xbzbing/dsh-git-panel']
 
 
@@ -31,10 +32,10 @@ def copy_installers(root):
     project = root / 'project'
     project.mkdir()
     for source in (SCRIPT, NGINX_SCRIPT, PLUGIN_SCRIPT):
-        shutil.copy2(source, project / source.name)
-    (project / 'patches').mkdir()
-    (project / 'patches/ds_bot_apply.py').write_text('print("PATCH_BUNDLE_APPLIED")\n')
-    (project / 'patches/dsh_mobile_apply.py').write_text('print("MOBILE_PATCH_APPLIED")\n')
+        shutil.copy2(source, fixture_file(project, source.name))
+    (project / 'srcs/patches').mkdir(parents=True)
+    (project / 'srcs/patches/ds_bot_apply.py').write_text('print("PATCH_BUNDLE_APPLIED")\n')
+    (project / 'srcs/patches/dsh_mobile_apply.py').write_text('print("MOBILE_PATCH_APPLIED")\n')
     return project
 
 
@@ -195,7 +196,7 @@ class InstallPlanTests(unittest.TestCase):
         self.assertNotIn('dsh-web-mobile', bundles)
 
     def test_plugin_installer_failure_stops_main_install(self):
-        (self.project / PLUGIN_SCRIPT.name).write_text('#!/bin/bash\nexit 42\n')
+        (fixture_file(self.project, PLUGIN_SCRIPT.name)).write_text('#!/bin/bash\nexit 42\n')
         result = self.install('127.0.0.1\n25228\n')
         self.assertEqual(result.returncode, 42, result.stderr)
         self.assertFalse(self.config.exists())
@@ -217,7 +218,7 @@ class NginxInstallTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name).resolve()
         self.project = copy_installers(self.root)
-        self.script = self.project / NGINX_SCRIPT.name
+        self.script = fixture_file(self.project, NGINX_SCRIPT.name)
         self.local = self.project / 'data/.local'
         self.prefix = self.local / 'nginx'
         self.bins = self.root / 'bin'

@@ -8,7 +8,7 @@ import unittest
 
 
 def local_nginx():
-    prefix = Path(__file__).resolve().parent / "data/.local/nginx"
+    prefix = Path(__file__).resolve().parents[1] / "data/.local/nginx"
     binary = prefix / "sbin/nginx"
     if not binary.is_file() or not os.access(binary, os.X_OK):
         return None
@@ -38,5 +38,15 @@ def create_test_certificate(directory):
 
 def copy_test_launcher(directory):
     for name in ('dsh_web_run.sh', 'dsh_runtime.py'):
-        shutil.copy2(Path(__file__).with_name(name), Path(directory) / name)
+        shutil.copy2(source_file(name), fixture_file(directory, name))
     return Path(directory) / 'dsh_web_run.sh'
+
+
+def source_file(name):
+    base = Path(__file__).resolve().parent
+    return (base.parent if name in ('dsh_install.sh', 'dsh_web_run.sh') else base) / name
+
+def fixture_file(root, name):
+    target = Path(root) / (name if name in ('dsh_install.sh', 'dsh_web_run.sh') else 'srcs/' + name)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return target

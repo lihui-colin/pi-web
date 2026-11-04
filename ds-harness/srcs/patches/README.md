@@ -9,17 +9,17 @@
 ```sh
 bash ds-harness/dsh_install.sh
 # 单独补装插件并应用全部补丁
-bash ds-harness/dsh_plugins_install.sh
+bash ds-harness/srcs/dsh_plugins_install.sh
 # 手动应用／只检查全部补丁
-python3 ds-harness/patches/ds_bot_apply.py
-python3 ds-harness/patches/ds_bot_apply.py --check
-python3 ds-harness/patches/dsh_mobile_apply.py
-python3 ds-harness/patches/dsh_mobile_apply.py --check
+python3 ds-harness/srcs/patches/ds_bot_apply.py
+python3 ds-harness/srcs/patches/ds_bot_apply.py --check
+python3 ds-harness/srcs/patches/dsh_mobile_apply.py
+python3 ds-harness/srcs/patches/dsh_mobile_apply.py --check
 # 回归测试
-python3 -B -m unittest discover -s ds-harness -p 'test_ds_bot*.py'
-python3 -B -m unittest discover -s ds-harness -p 'test_dsh_composer_enter.py'
-python3 -B -m unittest discover -s ds-harness -p 'test_dsh_plugins_install.py'
-python3 -B -m unittest discover -s ds-harness -p 'test_dsh_mobile_apply.py'
+python3 -B -m unittest discover -s ds-harness/srcs -p 'test_ds_bot*.py'
+python3 -B -m unittest discover -s ds-harness/srcs -p 'test_dsh_composer_enter.py'
+python3 -B -m unittest discover -s ds-harness/srcs -p 'test_dsh_plugins_install.py'
+python3 -B -m unittest discover -s ds-harness/srcs -p 'test_dsh_mobile_apply.py'
 ```
 
 默认定位本服务的 web profile 与 PATH 中的 DSH 安装；测试或明确的自定义安装可传 `--bot-dir` 和 `--host-dir`（DSH 的 `node_modules/@deepseek-ai` 目录）。升级到其他版本前必须重新核对上游实现；安装器仍按现有策略选择依赖版本，不会为了通过补丁检查静默降级。
@@ -50,11 +50,11 @@ python3 -B -m unittest discover -s ds-harness -p 'test_dsh_mobile_apply.py'
 
 2026-11-03 宽度补丁验证：25228 的 Chief 会话在 1600px 浏览器中左拖 80px，正文从约 845px 增至 1005px，输入框从约 877px 增至 1037px；刷新后保持宽度。900px 窄屏隐藏拖动条；390px 触屏隐藏拖动条且无页面横向溢出。浏览器无运行错误，20 项 DS Bot 回归及 2 项共用输入框测试通过。只刷新独立测试浏览器，未重启服务、未发送消息。
 
-2026-11-03 经授权重启 25228 后，普通 DSH 与 Chief 均完成线上手机换行和 PC 快捷键验证，未发送模型测试消息；25028/25128 的进程未变化。合并补丁的回归覆盖独立单文件执行、四个目标全量应用、缺失输入框补丁检测、幂等性、未知版本拒绝、失败不写入及安装入口调用。历史排查记录见 [迁移文档](../MIGRATION.md)。
+2026-11-03 经授权重启 25228 后，普通 DSH 与 Chief 均完成线上手机换行和 PC 快捷键验证，未发送模型测试消息；25028/25128 的进程未变化。合并补丁的回归覆盖独立单文件执行、四个目标全量应用、缺失输入框补丁检测、幂等性、未知版本拒绝、失败不写入及安装入口调用。历史排查记录见 [迁移文档](../../MIGRATION.md)。
 
 ## dsh-web-mobile 顶栏按钮
 
-`python3 -B ds-harness/patches/dsh_mobile_apply.py`（仓库根目录运行，`--check` 只验证）统一修复 3.2.1 的手机顶栏布局及 DSH 0.2.2-alpha.2 的页签宽度折叠，插件安装入口自动执行。先校验插件和宿主两个目标，再共用原子写入与备份机制发布；任一目标版本或锚点不符都不写入。`--check` 同时检查两个目标，`--mobile-dir` / `--host-dir` 可指定隔离安装目录。
+`python3 -B ds-harness/srcs/patches/dsh_mobile_apply.py`（仓库根目录运行，`--check` 只验证）统一修复 3.2.1 的手机顶栏布局及 DSH 0.2.2-alpha.2 的页签宽度折叠，插件安装入口自动执行。先校验插件和宿主两个目标，再共用原子写入与备份机制发布；任一目标版本或锚点不符都不写入。`--check` 同时检查两个目标，`--mobile-dir` / `--host-dir` 可指定隔离安装目录。
 
 本机 3.2.1 发布源码把 `MobileNavToggle` 注入 `conversation.session.header.actions`，同时给其祖先 `headerActions` / `titleCluster` 设置滚动裁剪；侧边栏、文件按钮绝对定位到顶栏两端，落在裁剪区外而不可见，标题仍留有 32px。DSH 0.2.2-alpha.2 已有独立的 `conversation.header.leading` 槽位，因此补丁复用该槽位，只在手机且槽内存在本插件按钮时解除其隐藏。保留标题滚动、原有按钮事件及桌面隐藏条件；不修改宿主布局、不重启服务。
 

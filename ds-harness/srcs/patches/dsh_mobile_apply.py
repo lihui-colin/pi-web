@@ -206,7 +206,7 @@ def patch_view_tabs(text):
 
 
 def plan_changes(package=None, host=None):
-    package = Path(package) if package is not None else Path(__file__).resolve().parents[1] / 'data/.dsh/profiles/web/node_modules/dsh-web-mobile'
+    package = Path(package) if package is not None else Path(__file__).resolve().parents[2] / 'data/.dsh/profiles/web/node_modules/dsh-web-mobile'
     if host is None:
         executable = shutil.which('dsh')
         if executable is None:

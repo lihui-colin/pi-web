@@ -141,7 +141,7 @@ class Nginx:
     def publish(self):
         rendered = subprocess.check_output([
             'node', '-e', 'process.stdout.write(require(process.argv[1]).renderProxy(process.argv[2]))',
-            str(self.root / 'paseo-config.cjs'), str(self.data)])
+            str(self.root / 'srcs/paseo-config.cjs'), str(self.data)])
         fd, temp = tempfile.mkstemp(prefix='.nginx-candidate-', suffix='.conf', dir=self.data)
         try:
             with os.fdopen(fd, 'wb') as stream:
