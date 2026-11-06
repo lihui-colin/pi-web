@@ -7,6 +7,7 @@ import tempfile
 import unittest
 
 from patches import dsh_mobile_apply as p
+from patches import dsh_mobile_legacy as legacy
 from patches import ds_bot_apply as bot
 
 
@@ -27,8 +28,8 @@ class MobilePatchTests(unittest.TestCase):
         selectors = ['html [data-mobile-nav="frame"] [data-conversation-header-leading] ' + label
                      for label in ('button[aria-label*="sidebar" i]', 'button[aria-label*="侧边栏"]')]
         self.plugin.write_text('\n'.join([
-            p.OLD, p.RIGHT_ICON_OLD, "'files': '文件浏览'", "'files': 'Files'", p.DRAWER_LOG_OLD,
-            'exports.LAYOUT_CSS = `' + p.ANCHOR, p.TAB_ANCHOR, p.ROW_ANCHOR, *selectors, '}`;',
+            legacy.OLD, legacy.RIGHT_ICON_OLD, "'files': '文件浏览'", "'files': 'Files'", legacy.DRAWER_LOG_OLD,
+            'exports.LAYOUT_CSS = `' + legacy.ANCHOR, legacy.TAB_ANCHOR, legacy.ROW_ANCHOR, *selectors, '}`;',
         ]))
         self.conversation.write_text(p.VIEW_LIMIT_OLD)
 
@@ -40,7 +41,7 @@ class MobilePatchTests(unittest.TestCase):
         # Use the shared publisher with a temporary backup location.
         changes = p.plan_changes(self.mobile, self.host)
         p.publish(changes, self.mobile / 'backups')
-        self.assertIn(p.NEW, self.plugin.read_text())
+        self.assertIn(legacy.NEW, self.plugin.read_text())
         self.assertEqual(self.conversation.read_text(), p.VIEW_LIMIT_NEW)
         self.assertEqual(self.run_cli('--check').returncode, 0)
         self.assertTrue(all(old == new for _, old, new in p.plan_changes(self.mobile, self.host)))
@@ -119,6 +120,15 @@ class CurrentMobileTests(unittest.TestCase):
         self.assertEqual(self.conversation.read_text(), bot.COMPOSER_ANCHOR + '\n' + p.VIEW_LIMIT_NEW)
         self.assertEqual(self.run_cli('--check').returncode, 0)
         self.assertTrue(all(old == new for _, old, new in p.plan_changes(self.mobile, self.host)))
+
+    def test_retires_enter_when_adaptive_tabs_are_already_installed(self):
+        upstream = self.plugin.read_bytes()
+        self.conversation.write_text(bot.COMPOSER_REPLACEMENT + '\n' + p.VIEW_LIMIT_NEW)
+        self.assertNotEqual(self.run_cli('--check').returncode, 0)
+        p.publish(p.plan_changes(self.mobile, self.host), self.mobile / 'backups')
+        self.assertEqual(self.conversation.read_text(), bot.COMPOSER_ANCHOR + '\n' + p.VIEW_LIMIT_NEW)
+        self.assertEqual(self.plugin.read_bytes(), upstream)
+        self.assertEqual(self.run_cli('--check').returncode, 0)
 
     def test_unknown_source_and_mixed_version_do_not_write(self):
         for version, source in [('0.2.2-alpha.2', self.conversation.read_text()),
