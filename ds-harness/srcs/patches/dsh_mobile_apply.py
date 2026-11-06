@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keep mobile 3.3.0 upstream UI and apply the scoped host tab-width fix.
+"""Keep mobile 3.3.0/3.3.1 upstream UI and apply the scoped host tab-width fix.
 
 The old plugin UI transforms only apply to the separate 3.2.1 / alpha.2 pair.
 """
@@ -123,14 +123,17 @@ def plan_changes(package=None, host=None):
     conversation = Path(host) / 'dsh-client-ui-conversation'
     mobile_manifest = json.loads((package / 'package.json').read_text())
     host_manifest = json.loads((conversation / 'package.json').read_text())
-    if (mobile_manifest.get('name'), mobile_manifest.get('version'),
-            host_manifest.get('name'), host_manifest.get('version')) == (
-            'dsh-web-mobile', '3.3.0', '@deepseek-ai/dsh-client-ui-conversation', '0.2.2-rc.1'):
+    if (mobile_manifest.get('name') == 'dsh-web-mobile'
+            and mobile_manifest.get('version') in ('3.3.0', '3.3.1')
+            and (host_manifest.get('name'), host_manifest.get('version')) == (
+                '@deepseek-ai/dsh-client-ui-conversation', '0.2.2-rc.1')):
         plugin_path = package / 'lib/client.js'
         plugin = plugin_path.read_text()
         path = conversation / 'lib/client.js'
         original = path.read_text()
         # Reviewed upstream 522db94f552d89934f814853ad10c96f31eba6da (3.3.0):
+        # 3.3.1 at 4e71eb67de7dac9d8b2572757c81e47aa32a32fb keeps these
+        # layout and Enter sources unchanged (drawer/packaging fixes only).
         # layout.css.ts owns header clipping and tab hit-area/layout fixes;
         # composer-enter-newline.ts yields modifier shortcuts and popup selections.
         # Keep the plugin unchanged; retire the conflicting host Enter hook

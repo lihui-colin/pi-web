@@ -1,11 +1,11 @@
 # DSH 本地补丁
 
-当前核验组合为 **DSH 0.2.2-rc.1、ds-bot 0.2.7、dsh-web-mobile 3.3.0、xterm/headless 6.0.0、addon-serialize 0.14.0**。三个入口共用原子写入、备份与回滚函数，未知版本、混合宿主版本或不完整旧补丁会停止。
+当前核验组合为 **DSH 0.2.2-rc.1、ds-bot 0.2.7、dsh-web-mobile 3.3.0 / 3.3.1、xterm/headless 6.0.0、addon-serialize 0.14.0**。三个入口共用原子写入、备份与回滚函数，未知版本、混合宿主版本或不完整旧补丁会停止。
 
 | 入口 | 当前版本的处理 |
 | --- | --- |
 | `ds_bot_apply.py` | 恢复 Bot 0.2.7 输入框、消息操作栏与桌面宽度布局；撤销宿主旧历史插槽和手机 Enter 注入，保留上游历史和提示词实现。 |
-| `dsh_mobile_apply.py` | 保持 mobile 3.3.0 文件不变；撤销旧宿主 Enter 注入，保留仅在 mobile 布局生效的页签实际宽度测量。 |
+| `dsh_mobile_apply.py` | 保持 mobile 3.3.0 / 3.3.1 文件不变；撤销旧宿主 Enter 注入，保留仅在 mobile 布局生效的页签实际宽度测量。 |
 | `dsh_terminal_apply.py` | 继续安装前后端配套的重连、剪贴板、键盘协商、查询应答、搜索与链接增强。 |
 
 历史组合 **Bot 0.2.6 + DSH alpha.2**、**mobile 3.2.1 + DSH alpha.2** 仍走独立旧版路径；不会把旧版 UI 补丁套到新包上。终端也支持原有 alpha.2，但前端与控制器必须同版。
@@ -140,3 +140,9 @@ Paseo 终端增强：参考 [Paseo 运行时](https://github.com/getpaseo/paseo/
 0.2.7 分支此前只迁移宿主，导致 `--check` 通过时 Bot 自身仍没有本地布局效果。核对当前发布包：隐藏宽度拖动条、固定正文及输入框宽度、消息侧边操作栏和更多菜单仍存在；消息组件的 React 编译别名从 `import_react17` 改为 `import_react19`。
 
 当前分支在严格校验版本和完整匹配点后恢复输入框两行、8px 工具间距、群聊头像与时间同行、窄侧栏名称、全宽回复及下方操作栏、触屏操作常驻、复制/下载直接按钮，以及桌面原生宽度拖动。复用上游复制、下载和宽度记忆实现；不覆盖新版历史、提示词及 mobile Enter 处理。检查同时覆盖 Bot 文件和宿主迁移，任何目标不匹配均不发布。
+
+### Mobile 3.3.1 升级
+
+核对上游提交 [`4e71eb6`](https://github.com/mexiaosqwq/dsh-web-mobile/commit/4e71eb67de7dac9d8b2572757c81e47aa32a32fb)：相较 3.3.0 修复抽屉自身的 `aria-modal` 阻塞滑动手势、清理旧下载按钮及冗余查询，并将 React 标为可选 peer。`layout.css.ts` 和 `composer-enter-newline.ts` 未变，继续复用上游 UI/Enter，保留宿主页签自适应。补丁严格支持 3.3.0 / 3.3.1 与 DSH 0.2.2-rc.1 的组合。
+
+升级时 npm 的 3.3.1 元数据尚不可用，使用 `github:mexiaosqwq/dsh-web-mobile#4e71eb67de7dac9d8b2572757c81e47aa32a32fb` 固定到已核验的 3.3.1 源码，后续插件安装器会保留此来源。安装不自动重启服务。

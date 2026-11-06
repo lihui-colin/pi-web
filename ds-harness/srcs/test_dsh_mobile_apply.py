@@ -102,13 +102,14 @@ for (const [matches, enabled] of [[false, false], [false, true], [true, false]])
 
 class CurrentMobileTests(unittest.TestCase):
     run_cli = MobilePatchTests.run_cli
+    mobile_version = '3.3.0'
 
     def setUp(self):
         MobilePatchTests.setUp(self)
-        (self.mobile / 'package.json').write_text(json.dumps({'name': 'dsh-web-mobile', 'version': '3.3.0'}))
+        (self.mobile / 'package.json').write_text(json.dumps({'name': 'dsh-web-mobile', 'version': self.mobile_version}))
         (self.host / 'dsh-client-ui-conversation/package.json').write_text(json.dumps({
             'name': '@deepseek-ai/dsh-client-ui-conversation', 'version': '0.2.2-rc.1'}))
-        self.plugin.write_text('Upstream 3.3.0 plugin stays unchanged')
+        self.plugin.write_text('Upstream ' + self.mobile_version + ' plugin stays unchanged')
         self.conversation.write_text(bot.COMPOSER_ANCHOR + '\n' + p.VIEW_LIMIT_OLD)
 
     def test_keeps_upstream_mobile_and_migrates_host_atomically(self):
@@ -140,6 +141,10 @@ class CurrentMobileTests(unittest.TestCase):
             originals = [self.plugin.read_bytes(), self.conversation.read_bytes()]
             self.assertNotEqual(self.run_cli().returncode, 0)
             self.assertEqual([self.plugin.read_bytes(), self.conversation.read_bytes()], originals)
+
+
+class Mobile331Tests(CurrentMobileTests):
+    mobile_version = '3.3.1'
 
 
 if __name__ == '__main__':
