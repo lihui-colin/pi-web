@@ -1,11 +1,12 @@
 # DSH 本地补丁
 
-当前核验组合为 **DSH 0.2.2-rc.1、ds-bot 0.2.7、dsh-web-mobile 3.3.0 / 3.3.1、xterm/headless 6.0.0、addon-serialize 0.14.0**。三个入口共用原子写入、备份与回滚函数，未知版本、混合宿主版本或不完整旧补丁会停止。
+当前核验组合为 **DSH 0.2.2-rc.1、ds-bot 0.2.7、dsh-web-mobile 3.3.0 / 3.3.1、xterm/headless 6.0.0、addon-serialize 0.14.0**。四个入口共用原子写入、备份与回滚函数，未知版本、混合宿主版本或不完整旧补丁会停止。
 
 | 入口 | 当前版本的处理 |
 | --- | --- |
 | `ds_bot_apply.py` | 恢复 Bot 0.2.7 输入框、消息操作栏与桌面宽度布局；撤销宿主旧历史插槽和手机 Enter 注入，保留上游历史和提示词实现。 |
 | `dsh_mobile_apply.py` | 保持 mobile 3.3.0 / 3.3.1 文件不变；撤销旧宿主 Enter 注入，保留仅在 mobile 布局生效的页签实际宽度测量。 |
+| `dsh_file_resources_apply.py` | 修复旧手机浏览器解析自定义资源地址时无法匹配文件资源提供器的问题。 |
 | `dsh_terminal_apply.py` | 继续安装前后端配套的重连、剪贴板、键盘协商、查询应答、搜索与链接增强。 |
 
 历史组合 **Bot 0.2.6 + DSH alpha.2**、**mobile 3.2.1 + DSH alpha.2** 仍走独立旧版路径；不会把旧版 UI 补丁套到新包上。终端也支持原有 alpha.2，但前端与控制器必须同版。
@@ -24,7 +25,7 @@
 
 ## 安装与检查
 
-主安装器 `dsh_install.sh` 调用插件安装器 `dsh_plugins_install.sh`；插件安装成功后，后者依次执行 DS Bot 迁移、mobile 兼容处理和 terminal 补丁。首次安装、`--upgrade`、插件已安装而跳过下载时都会执行。mobile 已声明的 `github:` 来源（包括提交固定值）会保留，Codex 插件与 DSH 同版。补丁失败会使安装返回非零退出码；`--dry-run` 只打印计划，不修改文件。
+主安装器 `dsh_install.sh` 调用插件安装器 `dsh_plugins_install.sh`；插件安装成功后，后者依次执行 DS Bot 迁移、mobile 兼容处理、terminal 补丁和文件资源兼容补丁。首次安装、`--upgrade`、插件已安装而跳过下载时都会执行。mobile 已声明的 `github:` 来源（包括提交固定值）会保留，Codex 插件与 DSH 同版。补丁失败会使安装返回非零退出码；`--dry-run` 只打印计划，不修改文件。
 
 ```sh
 bash ds-harness/dsh_install.sh
@@ -59,7 +60,7 @@ python3 -B -m unittest discover -s ds-harness/srcs -p 'test_dsh_terminal_apply.p
 
 ## 校验与生效
 
-每个入口先核验其全部包版本和目标文件，再统一写入。每个目标在同目录暂存后原子替换；原件与清单备份到 `ds-harness/log/patch-backups/`，该入口后续写入失败会回滚已完成的替换。三个入口依次执行，不构成跨入口事务。进程被强制终止或断电后，先检查备份及 `--check` 结果。
+每个入口先核验其全部包版本和目标文件，再统一写入。每个目标在同目录暂存后原子替换；原件与清单备份到 `ds-harness/log/patch-backups/`，该入口后续写入失败会回滚已完成的替换。四个入口依次执行，不构成跨入口事务。进程被强制终止或断电后，先检查备份及 `--check` 结果。
 
 安装器不启停服务。运行实例可能缓存前端 bundle 或服务端模块，安装成功不代表线上已更新；应检查实际 `/plugins/` 响应。需要重载时先检查活跃任务、保存恢复信息，再安排维护，不能默认重启。
 
@@ -146,3 +147,19 @@ Paseo 终端增强：参考 [Paseo 运行时](https://github.com/getpaseo/paseo/
 核对上游提交 [`4e71eb6`](https://github.com/mexiaosqwq/dsh-web-mobile/commit/4e71eb67de7dac9d8b2572757c81e47aa32a32fb)：相较 3.3.0 修复抽屉自身的 `aria-modal` 阻塞滑动手势、清理旧下载按钮及冗余查询，并将 React 标为可选 peer。`layout.css.ts` 和 `composer-enter-newline.ts` 未变，继续复用上游 UI/Enter，保留宿主页签自适应。补丁严格支持 3.3.0 / 3.3.1 与 DSH 0.2.2-rc.1 的组合。
 
 升级时 npm 的 3.3.1 元数据尚不可用，使用 `github:mexiaosqwq/dsh-web-mobile#4e71eb67de7dac9d8b2572757c81e47aa32a32fb` 固定到已核验的 3.3.1 源码，后续插件安装器会保留此来源。安装不自动重启服务。
+
+## 手机文件资源不可用
+
+`dsh_file_resources_apply.py` 严格支持 `@deepseek-ai/dsh-client-resources` 的 `0.2.2-rc.1` 和 `0.2.2-alpha.2`（已核对两版发布包的 `protocolOf` 实现相同）。当前发布包的 `protocolOf()` 仍依赖 `new URL(address).hostname`，部分旧版手机浏览器将 `dsh-resource://file/...` 的主机名解析为空，导致资源状态为 `none`，预览显示 “The file resource service is unavailable.”，不会发起文件读取请求。
+
+依据：[上游讨论 #6217](https://github.com/deepseek-ai/deepseek-harness/discussions/6217)。讨论对 Chromium 版本分界有更正，故不按浏览器 UA 或版本号决定是否修复；现代 URL 解析返回主机名时保留原行为，仅当主机名为空时识别大小写不敏感的标准资源提供器名称。保留原文件地址、会话授权和文件读取接口，不改 mobile 插件。
+
+```sh
+python3 -B ds-harness/srcs/patches/dsh_file_resources_apply.py
+python3 -B ds-harness/srcs/patches/dsh_file_resources_apply.py --check
+python3 -B -m unittest discover -s ds-harness/srcs -p 'test_dsh_file_resources.py'
+```
+
+插件安装器在其余补丁后自动执行。覆盖现代及模拟旧版 URL 解析、大小写协议、非法地址、未知版本拒绝、重复执行和发布检查。安装器不重启服务；手机需要重新加载页面，才能用到更新后的前端代码。
+
+手机触屏页面回归使用真实 DSH 前端与文件读取接口，在仅模拟旧 URL 主机名解析的条件下，修复前仓库 README 显示资源不可用，修复后进入 `text` 状态且无浏览器异常；25228 响应确认包含新补丁。未操作线上服务启停。

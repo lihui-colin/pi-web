@@ -160,3 +160,4 @@ if (( status != 0 )); then exit "$status"; fi
 run python3 -B "$script_dir/srcs/patches/ds_bot_apply.py"
 run python3 -B "$script_dir/srcs/patches/dsh_mobile_apply.py"
 run python3 -B "$script_dir/srcs/patches/dsh_terminal_apply.py"
+run python3 -B "$script_dir/srcs/patches/dsh_file_resources_apply.py"

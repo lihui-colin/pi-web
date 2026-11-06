@@ -55,7 +55,7 @@ bash ds-harness/dsh_plugins_install.sh --upgrade
 
 已有 profile 保留额外插件的启用／停用状态和其他 bundle。默认跳过已完整安装的插件，Codex 插件版本仍与当前 DSH 对齐；普通 npm 插件首次安装和 `--upgrade` 使用 `latest`；mobile 默认使用 `github:mexiaosqwq/dsh-web-mobile`，composer-plus 默认使用 `https://registry.npmjs.org/dsh-composer-plus/-/dsh-composer-plus-1.22.0.tgz`，并分别保留已有的 GitHub 来源（含提交固定值）和 HTTPS 压缩包来源。实际安装版本由包清单与锁文件记录。`--dry-run` 仅预览，不安装包、不写入 profile。独立脚本不安装 DSH、Nginx 或 Magpie，也不启停服务。
 
-插件安装器会自动检查并迁移本地补丁。当前支持 DSH 0.2.2-rc.1、ds-bot 0.2.7 和 mobile 3.3.0 / 3.3.1：Bot 恢复本地输入框、消息操作栏和桌面宽度布局，mobile 保持上游界面；撤销旧宿主历史及 Enter 注入，保留页签宽度与终端增强；mobile 已指定的 GitHub 来源不会在升级时换成 npm 来源。参见 [补丁说明](srcs/patches/README.md)。
+插件安装器会自动检查并迁移本地补丁。当前支持 DSH 0.2.2-rc.1、ds-bot 0.2.7 和 mobile 3.3.0 / 3.3.1：Bot 恢复本地输入框、消息操作栏和桌面宽度布局，mobile 保持上游界面；撤销旧宿主历史及 Enter 注入，保留页签宽度与终端增强，并修复旧手机浏览器文件资源地址解析；mobile 已指定的 GitHub 来源不会在升级时换成 npm 来源。参见 [补丁说明](srcs/patches/README.md)。
 
 Nginx 固定安装到 `ds-harness/data/.local/nginx/sbin/nginx`；即使系统已有 Nginx，也不会复用系统版本。`dsh_nginx_install.sh` 使用 [Nginx 官方构建流程](https://nginx.org/en/docs/configure.html)，固定 Nginx 1.30.6、OpenSSL 3.5.9、PCRE2 10.49、zlib 1.3.2，下载后先校验 SHA-256。三项库静态链接，不再依赖容器中额外安装的共享库；编译成功、版本和 SSL 模块检查通过后才发布完整安装目录。
 

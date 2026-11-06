@@ -37,6 +37,7 @@ def copy_installers(root):
     (project / 'srcs/patches/ds_bot_apply.py').write_text('print("PATCH_BUNDLE_APPLIED")\n')
     (project / 'srcs/patches/dsh_mobile_apply.py').write_text('print("MOBILE_PATCH_APPLIED")\n')
     (project / 'srcs/patches/dsh_terminal_apply.py').write_text('print("TERMINAL_PATCH_APPLIED")\n')
+    (project / 'srcs/patches/dsh_file_resources_apply.py').write_text('print("FILE_RESOURCES_PATCH_APPLIED")\n')
     return project
 
 
