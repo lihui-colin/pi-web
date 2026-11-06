@@ -217,14 +217,15 @@ MOBILE_RAIL_FIXED = MOBILE_RAIL_CSS + '''
 .bt-rail .bt-rail-top{align-self:stretch}
 '''
 
-def patch_mobile(text):
+def patch_mobile(text, react_alias='import_react17'):
     for old, new in (
         (MOBILE_GRID, MOBILE_GRID_FIXED), (MOBILE_TRACK, MOBILE_TRACK_FIXED),
         (MOBILE_GRID_FIXED, MOBILE_GRID_FIXED + MOBILE_PHONE_CSS),
         (MOBILE_GROUP_OLD, MOBILE_GROUP_LEFT), (MOBILE_META_CSS, MOBILE_META_FIXED),
         (MOBILE_RAIL_CSS, MOBILE_RAIL_FIXED), (MOBILE_COMPOSER, MOBILE_COMPOSER + MOBILE_COMPOSER_CSS),
     ):
-        text = replace_once(text, old, new)
+        text = replace_once(text, old.replace('import_react17', react_alias),
+                            new.replace('import_react17', react_alias))
     return text
 
 
@@ -299,14 +300,15 @@ MESSAGE_ACTION_REPLACEMENTS = [
 ]
 
 
-def patch_presentation(text):
+def patch_presentation(text, react_alias='import_react17'):
     for old, new in [
         (WIDTH_HANDLES, WIDTH_HANDLES_FIXED), (WIDTH_BODY, WIDTH_BODY_FIXED),
         (WIDTH_COMPOSER, WIDTH_COMPOSER_FIXED), (ALIGN_ANCHOR, ALIGN_ANCHOR + ALIGN_CSS),
         (ALIGN_CSS, ALIGN_CSS + TOUCH_ACTIONS_CSS),
         *MESSAGE_ACTION_REPLACEMENTS,
     ]:
-        text = replace_once(text, old, new)
+        text = replace_once(text, old.replace('import_react17', react_alias),
+                            new.replace('import_react17', react_alias))
     return text
 
 
@@ -409,9 +411,13 @@ def plan_changes(bot=None, host=None):
         ('@deepseek-ai/dsh-client-ui-chat', '0.2.2-rc.1'),
         ('@deepseek-ai/dsh-client-ui-conversation', '0.2.2-rc.1'),
     ]:
-        # Bot 0.2.7 uses its own current history UI. Do not inject 0.2.6 helpers,
-        # layout or prompt edits into it. Remove the matching orphan host hooks.
-        changes = []
+        # Bot 0.2.7 owns history and prompt handling, but still ships the fixed
+        # width / inline composer / More-menu layouts. Its message components
+        # use import_react19; keep the exact version gate and anchor validation.
+        bot_client = bot / 'client.js'
+        original = bot_client.read_text()
+        fixed = patch_presentation(patch_mobile(original, 'import_react19'), 'import_react19')
+        changes = [(bot_client, original, fixed)]
         for path, replacements in (
             (host / 'dsh-client-ui-chat/lib/client.js', HISTORY_CHAT_REPLACEMENTS),
             (host / 'dsh-client-ui-conversation/lib/client.js', HISTORY_CONVERSATION_REPLACEMENTS),

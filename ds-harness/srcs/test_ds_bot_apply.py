@@ -120,14 +120,28 @@ class CurrentPatchTests(unittest.TestCase):
         ):
             (directory / 'package.json').write_text(json.dumps({'name': name, 'version': version}))
 
-    def test_current_upstream_is_unchanged(self):
+        client = self.bot / 'client.js'
+        client.write_text(client.read_text().replace('import_react17', 'import_react19'))
+        self.sources[client] = client.read_text()
+
+    def test_current_layout_installs_and_preserves_history_and_prompt(self):
+        self.run_cli('--check', status=1)
+        self.run_cli()
+        client = self.bot / 'client.js'
+        self.assertIn(p.MOBILE_COMPOSER_CSS, client.read_text())
+        self.assertIn(p.WIDTH_BODY_FIXED, client.read_text())
+        self.assertIn(p.ALIGN_CSS, client.read_text())
+        self.assertIn(p.DIRECT_BUTTONS.replace('import_react17', 'import_react19'), client.read_text())
+        self.assertNotIn(p.HISTORY_INSERT, client.read_text())
+        self.assertEqual((self.bot / 'src/host/tools.js').read_text(), p.PROMPT_OLD)
+        self.sources[client] = client.read_text()
         self.run_cli('--check')
         before = {path: path.stat().st_mtime_ns for path in self.sources}
         self.run_cli()
         self.assertEqual(self.sources, {path: path.read_text() for path in self.sources})
         self.assertEqual(before, {path: path.stat().st_mtime_ns for path in self.sources})
 
-    def test_retires_installed_history_and_enter_without_touching_tabs_or_bot(self):
+    def test_retires_history_and_enter_preserving_tabs_and_installing_layout(self):
         chat = self.host / 'dsh-client-ui-chat/lib/client.js'
         conversation = self.host / 'dsh-client-ui-conversation/lib/client.js'
         native = mobile.patch_view_tabs(conversation.read_text())
@@ -137,7 +151,7 @@ class CurrentPatchTests(unittest.TestCase):
         self.run_cli()
         self.assertEqual(chat.read_text(), self.sources[chat])
         self.assertEqual(conversation.read_text(), native)
-        self.assertEqual((self.bot / 'client.js').read_text(), self.sources[self.bot / 'client.js'])
+        self.assertIn(p.ALIGN_CSS, (self.bot / 'client.js').read_text())
         self.run_cli('--check')
         before = {path: path.stat().st_mtime_ns for path in self.sources}
         self.run_cli()
@@ -150,6 +164,15 @@ class CurrentPatchTests(unittest.TestCase):
         before = {path: path.read_text() for path in self.sources}
         self.run_cli(status=1)
         self.assertEqual(before, {path: path.read_text() for path in self.sources})
+
+    def test_unknown_current_layout_prevents_host_migration(self):
+        client = self.bot / 'client.js'
+        client.write_text(client.read_text().replace(p.WIDTH_HANDLES, 'unknown width controls'))
+        conversation = self.host / 'dsh-client-ui-conversation/lib/client.js'
+        conversation.write_text(p.patch_composer(conversation.read_text()))
+        before = {path: path.read_bytes() for path in self.sources}
+        self.run_cli(status=1)
+        self.assertEqual(before, {path: path.read_bytes() for path in self.sources})
 
     def test_mixed_host_versions_are_rejected(self):
         (self.host / 'dsh-client-ui-chat/package.json').write_text(json.dumps({
