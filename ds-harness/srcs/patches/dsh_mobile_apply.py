@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Apply reviewed mobile header and sidebar adjustments."""
+"""Keep mobile 3.3.0 upstream UI and apply the scoped host tab-width fix.
+
+The old plugin UI transforms only apply to the separate 3.2.1 / alpha.2 pair.
+"""
 import argparse
 import json
 import shutil
 from pathlib import Path
 if __package__:
-    from .ds_bot_apply import publish, replace_once
+    from .ds_bot_apply import publish, replace_once, retire_composer
 else:
-    from ds_bot_apply import publish, replace_once
+    from ds_bot_apply import publish, replace_once, retire_composer
 
 OLD = """ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
         name: 'conversation.session.header.actions',
@@ -213,6 +216,19 @@ def plan_changes(package=None, host=None):
             raise ValueError('dsh executable not found')
         host = Path(executable).resolve().parents[1] / 'node_modules/@deepseek-ai'
     conversation = Path(host) / 'dsh-client-ui-conversation'
+    mobile_manifest = json.loads((package / 'package.json').read_text())
+    host_manifest = json.loads((conversation / 'package.json').read_text())
+    if (mobile_manifest.get('name'), mobile_manifest.get('version'),
+            host_manifest.get('name'), host_manifest.get('version')) == (
+            'dsh-web-mobile', '3.3.0', '@deepseek-ai/dsh-client-ui-conversation', '0.2.2-rc.1'):
+        plugin_path = package / 'lib/client.js'
+        plugin = plugin_path.read_text()
+        path = conversation / 'lib/client.js'
+        original = path.read_text()
+        # The mobile package stays byte-identical to upstream. Its own Enter
+        # hook yields modifier shortcuts and popup selections to the host.
+        fixed = patch_view_tabs(retire_composer(original))
+        return [(plugin_path, plugin, plugin), (path, original, fixed)]
     # Validate and prepare both bundles before publishing either one.
     changes = []
     for directory, name, version, transform in (
@@ -241,7 +257,7 @@ def main():
             raise SystemExit('Mobile fixes missing: ' + ', '.join(pending))
     else:
         publish(changes)
-    print('Mobile header and adaptive view tabs patches verified; no service restarted.')
+    print('Reviewed mobile UI / host adaptive tabs state verified; no service restarted.')
 
 
 if __name__ == '__main__':

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# 安装当前团队使用的 DSH 与插件，DSH/第三方插件使用 latest，官方 Codex 插件与 DSH 同版。
+# 安装当前团队使用的 DSH 与插件，DSH/普通 npm 插件使用 latest，mobile/composer 来源由插件安装器管理，官方 Codex 插件与 DSH 同版。
 # 适用于 Linux/macOS；需要 Node.js >=24、npm、curl 和 sh。
 # 用法：bash ds-harness/dsh_install.sh [--dry-run] [--upgrade]
-# HTTPS 证书由srcs/dsh_cert.sh 单独生成。
+# HTTPS 证书由dsh_cert.sh 单独生成。
 # 数据固定放在脚本同级 data/.dsh，共享 agent 配置放在 data/.agents。
 # 不启动/停止服务，不迁移 DSH 会话数据，不写入 API Key。
 set -euo pipefail
@@ -20,10 +20,11 @@ while (( $# )); do
                 '前置：Node.js >=24、npm、curl、sh，npm 全局目录需要当前用户可写。' \
                 '默认补装缺失程序和插件；--upgrade 更新 DSH、pnpm、Magpie 和插件。' \
                 'Nginx 及静态依赖安装到本目录 data/.local/nginx；首次构建需要 cc、make、perl、tar、Python 3。' \
-                '不会安装系统包或使用系统 Nginx；已有本地 Nginx 只检查版本 >=1.24 和 HTTP SSL 模块。' \
-                'DSH/第三方插件使用 latest，官方 Codex 插件与 DSH 同版；保留已有额外插件启用状态，新 profile 默认启用八个。' \
+                'Linux 缺少 xdg-open 时安装系统包 xdg-utils（非 root 使用 sudo）；macOS 使用系统 open。' \
+                '不使用系统 Nginx；已有本地 Nginx 只检查版本 >=1.24 和 HTTP SSL 模块。' \
+                'DSH/普通 npm 插件使用 latest，mobile/composer 来源由插件安装器管理，官方 Codex 插件与 DSH 同版；保留已有额外插件启用状态，新 profile 默认启用八个。' \
                 '安装结束时创建 data/dsh.conf：已有配置保留，否则从控制台输入 IP 和端口。' \
-                'HTTPS 证书请单独运行 bash ds-harness/srcs/dsh_cert.sh 创建。' \
+                'HTTPS 证书请单独运行 bash ds-harness/dsh_cert.sh 创建。' \
                 '数据固定放在脚本同级 data/.dsh，共享 agent 配置放在 data/.agents。' \
                 'Magpie 安装最多尝试 3 次；支持 MAGPIE_PROXY 代理及 MAGPIE_MIRROR 镜像前缀。' \
                 '请在新机器或目标 DSH 已停机时安装；本脚本不启停服务。' \
@@ -54,6 +55,39 @@ run() {
         "$@"
     fi
 }
+
+ensure_xdg_open() {
+    [[ "$(uname -s)" == Linux ]] || return 0
+    if command -v xdg-open >/dev/null 2>&1; then
+        printf '%s\n' '已存在 xdg-open，跳过安装。'
+        return 0
+    fi
+    local -a privilege=() package_command=()
+    if (( EUID != 0 )); then
+        if ! command -v sudo >/dev/null 2>&1; then
+            printf '%s\n' '缺少 xdg-open；请由管理员安装 xdg-utils 后重试（当前无 sudo）。' >&2
+            return 1
+        fi
+        privilege=(sudo)
+    fi
+    if command -v apt-get >/dev/null 2>&1; then
+        package_command=(apt-get install -y --no-install-recommends xdg-utils)
+    elif command -v dnf >/dev/null 2>&1; then
+        package_command=(dnf install -y xdg-utils)
+    elif command -v yum >/dev/null 2>&1; then
+        package_command=(yum install -y xdg-utils)
+    else
+        printf '%s\n' '缺少 xdg-open；请使用系统包管理器安装 xdg-utils 后重试。' >&2
+        return 1
+    fi
+    run "${privilege[@]}" "${package_command[@]}"
+    if ! "$dry_run" && ! command -v xdg-open >/dev/null 2>&1; then
+        printf '%s\n' 'xdg-utils 安装后仍找不到 xdg-open，请检查 PATH。' >&2
+        return 1
+    fi
+}
+
+ensure_xdg_open
 
 # 保留官方安装器的平台选择和 SHA-256 校验；重试覆盖其内部二进制下载。
 install_magpie() (
@@ -86,13 +120,13 @@ install_magpie() (
 
 # 本地依赖安装器不使用 PATH 中的系统 Nginx。
 if "$dry_run"; then
-    bash "$script_dir/srcs/dsh_nginx_install.sh" --dry-run
+    bash "$script_dir/dsh_nginx_install.sh" --dry-run
 else
-    bash "$script_dir/srcs/dsh_nginx_install.sh"
+    bash "$script_dir/dsh_nginx_install.sh"
 fi
 
 printf '目标数据目录：%s\n' "$DSH_HOME"
-printf '%s\n' 'DSH/第三方插件使用 latest，官方 Codex 插件与 DSH 同版；不会启动或重启服务。'
+printf '%s\n' 'DSH/普通 npm 插件使用 latest，mobile/composer 来源由插件安装器管理，官方 Codex 插件与 DSH 同版；不会启动或重启服务。'
 npm_packages=()
 dsh_will_install=false
 for bin in dsh pnpm; do
@@ -143,7 +177,7 @@ if "$dry_run"; then
     fi
 fi
 if "$upgrade"; then plugin_args+=(--upgrade); fi
-bash "$script_dir/srcs/dsh_plugins_install.sh" "${plugin_args[@]}"
+bash "$script_dir/dsh_plugins_install.sh" "${plugin_args[@]}"
 
 # 官方实验功能随 DSH 分发，不另行固定旧版依赖。
 # 补齐内置 bundle，并保留额外插件启用状态及其他已有 bundle 配置。
@@ -223,7 +257,7 @@ else
         '安装完成，未启动或重启任何服务。' \
         '请另外恢复 DSH 用户数据、模型配置、magpie 账号与密钥、共享 Skills 和项目文件。' \
         'magpie 支持 magpie backup / magpie restore 迁移加密备份。' \
-        'HTTPS 证书请另行运行 bash ds-harness/srcs/dsh_cert.sh，启动时按 server_ip 自动选择 data/tls/<地址>/。' \
+        'HTTPS 证书请另行运行 bash ds-harness/dsh_cert.sh，启动时按 server_ip 自动选择 data/tls/<地址>/。' \
         '配置完成后可运行 magpie serve，并使用项目 HTTPS 启动脚本启动 DSH。' \
         '直接启动 dsh web 时，请传 --tls-cert <配置的证书路径> --tls-key <配置的私钥路径>。' \
         '客户端需信任本地 CA；网页语音还需要麦克风权限及语音服务配置。' \

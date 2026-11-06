@@ -13,9 +13,11 @@ ROOT = Path(__file__).resolve().parent
 PLUGINS = [
     '@deepseek-ai/dsh-subagent-codex', 'ds-bot', 'dsh-web-mobile',
     'dshmarket', 'dsh-ide-git', 'dsh-sidebar-enhancement', 'dsh-sidebar-plus',
-    '@huanlin/dsh-plugin-input-history', '@xbzbing/dsh-git-panel',
+    '@huanlin/dsh-plugin-input-history', '@xbzbing/dsh-git-panel', 'dsh-composer-plus',
 ]
 VERSION = '0.2.1-rc.2'
+MOBILE_SOURCE = 'github:mexiaosqwq/dsh-web-mobile'
+COMPOSER_SOURCE = 'https://registry.npmjs.org/dsh-composer-plus/-/dsh-composer-plus-1.22.0.tgz'
 FAKE_DSH = r'''import json, os, sys
 from pathlib import Path
 if sys.argv[1:] == ['--version']:
@@ -31,9 +33,11 @@ pkg = json.loads(manifest.read_text()) if manifest.exists() else {
     'private': True, 'dsh': {'profile': {'bundles': ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']}}}
 bundles = pkg.setdefault('dsh', {}).setdefault('profile', {}).setdefault('bundles', [])
 for spec in sys.argv[7:]:
-    name, version = spec.rsplit('@', 1)
-    if version == 'latest': version = '1.2.3'
-    pkg.setdefault('dependencies', {})[name] = version
+    name, declared = spec.rsplit('@', 1)
+    version = ('3.3.0' if declared.startswith('github:') else
+               '1.22.0' if declared.startswith('https:') else
+               '1.2.3' if declared == 'latest' else declared)
+    pkg.setdefault('dependencies', {})[name] = declared
     target = dir / 'node_modules' / name / 'package.json'
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps({'name': name, 'version': version}))
@@ -111,17 +115,20 @@ class PluginInstallerTests(unittest.TestCase):
         return {str(p.relative_to(self.root)): (p.read_bytes(), p.stat().st_mtime_ns)
                 for p in self.root.rglob('*') if p.is_file()}
 
-    def test_new_profile_installs_nine_enables_eight(self):
+    def test_new_profile_installs_ten_enables_eight(self):
         output = self.run_script()
         self.assertIn("PATCH_BUNDLE_APPLIED", output)
         self.assertIn("TERMINAL_PATCH_APPLIED", output)
         pkg = self.package()
         self.assertEqual(set(pkg['dependencies']), set(PLUGINS))
         self.assertEqual(set(pkg['dsh']['profile']['bundles']) & set(PLUGINS),
-                         set(PLUGINS) - {'dsh-ide-git'})
+                         set(PLUGINS) - {'dsh-ide-git', '@huanlin/dsh-plugin-input-history'})
         self.assertIn('@deepseek-ai/dsh-base', pkg['dsh']['profile']['bundles'])
         self.assertEqual(self.calls()[0][6:],
-                         [name + '@' + (VERSION if name == PLUGINS[0] else 'latest') for name in PLUGINS])
+                         [name + '@' + (VERSION if name == PLUGINS[0] else
+                          MOBILE_SOURCE if name == 'dsh-web-mobile' else
+                          COMPOSER_SOURCE if name == 'dsh-composer-plus' else 'latest')
+                          for name in PLUGINS])
 
     def test_installed_is_idempotent_without_writes(self):
         self.seed(['custom', 'dsh-ide-git'])
@@ -136,7 +143,7 @@ class PluginInstallerTests(unittest.TestCase):
         self.assertIn('PATCH_BUNDLE_APPLIED', self.run_script('--upgrade'))
         self.assertEqual(self.package()['dsh']['profile']['bundles'], bundles)
         self.assertEqual(self.package()['dsh']['profile']['other'], {'keep': True})
-        self.assertEqual(len(self.calls()[0][6:]), 9)
+        self.assertEqual(len(self.calls()[0][6:]), 10)
 
     def test_existing_profile_without_bundles_keeps_all_disabled(self):
         self.seed()
@@ -150,7 +157,7 @@ class PluginInstallerTests(unittest.TestCase):
         missing.unlink()
         self.env['FAKE_VERSION'] = '0.2.2'
         self.run_script()
-        self.assertEqual(self.calls()[0][6:], [PLUGINS[0] + '@0.2.2', PLUGINS[-1] + '@latest'])
+        self.assertEqual(self.calls()[0][6:], [PLUGINS[0] + '@0.2.2', PLUGINS[-1] + '@' + COMPOSER_SOURCE])
         self.assertEqual(self.package()['dsh']['profile']['bundles'], ['custom'])
 
     def test_dry_run_no_writes_existing_or_upgrade(self):
@@ -206,6 +213,32 @@ class PluginInstallerTests(unittest.TestCase):
         for parent in (False, True):
             self.run_script(parent=parent, status=29)
         self.assertFalse((self.root / 'data/dsh.conf').exists())
+
+    def test_upgrade_preserves_explicit_mobile_repository_and_pin(self):
+        self.seed(['custom', 'dsh-web-mobile'])
+        pkg = self.package()
+        source = 'github:mexiaosqwq/dsh-web-mobile#522db94f552d89934f814853ad10c96f31eba6da'
+        pkg['dependencies']['dsh-web-mobile'] = source
+        self.manifest.write_text(json.dumps(pkg))
+        self.env['FAKE_VERSION'] = '0.2.2-rc.1'
+        self.run_script('--upgrade')
+        self.assertEqual(self.package()['dependencies']['dsh-web-mobile'], source)
+        self.assertEqual(self.package()['dependencies']['@deepseek-ai/dsh-subagent-codex'], '0.2.2-rc.1')
+        self.assertEqual(self.package()['dsh']['profile']['bundles'], ['custom', 'dsh-web-mobile'])
+        calls = self.env['CALLS']
+        self.assertIn('dsh-web-mobile@' + source, self.calls()[0][6:])
+        self.assertNotIn('dsh-web-mobile@latest', Path(calls).read_text())
+
+    def test_upgrade_preserves_composer_tarball_and_disabled_state(self):
+        self.seed(['custom'])
+        pkg = self.package()
+        source = 'https://registry.npmjs.org/dsh-composer-plus/-/dsh-composer-plus-1.21.0.tgz'
+        pkg['dependencies']['dsh-composer-plus'] = source
+        self.manifest.write_text(json.dumps(pkg))
+        self.run_script('--upgrade')
+        self.assertIn('dsh-composer-plus@' + source, self.calls()[0][6:])
+        self.assertEqual(self.package()['dependencies']['dsh-composer-plus'], source)
+        self.assertEqual(self.package()['dsh']['profile']['bundles'], ['custom'])
 
     def test_invalid_version_and_bad_arguments_do_not_write(self):
         before = self.snapshot()

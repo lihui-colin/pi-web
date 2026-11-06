@@ -21,6 +21,28 @@ UPSTREAM = '''(event) => {
 
 
 class ComposerEnterTests(unittest.TestCase):
+    def test_current_migration_restores_shortcuts_and_popup_arbitration(self):
+        restored = p.retire_composer(p.patch_composer(UPSTREAM))
+        self.assertEqual(restored, UPSTREAM)
+        self.assertEqual(p.retire_composer(restored), restored)
+        script = r'''
+const assert = require('node:assert/strict');
+let calls;
+const recentlyComposing = () => false;
+const isComposingEvent = event => Boolean(event.isComposing);
+const handlers = {arbitrate: () => {calls.arbitrate++; return calls.popup ? 'consumed' : 'pass';},
+  canSubmit: () => true, submit: urgent => {calls.submit++; calls.urgent = urgent;}};
+const enter = eval('(' + CALLBACK + ')');
+for (const flags of [{ctrlKey:true}, {metaKey:true}, {popup:true}, {isComposing:true}, {shiftKey:true}]) {
+  calls = {arbitrate:0, submit:0, popup:Boolean(flags.popup)};
+  enter({getModifierState: () => false, preventDefault: () => {}, ...flags});
+  assert.equal(calls.submit, flags.ctrlKey || flags.metaKey ? 1 : 0);
+  assert.equal(calls.arbitrate, flags.shiftKey || flags.isComposing ? 0 : 1);
+  if (flags.ctrlKey || flags.metaKey) assert.equal(calls.urgent, true);
+}
+'''.replace('CALLBACK', json.dumps(restored))
+        subprocess.run(['node', '-e', script], check=True, capture_output=True, text=True)
+
     def test_idempotent_and_unknown_bundle_rejected(self):
         fixed = p.patch_composer(UPSTREAM)
         self.assertEqual(p.patch_composer(fixed), fixed)

@@ -1,6 +1,6 @@
 # DeepSeek Harness
 
-顶层保留主安装、服务管理和代理配置脚本；其他辅助脚本、源码、补丁、测试与配置模板位于 `srcs/`，运行数据、依赖和日志仍使用服务目录下原有位置。
+顶层保留主安装、插件安装、Nginx 安装、证书生成、服务管理和代理配置脚本；其他辅助脚本、源码、补丁、测试与配置模板位于 `srcs/`，运行数据、依赖和日志仍使用服务目录下原有位置。
 
 本目录管理 `magpie → DSH 回环后端 → Nginx HTTPS 入口`。运行需要 Linux ≥5.3（允许 pidfd 系统调用）、Bash、Node.js ≥24、npm、curl、Python ≥3.10、OpenSSL 和 `flock`（util-linux）命令行工具。启停前检查 pidfd 能力；Python 未提供包装时优先使用 libc，x86_64/aarch64 还支持原生系统调用。Nginx 由安装器构建到本目录 `data/.local/nginx/`，启动器固定使用这份程序，运行文件也保存在项目内。
 
@@ -11,7 +11,7 @@
 ```bash
 bash ds-harness/dsh_install.sh
 # 安装结束后按提示输入 IP 和端口，创建 data/dsh.conf
-bash ds-harness/srcs/dsh_cert.sh
+bash ds-harness/dsh_cert.sh
 ./ds-harness/dsh_web_run.sh start
 ```
 
@@ -30,15 +30,15 @@ bash ds-harness/dsh_install.sh --upgrade
 
 默认复用已有的 DSH、pnpm 和 magpie，只补装缺失插件；`--upgrade` 更新 DSH、pnpm、Magpie 和插件。官方 Codex 插件版本与 DSH 对齐，保留上游兼容性检查，同版包缺失或不兼容时停止安装。安装器在安装结束时检查 `data/dsh.conf`：存在则原样保留；只有旧位置 `dsh.conf` 时复制到新位置并保留原文件；两处都没有时提示输入 IPv4/IPv6 地址及 HTTPS 端口（回车默认 `25228`）。无效输入会重新询问，输入结束或中断时不创建半成品；新文件权限为 `600`。`--dry-run` 不询问、不创建配置。安装器不生成证书、不启停服务；安装或更新应在目标 DSH 停机时执行。
 
-额外插件由独立脚本 `srcs/dsh_plugins_install.sh` 管理，主安装器会调用它。已有 DSH 环境只安装或更新插件时，可以单独运行：
+额外插件由独立脚本 `dsh_plugins_install.sh` 管理，主安装器会调用它。已有 DSH 环境只安装或更新插件时，可以单独运行：
 
 ```bash
-bash ds-harness/srcs/dsh_plugins_install.sh --dry-run
-bash ds-harness/srcs/dsh_plugins_install.sh
-bash ds-harness/srcs/dsh_plugins_install.sh --upgrade
+bash ds-harness/dsh_plugins_install.sh --dry-run
+bash ds-harness/dsh_plugins_install.sh
+bash ds-harness/dsh_plugins_install.sh --upgrade
 ```
 
-脚本管理以下 9 个额外安装包：
+脚本管理以下 10 个额外安装包：
 
 | 插件 | 新 profile 默认状态 |
 | --- | --- |
@@ -49,19 +49,20 @@ bash ds-harness/srcs/dsh_plugins_install.sh --upgrade
 | `@xbzbing/dsh-git-panel` | 启用 |
 | `dsh-sidebar-enhancement` | 启用 |
 | `dsh-sidebar-plus` | 启用 |
-| `@huanlin/dsh-plugin-input-history` | 启用 |
+| `@huanlin/dsh-plugin-input-history` | 仅安装，不启用 |
+| `dsh-composer-plus` | 启用 |
 | `dsh-ide-git` | 仅安装，不启用 |
 
-已有 profile 保留额外插件的启用／停用状态和其他 bundle。默认跳过已完整安装的插件，Codex 插件版本仍与当前 DSH 对齐；第三方插件首次安装和 `--upgrade` 使用 `latest`，实际安装版本由包清单与锁文件记录。`--dry-run` 仅预览，不安装包、不写入 profile。独立脚本不安装 DSH、Nginx 或 Magpie，也不启停服务。
+已有 profile 保留额外插件的启用／停用状态和其他 bundle。默认跳过已完整安装的插件，Codex 插件版本仍与当前 DSH 对齐；普通 npm 插件首次安装和 `--upgrade` 使用 `latest`；mobile 默认使用 `github:mexiaosqwq/dsh-web-mobile`，composer-plus 默认使用 `https://registry.npmjs.org/dsh-composer-plus/-/dsh-composer-plus-1.22.0.tgz`，并分别保留已有的 GitHub 来源（含提交固定值）和 HTTPS 压缩包来源。实际安装版本由包清单与锁文件记录。`--dry-run` 仅预览，不安装包、不写入 profile。独立脚本不安装 DSH、Nginx 或 Magpie，也不启停服务。
 
-`ds-bot` 的本地界面补丁仍需单独应用，插件安装器不会自动执行。重新安装或更新插件可能覆盖补丁；当前补丁仅适用于 0.2.4，其他版本须重新检查兼容性。参见 [补丁说明](srcs/patches/README.md)。
+插件安装器会自动检查并迁移本地补丁。当前支持 DSH 0.2.2-rc.1、ds-bot 0.2.7 和 mobile 3.3.0：新版 Bot/mobile 保持上游界面，撤销旧宿主历史及 Enter 注入，保留页签宽度与终端增强；mobile 已指定的 GitHub 来源不会在升级时换成 npm 来源。参见 [补丁说明](srcs/patches/README.md)。
 
-Nginx 固定安装到 `ds-harness/data/.local/nginx/sbin/nginx`；即使系统已有 Nginx，也不会复用系统版本。`srcs/dsh_nginx_install.sh` 使用 [Nginx 官方构建流程](https://nginx.org/en/docs/configure.html)，固定 Nginx 1.30.6、OpenSSL 3.5.9、PCRE2 10.49、zlib 1.3.2，下载后先校验 SHA-256。三项库静态链接，不再依赖容器中额外安装的共享库；编译成功、版本和 SSL 模块检查通过后才发布完整安装目录。
+Nginx 固定安装到 `ds-harness/data/.local/nginx/sbin/nginx`；即使系统已有 Nginx，也不会复用系统版本。`dsh_nginx_install.sh` 使用 [Nginx 官方构建流程](https://nginx.org/en/docs/configure.html)，固定 Nginx 1.30.6、OpenSSL 3.5.9、PCRE2 10.49、zlib 1.3.2，下载后先校验 SHA-256。三项库静态链接，不再依赖容器中额外安装的共享库；编译成功、版本和 SSL 模块检查通过后才发布完整安装目录。
 
 首次构建需要 `cc`、`make`、`perl`、`curl`、`tar`、Python 3，默认 4 个并行任务，可用 `DSH_NGINX_BUILD_JOBS` 调整。缺少构建工具时直接报错；不使用 sudo、APT 或 Homebrew，不写系统目录、不启停服务。已有本地 Nginx 不随 `--upgrade` 更新，只检查版本 ≥1.24 和 HTTP SSL 模块；`--dry-run` 不下载、不编译、不创建目录。只补装 Nginx 时可单独执行：
 
 ```bash
-bash ds-harness/srcs/dsh_nginx_install.sh
+bash ds-harness/dsh_nginx_install.sh
 ```
 
 容器部署需把项目目录或父目录放在持久卷中，并保留隐藏目录 `data/.local/`。在相同架构、兼容 glibc/动态加载器的基础镜像中，容器重建后可直接复用本地二进制；切换不兼容的基础镜像需重新构建。安装成功后仅保留 `data/.local/nginx/sbin/nginx` 和 `licenses/`，清理默认配置、示例页面、默认日志目录及本次源码下载缓存；已有有效安装再次运行安装器也会执行清理，`--dry-run` 只预览。构建失败时保留已下载源码供重试。`data/.local/` 不入 Git，重新克隆仓库时需运行安装器。
@@ -74,13 +75,13 @@ MAGPIE_PROXY=http://<代理主机>:<端口> bash ds-harness/dsh_install.sh
 
 代理地址中的 `127.0.0.1` 指服务器自身。官方 `MAGPIE_MIRROR` 仅替换 GitHub 二进制下载地址，无法解决 `usemagpie.ai` 官网不可达的问题。
 
-统一补丁会在主安装／插件安装完成后自动应用，包含 ds-bot 历史、布局、提示词、普通 DSH 共用输入框以及终端重连修复；当前仅支持 ds-bot 0.2.6 与 DSH 0.2.2-alpha.2。版本不匹配或补丁失败会中止安装。详见 [统一补丁说明](srcs/patches/README.md)。
+兼容处理会在主安装／插件安装完成后自动执行。当前组合不再注入旧版 Bot/mobile 的 UI 或手机 Enter 逻辑；Ctrl/Cmd+Enter、候选菜单和手机换行沿用上游。旧版 alpha.2 组合保留独立适配路径；未知或混合版本、迁移匹配失败会中止安装。详见 [统一补丁说明](srcs/patches/README.md)。
 
 ## 证书
 
 ```bash
-bash ds-harness/srcs/dsh_cert.sh --dry-run
-bash ds-harness/srcs/dsh_cert.sh --config /path/to/dsh.conf --tls-dir /path/to/tls --tls-host extra.example.com
+bash ds-harness/dsh_cert.sh --dry-run
+bash ds-harness/dsh_cert.sh --config /path/to/dsh.conf --tls-dir /path/to/tls --tls-host extra.example.com
 ```
 
 证书脚本只生成或校验证书，不修改配置、不启停服务。默认读取 `data/dsh.conf`，输出到 `data/tls/<server_ip>/`；自定义 `--config` 时默认输出到该配置所在目录的 `tls/<server_ip>/`。`--tls-dir` 改变输出根目录，`--tls-host` 添加额外 SAN。自定义导出后，启动前仍需将证书部署到本项目 `data/tls/<地址>/`。旧部署可将脚本同级的 `tls/` 整体移到 `data/tls/`，保留原证书、私钥和权限，无需重新签发。
@@ -149,6 +150,8 @@ test ! -e ds-harness/data/.agents && cp -a "$HOME/.agents" ds-harness/data/.agen
 
 每个 PID 配有 `.identity` 记录，校验启动时间、系统启动标识、完整参数、用户和实例随机标识；发信号使用 pidfd 固定进程，避免 PID 复用误停。缺少或不匹配身份记录的存活进程会被拒绝接管，原文件保留。升级旧实例时，须安排独立维护，核验并停止旧进程后再用新版启动；不要删除 PID 或身份文件绕过检查。
 
+首次登记进程必须读取环境中的实例随机标识。已登记进程的 `/proc/<PID>/environ` 若因权限限制不可读，可在当前用户、PID、启动时间、系统启动标识及完整参数全部匹配时使用已有身份记录；仍使用 pidfd 核验并发送信号，不绕过实际发信号的权限检查。
+
 新后端启动前清空旧 token；就绪记录与当前进程身份及 token 摘要绑定。捕获超时会保留后端，重试 `start` 继续等待同一进程，未就绪时不会启动代理。后台只捕获一次匹配本实例地址的原生启动 URL，并脱敏日志中的 token（包括编码参数名）。捕获、就绪写入和 token 清理使用 `log/.process-state.lock` 协调；该锁文件同样应保留。
 
 检查 Magpie 网关：
@@ -163,7 +166,7 @@ magpie healthcheck
 ./ds-harness/dsh_web_run.sh stop
 ```
 
-停止顺序为入口代理、DSH、Magpie，完成后清除启动 token。配置保存在 `data/dsh.conf`；启动器仅在新配置不存在时兼容读取旧位置的 `dsh.conf`，安装器会保留其副本到新位置。日志、PID、身份和 token 就绪记录统一放在 `log/`（权限 `700`，排除 Git）；配置更新在配置所在目录创建私有临时文件并原子替换。`log/dsh-token-proxy.pid` 记录 Nginx 监督进程。
+停止顺序为入口代理、DSH、Magpie；单个组件停止失败时仍继续尝试其余组件，最后汇总失败项并返回非零状态。已退出进程视为已停止；全部停止成功且确认 DSH 后端已退出后清除启动 token；有停止失败或身份不明时保留 token 及就绪记录供排查。缺失或不匹配的身份记录不会被绕过，也不会按进程名称批量杀死其他实例。配置保存在 `data/dsh.conf`；启动器仅在新配置不存在时兼容读取旧位置的 `dsh.conf`，安装器会保留其副本到新位置。日志、PID、身份和 token 就绪记录统一放在 `log/`（权限 `700`，排除 Git）；配置更新在配置所在目录创建私有临时文件并原子替换。`log/dsh-token-proxy.pid` 记录 Nginx 监督进程。
 
 启动器在启停前迁移旧位置的运行文件，不覆盖同名目标。日志移动后，已打开的文件描述符继续写入原文件，无需重启；旧 `.nginx-<port>/` 会保留指向 `log/.nginx-<port>/` 的兼容链接，确保旧进程的绝对路径仍有效。新部署不创建这些根目录链接。
 

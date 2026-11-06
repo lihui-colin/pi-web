@@ -92,7 +92,11 @@ start_service() {
 stop_service() {
     local service="$1" pid attempt status
     if pid="$(service_pid "$service")"; then
-        process_state signal "$service" || return 1
+        if process_state signal "$service"; then :; else
+            status=$?
+            # The process can exit between the identity check and pidfd signal.
+            [[ "$status" == 1 ]] || return "$status"
+        fi
     else
         status=$?
         [[ "$status" == 1 ]] || return "$status"
@@ -224,12 +228,20 @@ start() {
 }
 
 stop() {
-    local service status
+    local service status stop_failed=0
+    local -a failures=()
     prepare_runtime || return 1
-    # Dependencies must stay alive when a consumer cannot be safely stopped.
+    # Explicit stop attempts every component even if an earlier one fails.
     for service in dsh-token-proxy dsh-web magpie-serve; do
-        stop_service "$service" || return 1
+        if stop_service "$service"; then :; else
+            stop_failed=1
+            failures+=("$service")
+        fi
     done
+    if (( stop_failed )); then
+        printf '停止失败：%s；已尝试停止全部服务，请查看上述错误。\n' "${failures[*]}" >&2
+        return 1
+    fi
     if [[ -f "$config_file" ]]; then
         if service_pid dsh-web >/dev/null; then
             return 1
@@ -240,6 +252,7 @@ stop() {
         write_token '' || return 1
         rm -f "$token_capture_file"
     fi
+    return 0
 }
 
 main() (

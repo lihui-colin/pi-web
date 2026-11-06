@@ -3,7 +3,7 @@
 # 不安装程序，不修改配置，不启停服务，不覆盖已有证书。
 set -euo pipefail
 umask 077
-script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 config_file="$script_dir/data/dsh.conf"
 tls_dir=''
 tls_hosts=()
@@ -24,7 +24,7 @@ while (( $# )); do
             shift 2 ;;
         -h|--help)
             printf '%s\n' \
-                '用法：bash ds-harness/srcs/dsh_cert.sh [--dry-run] [--config 文件] [--tls-dir 根目录] [--tls-host 额外IP或域名]' \
+                '用法：bash ds-harness/dsh_cert.sh [--dry-run] [--config 文件] [--tls-dir 根目录] [--tls-host 额外IP或域名]' \
                 '需要 Node.js >=24 和 OpenSSL。默认读取服务目录下 data/dsh.conf 的 server_ip。' \
                 '默认配置的证书保存在服务目录下 data/tls/<server_ip>/；自定义 --config 则保存在配置目录下 tls/<server_ip>/。' \
                 'IPv6 目录名中的冒号替换为下划线。' \

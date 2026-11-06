@@ -1,5 +1,6 @@
 """Terminal patch installation and behavior in isolated fixtures."""
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -27,9 +28,9 @@ class TerminalPatchTests(unittest.TestCase):
         self.front = self.host / 'dsh-client-ui-sidebar-terminal/lib/client.terminal.js'
         self.model = self.host / 'dsh-api-terminal-controller/lib/client.js'
         self.backend = self.host / 'dsh-api-terminal-controller/lib/index.js'
-        self.front.write_text('\n'.join([p.SCREEN_REF, p.SETUP, p.CLEANUP, p.FONT_FIT, p.WRITE, p.VISIBLE, p.PHASE, p.RUNTIME_ANCHOR, p.CLIP_HELPER, p.CLIP_SETUP, p.CLIP_CLEANUP]))
+        self.front.write_text('\n'.join([p.SCREEN_REF, p.SETUP, p.CLEANUP, p.FONT_FIT, p.WRITE, p.VISIBLE, p.PHASE, p.RUNTIME_ANCHOR, p.CLIP_HELPER, p.CLIP_SETUP, p.CLIP_CLEANUP, p.PROPOSED]))
         self.model.write_text('\n'.join([p.FORCE_SIGNATURE, p.FORCE_CHECK]))
-        self.backend.write_text('\n'.join([p.SNAPSHOT_ANCHOR, p.SERIALIZE]))
+        self.backend.write_text('\n'.join([p.SNAPSHOT_ANCHOR, p.SERIALIZE, p.HOST_SETUP, p.HOST_WRITE, p.HOST_DISPOSE]))
 
     def cli(self, *args):
         return subprocess.run([sys.executable, '-B', p.__file__, '--host-dir', str(self.host), *args], text=True, capture_output=True)
@@ -52,6 +53,102 @@ class TerminalPatchTests(unittest.TestCase):
         self.backend.write_text('unknown upstream')
         self.assertNotEqual(self.cli().returncode, 0)
         self.assertEqual(self.front.read_bytes(), original)
+
+    def test_rc1_support_requires_matching_host_versions(self):
+        for directory in ('dsh-client-ui-sidebar-terminal', 'dsh-api-terminal-controller'):
+            (self.host / directory / 'package.json').write_text(json.dumps({
+                'name': '@deepseek-ai/' + directory, 'version': '0.2.2-rc.1'}))
+        changes = p.plan_changes(self.host)
+        p.publish(changes, self.root / 'backup')
+        self.assertEqual(self.cli('--check').returncode, 0)
+        (self.host / 'dsh-api-terminal-controller/package.json').write_text(json.dumps({
+            'name': '@deepseek-ai/dsh-api-terminal-controller', 'version': '0.2.2-alpha.2'}))
+        before = [path.read_bytes() for path in (self.front, self.model, self.backend)]
+        self.assertNotEqual(self.cli().returncode, 0)
+        self.assertEqual([path.read_bytes() for path in (self.front, self.model, self.backend)], before)
+
+    def test_upgrade_previous_patch_and_reject_unknown_helpers(self):
+        # Preserve an actual released helper, rather than reconstructing the
+        # old behavior from the new implementation.
+        legacy = (Path(__file__).parent / 'fixtures/dsh_terminal_redraw_v1.js').read_text()
+        front = p.patch_frontend(self.front.read_text())
+        front = p.undo_replacements(front, p.TOOLS_REPLACEMENTS)
+        front = front.replace(p.FRONT_HELPERS, legacy)
+        backend = p.patch_host(self.backend.read_text())
+        backend = p.undo_replacements(backend, p.HOST_REPLACEMENTS).replace(p.HOST_HELPERS, p.SNAPSHOT)
+        self.assertEqual(p.patch_frontend(front), p.patch_frontend(self.front.read_text()))
+        self.assertEqual(p.patch_host(backend), p.patch_host(self.backend.read_text()))
+        with self.assertRaises(ValueError):
+            p.patch_frontend(front.replace('// Snapshot parsing must finish before', '// Unknown helper'))
+        incomplete = p.patch_frontend(self.front.read_text()).replace(p.TOOLS_REPLACEMENTS[-1][1], p.PROPOSED)
+        with self.assertRaises(ValueError):
+            p.patch_frontend(incomplete)
+        self.front.write_text(front.replace('let ready = false;', 'let ready = true;'))
+        self.backend.write_text(backend)
+        originals = [path.read_bytes() for path in (self.front, self.model, self.backend)]
+        self.assertNotEqual(self.cli().returncode, 0)
+        self.assertEqual([path.read_bytes() for path in (self.front, self.model, self.backend)], originals)
+
+    def test_protocol_and_tools(self):
+        dsh = shutil.which('dsh')
+        if not dsh:
+            self.skipTest('DSH not installed')
+        modules = Path(dsh).resolve().parents[1] / 'node_modules'
+        if not (modules / '@xterm/headless/package.json').exists():
+            self.skipTest('xterm headless not installed')
+        result = subprocess.run(['node', '--test', str(Path(__file__).with_name('test_dsh_terminal_features.cjs'))],
+            env={**os.environ, 'DSH_TEST_MODULES': str(modules)}, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_installed_bundles_in_isolation(self):
+        if not shutil.which('dsh'):
+            self.skipTest('DSH not installed')
+        for path, old, fixed in p.plan_changes():
+            isolated = self.root / (path.parent.parent.name + '-' + path.name)
+            isolated.write_text(fixed)
+            result = subprocess.run(['node', '--check', str(isolated)], text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            transform = p.patch_frontend if path.name == 'client.terminal.js' else p.patch_model if path.name == 'client.js' else p.patch_host
+            self.assertEqual(transform(fixed), fixed)
+
+    def test_host_controller_replies_without_attachment(self):
+        dsh = shutil.which('dsh')
+        if not dsh:
+            self.skipTest('DSH not installed')
+        modules = Path(dsh).resolve().parents[1] / 'node_modules'
+        backend = p.patch_host((modules / '@deepseek-ai/dsh-api-terminal-controller/lib/index.js').read_text())
+        start = backend.index('// xterm serialize 0.14 preserves')
+        end = backend.index('//#endregion', backend.index(p.SNAPSHOT_ANCHOR, start))
+        script = r'''
+const assert = require('node:assert/strict'), fs = require('node:fs'), vm = require('node:vm'), path = require('node:path');
+const modules = process.argv[1], sent = [], trace = [];
+const context = {TextDecoder, requireHeadless: () => require(path.join(modules, '@xterm/headless')),
+  requireSerialize: () => require(path.join(modules, '@xterm/addon-serialize'))};
+vm.runInNewContext(fs.readFileSync(0, 'utf8'), context);
+(async () => {
+  let done; const completion = new Promise(resolve => { done = resolve; });
+  const handle = {done: completion, write: async data => { sent.push(data); trace.push('reply'); }, terminate: async () => {},
+    output: (async function* () { yield Buffer.from('hi\x1b[?'); yield Buffer.from('u\x1b[c\x1b[6n'); done({exitCode: 0}); })()};
+  const host = new context.BrowserTerminal(handle, {cols: 80, rows: 24, state: 'running'}, 1000, 1048576);
+  host.broadcast = frame => { if (frame.type === 'output') trace.push('output'); };
+  await host.drained;
+  assert.equal(host.info.state, 'exited'); assert.equal(host.followers.size, 0);
+  assert.deepEqual(sent, ['\x1b[?0u\x1b[?1;2c\x1b[1;3R']);
+  assert.deepEqual(trace, ['output', 'reply', 'output']);
+  await host.closeProcess();
+})().catch(error => { console.error(error); process.exitCode = 1; });
+'''
+        result = subprocess.run(['node', '-e', script, str(modules)], input=backend[start:end], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(os.environ.get('DSH_TEST_PLAYWRIGHT'), 'Set DSH_TEST_PLAYWRIGHT for the optional browser test')
+    def test_real_browser(self):
+        changes = p.plan_changes()
+        frontend = self.root / 'client.terminal.js'
+        frontend.write_text(changes[0][2])
+        result = subprocess.run(['node', str(Path(__file__).with_name('test_dsh_terminal_browser.cjs'))],
+            env={**os.environ, 'DSH_TEST_FRONTEND': str(frontend)}, capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_redraw_lifecycle(self):
         script = r'''

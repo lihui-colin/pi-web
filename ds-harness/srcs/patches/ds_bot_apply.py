@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Apply all reviewed DS Bot 0.2.6 / DSH 0.2.2-alpha.2 fixes atomically.
+"""Migrate reviewed DS Bot / DSH fixes without overriding upstream behavior.
 
-Self-contained installer entry: history, prompt compatibility, layout and mobile Enter.
+DS Bot 0.2.7 / DSH 0.2.2-rc.1 retires the old host history and Enter patches.
+The isolated 0.2.6 / alpha.2 route remains available for existing old installs.
 """
 import argparse
 import json
@@ -346,6 +347,34 @@ def patch_composer(text):
     return replace_once(text, COMPOSER_ANCHOR, COMPOSER_REPLACEMENT)
 
 
+def retire_replacements(text, replacements):
+    """Undo only complete, uniquely recognized local edits; accept pristine source."""
+    for original, fixed in reversed(replacements):
+        if fixed in text:
+            if text.count(fixed) != 1:
+                raise ValueError('Duplicate retired patch; inspect before migrating')
+            text = text.replace(fixed, original, 1)
+        if text.count(original) != 1:
+            raise ValueError('Unknown or mixed retired patch; inspect before migrating')
+    return text
+
+
+def retire_composer(text):
+    """mobile 3.3.0 owns Enter, including modifier keys and trigger menus."""
+    text = retire_replacements(text, [(COMPOSER_ANCHOR, COMPOSER_REPLACEMENT)])
+    if '// Mobile Enter inserts a line break' in text:
+        raise ValueError('Incomplete retired composer patch')
+    return text
+
+
+def retire_host_history(text, replacements):
+    text = retire_replacements(text, replacements)
+    if any(marker in text for marker in ('hasHistoryContent', 'conversation.historyPresence',
+                                         'conversation.chat.before')):
+        raise ValueError('Incomplete retired history patch')
+    return text
+
+
 
 
 HISTORY_BOT_REPLACEMENTS = [
@@ -374,8 +403,26 @@ def plan_changes(bot=None, host=None):
         (host / 'dsh-client-ui-chat', '@deepseek-ai/dsh-client-ui-chat', '0.2.2-alpha.2'),
         (host / 'dsh-client-ui-conversation', '@deepseek-ai/dsh-client-ui-conversation', '0.2.2-alpha.2'),
     ]
-    for directory, name, version in packages:
-        manifest = json.loads((directory / 'package.json').read_text())
+    manifests = [json.loads((directory / 'package.json').read_text()) for directory, _, _ in packages]
+    if [(manifest.get('name'), manifest.get('version')) for manifest in manifests] == [
+        ('ds-bot', '0.2.7'),
+        ('@deepseek-ai/dsh-client-ui-chat', '0.2.2-rc.1'),
+        ('@deepseek-ai/dsh-client-ui-conversation', '0.2.2-rc.1'),
+    ]:
+        # Bot 0.2.7 uses its own current history UI. Do not inject 0.2.6 helpers,
+        # layout or prompt edits into it. Remove the matching orphan host hooks.
+        changes = []
+        for path, replacements in (
+            (host / 'dsh-client-ui-chat/lib/client.js', HISTORY_CHAT_REPLACEMENTS),
+            (host / 'dsh-client-ui-conversation/lib/client.js', HISTORY_CONVERSATION_REPLACEMENTS),
+        ):
+            original = path.read_text()
+            fixed = retire_host_history(original, replacements)
+            if path.parent.parent.name == 'dsh-client-ui-conversation':
+                fixed = retire_composer(fixed)
+            changes.append((path, original, fixed))
+        return changes
+    for (directory, name, version), manifest in zip(packages, manifests):
         if (manifest.get('name'), manifest.get('version')) != (name, version):
             raise ValueError(f'Unsupported package {manifest.get("name")}@{manifest.get("version")}; expected {name}@{version}. Review upstream before applying.')
     transforms = [
@@ -407,10 +454,10 @@ def main():
             print(f'Needs patch: {path}')
         if pending:
             raise SystemExit(1)
-        print('All reviewed DS Bot and shared composer fixes are present.')
+        print('Reviewed DS Bot / host compatibility state verified.')
         return
     publish(changes)
-    print('All reviewed DS Bot and shared composer fixes applied.')
+    print('Reviewed DS Bot / host compatibility changes applied.')
     if pending:
         print('Reload frontend resources / server modules during a maintenance window; no service restarted.')
 

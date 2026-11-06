@@ -16,7 +16,7 @@ import unittest
 SCRIPT = source_file('dsh_install.sh')
 NGINX_SCRIPT = source_file('dsh_nginx_install.sh')
 PLUGIN_SCRIPT = source_file('dsh_plugins_install.sh')
-NAMES = ['@deepseek-ai/dsh-subagent-codex', 'ds-bot', 'dsh-web-mobile', 'dshmarket', 'dsh-ide-git', 'dsh-sidebar-enhancement', 'dsh-sidebar-plus', '@huanlin/dsh-plugin-input-history', '@xbzbing/dsh-git-panel']
+NAMES = ['@deepseek-ai/dsh-subagent-codex', 'ds-bot', 'dsh-web-mobile', 'dshmarket', 'dsh-ide-git', 'dsh-sidebar-enhancement', 'dsh-sidebar-plus', '@huanlin/dsh-plugin-input-history', '@xbzbing/dsh-git-panel', 'dsh-composer-plus']
 
 
 NGINX_STUB = f'''#!{sys.executable}
@@ -105,7 +105,7 @@ class InstallPlanTests(unittest.TestCase):
         self.assertIn('复用项目 Nginx：', output)
         self.assertIn('+ npm install', output)
         self.assertIn('+ curl', output)
-        self.assertIn('ds-bot@latest dsh-web-mobile@latest dshmarket@latest dsh-ide-git@latest', output)
+        self.assertIn('ds-bot@latest dsh-web-mobile@github:mexiaosqwq/dsh-web-mobile dshmarket@latest dsh-ide-git@latest', output)
         self.assertIn('dsh-sidebar-enhancement@latest dsh-sidebar-plus@latest @huanlin/dsh-plugin-input-history@latest', output)
         self.assertNotIn('dsh-file-transfer', output)
 

@@ -44,9 +44,11 @@ def copy_test_launcher(directory):
 
 def source_file(name):
     base = Path(__file__).resolve().parent
-    return (base.parent if name in ('dsh_install.sh', 'dsh_web_run.sh', 'dsh_proxy.sh') else base) / name
+    return (base.parent if name in ('dsh_install.sh', 'dsh_web_run.sh', 'dsh_proxy.sh',
+                                   'dsh_plugins_install.sh', 'dsh_nginx_install.sh', 'dsh_cert.sh') else base) / name
 
 def fixture_file(root, name):
-    target = Path(root) / (name if name in ('dsh_install.sh', 'dsh_web_run.sh', 'dsh_proxy.sh') else 'srcs/' + name)
+    target = Path(root) / (name if name in ('dsh_install.sh', 'dsh_web_run.sh', 'dsh_proxy.sh',
+                                           'dsh_plugins_install.sh', 'dsh_nginx_install.sh', 'dsh_cert.sh') else 'srcs/' + name)
     target.parent.mkdir(parents=True, exist_ok=True)
     return target

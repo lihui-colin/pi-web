@@ -8,6 +8,32 @@ function createTerminalRedraw(xterm, fit, node, model, current) {
   let restore;
   let disposed = false;
   let disconnected = false;
+  let frame;
+  const document = node.ownerDocument;
+  const window = document?.defaultView;
+  const listeners = [];
+
+  // Layout may settle one frame after a tab resumes or a font becomes ready.
+  // These events never claim input control or focus the terminal.
+  function resume() {
+    if (disposed || document?.visibilityState === 'hidden' || !current().visible) return;
+    update();
+    if (ready) xterm.refresh(0, xterm.rows - 1);
+    if (frame !== undefined || !window?.requestAnimationFrame) return;
+    frame = window.requestAnimationFrame(() => {
+      frame = undefined;
+      if (disposed || document?.visibilityState === 'hidden' || !current().visible) return;
+      update();
+      if (ready) xterm.refresh(0, xterm.rows - 1);
+    });
+  }
+  for (const [target, event] of [[document, 'visibilitychange'], [window, 'focus'],
+    [window, 'resize'], [window?.visualViewport, 'resize'], [document?.fonts, 'loadingdone']]) {
+    if (!target?.addEventListener) continue;
+    target.addEventListener(event, resume);
+    listeners.push(() => target.removeEventListener(event, resume));
+  }
+  document?.fonts?.ready?.then(resume, () => {});
 
   function dimensions() {
     const state = current().state;
@@ -39,7 +65,7 @@ function createTerminalRedraw(xterm, fit, node, model, current) {
       return;
     }
     disconnected = false;
-    if (!ready || !visible || !state.writable || !node.clientWidth || !node.clientHeight) return;
+    if (!ready || !visible || document?.visibilityState === 'hidden' || !state.writable || !node.clientWidth || !node.clientHeight) return;
     if (timer !== undefined) return;
     const size = dimensions();
     if (!size) return;
@@ -73,6 +99,10 @@ function createTerminalRedraw(xterm, fit, node, model, current) {
     prepare() { cancel(); ready = false; needsRedraw = true; return ++generation; },
     parsed(token) { if (!disposed && token === generation) { ready = true; update(); } },
     update,
-    dispose() { cancel(); disposed = true; generation++; }
+    dispose() {
+      cancel(); disposed = true; generation++;
+      for (const remove of listeners) remove();
+      if (frame !== undefined) window.cancelAnimationFrame(frame);
+    }
   };
 }

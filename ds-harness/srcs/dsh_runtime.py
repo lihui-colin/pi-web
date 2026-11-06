@@ -36,11 +36,16 @@ def redact_tokens(line):
 
 def snapshot(pid):
     proc = Path('/proc') / str(pid)
-    stat = (proc / 'stat').read_text().rsplit(')', 1)[1].split()
-    if stat[0] == 'Z':
-        raise ProcessLookupError()
-    return dict(pid=pid, start=stat[19], boot=Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
-                uid=proc.stat().st_uid, argv=(proc / 'cmdline').read_bytes().split(b'\0')[:-1])
+    try:
+        stat = (proc / 'stat').read_text().rsplit(')', 1)[1].split()
+        if stat[0] == 'Z':
+            raise ProcessLookupError()
+        return dict(pid=pid, start=stat[19], boot=Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+                    uid=proc.stat().st_uid, argv=(proc / 'cmdline').read_bytes().split(b'\0')[:-1])
+    except FileNotFoundError:
+        if not proc.exists():
+            raise ProcessLookupError() from None
+        raise
 
 def current():
     pid = int(pidfile.read_text().strip())
@@ -48,13 +53,24 @@ def current():
         raise ValueError('unsafe PID')
     return snapshot(pid)
 
-def owned(now):
+def owned(now, require_environment=False):
     state = json.loads(statefile.read_text())
-    env = (Path('/proc') / str(now['pid']) / 'environ').read_bytes().split(b'\0')
     if not (state['root'] == str(root) and state['service'] == service):
         raise ValueError("state verification failed")
     if not (state['identity'] == {**now, 'argv': [os.fsdecode(x) for x in now['argv']]}):
         raise ValueError("state verification failed")
+    try:
+        env = (Path('/proc') / str(now['pid']) / 'environ').read_bytes().split(b'\0')
+    except FileNotFoundError:
+        snapshot(now['pid'])  # Translate an exited process; never ignore missing state.
+        raise
+    except PermissionError:
+        # Existing private state identifies this exact process using boot ID,
+        # start time, UID and argv. /proc environ may have stricter ptrace access
+        # than signalling. Initial registration must still verify launch markers.
+        if require_environment or now['uid'] != os.geteuid():
+            raise
+        return state
     if not (('DSH_LAUNCH_ID=' + state['launch']).encode() in env):
         raise ValueError("state verification failed")
     if not (('DSH_LAUNCH_ROOT=' + str(root)).encode() in env):
@@ -245,7 +261,12 @@ def record_process():
     state = dict(root=str(root), service=service, launch=launch,
                  identity={**now, 'argv': argv})
     atomic(statefile, json.dumps(state))
-    owned(now)
+    try:
+        owned(now, require_environment=True)
+    except Exception:
+        # Never leave an unverified registration available to the permission fallback.
+        statefile.unlink(missing_ok=True)
+        raise
 
 
 def capture_output():
@@ -308,15 +329,23 @@ def run_operation():
                 now = current()
             except (FileNotFoundError, ProcessLookupError):
                 sys.exit(1)
-            state = owned(now)
+            try:
+                state = owned(now)
+            except ProcessLookupError:
+                sys.exit(1)
             if operation == 'signal':
                 # Pin the process before the final check: PID reuse cannot redirect TERM.
-                fd = open_pidfd(now['pid'])
+                try:
+                    fd = open_pidfd(now['pid'])
+                except ProcessLookupError:
+                    sys.exit(1)
                 try:
                     with state_lock():
                         if not (owned(current()) == state):
                             raise ValueError("state verification failed")
                         send_pidfd(fd, signal.SIGTERM)
+                except ProcessLookupError:
+                    sys.exit(1)
                 finally:
                     os.close(fd)
             elif operation == 'ready':

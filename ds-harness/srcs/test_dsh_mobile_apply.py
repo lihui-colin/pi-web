@@ -7,6 +7,7 @@ import tempfile
 import unittest
 
 from patches import dsh_mobile_apply as p
+from patches import ds_bot_apply as bot
 
 
 class MobilePatchTests(unittest.TestCase):
@@ -96,6 +97,39 @@ for (const [matches, enabled] of [[false, false], [false, true], [true, false]])
         self.assertEqual(p.patch_view_tabs(legacy), p.VIEW_LIMIT_NEW)
         self.assertEqual(p.patch_view_tabs(p.VIEW_LIMIT_UNSCOPED), p.VIEW_LIMIT_NEW)
         self.assertEqual(p.patch_view_tabs(p.VIEW_LIMIT_NEW), p.VIEW_LIMIT_NEW)
+
+
+class CurrentMobileTests(unittest.TestCase):
+    run_cli = MobilePatchTests.run_cli
+
+    def setUp(self):
+        MobilePatchTests.setUp(self)
+        (self.mobile / 'package.json').write_text(json.dumps({'name': 'dsh-web-mobile', 'version': '3.3.0'}))
+        (self.host / 'dsh-client-ui-conversation/package.json').write_text(json.dumps({
+            'name': '@deepseek-ai/dsh-client-ui-conversation', 'version': '0.2.2-rc.1'}))
+        self.plugin.write_text('Upstream 3.3.0 plugin stays unchanged')
+        self.conversation.write_text(bot.COMPOSER_ANCHOR + '\n' + p.VIEW_LIMIT_OLD)
+
+    def test_keeps_upstream_mobile_and_migrates_host_atomically(self):
+        upstream = self.plugin.read_bytes()
+        self.conversation.write_text(bot.patch_composer(self.conversation.read_text()))
+        self.assertNotEqual(self.run_cli('--check').returncode, 0)
+        p.publish(p.plan_changes(self.mobile, self.host), self.mobile / 'backups')
+        self.assertEqual(self.plugin.read_bytes(), upstream)
+        self.assertEqual(self.conversation.read_text(), bot.COMPOSER_ANCHOR + '\n' + p.VIEW_LIMIT_NEW)
+        self.assertEqual(self.run_cli('--check').returncode, 0)
+        self.assertTrue(all(old == new for _, old, new in p.plan_changes(self.mobile, self.host)))
+
+    def test_unknown_source_and_mixed_version_do_not_write(self):
+        for version, source in [('0.2.2-alpha.2', self.conversation.read_text()),
+                                ('0.2.2-rc.1', 'unknown editor'),
+                                ('0.2.2-rc.1', bot.COMPOSER_ANCHOR + '\nunknown tabs')]:
+            (self.host / 'dsh-client-ui-conversation/package.json').write_text(json.dumps({
+                'name': '@deepseek-ai/dsh-client-ui-conversation', 'version': version}))
+            self.conversation.write_text(source)
+            originals = [self.plugin.read_bytes(), self.conversation.read_bytes()]
+            self.assertNotEqual(self.run_cli().returncode, 0)
+            self.assertEqual([self.plugin.read_bytes(), self.conversation.read_bytes()], originals)
 
 
 if __name__ == '__main__':

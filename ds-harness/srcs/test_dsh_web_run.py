@@ -25,9 +25,9 @@ NGINX = local_nginx()
 
 
 class LauncherTests(unittest.TestCase):
-    def test_stop_aborts_before_dependencies_or_token_cleanup_on_failure(self):
+    def test_stop_attempts_every_service_and_reports_failures(self):
         services = ['dsh-token-proxy', 'dsh-web', 'magpie-serve']
-        cases = [(service, 1, index + 1) for index, service in enumerate(services)]
+        cases = [(service, 1, 3) for service in services]
         cases += [('', 0, 3), ('', 2, 3), ('', 1, 3)]
         for failed, identity_status, count in cases:
             with self.subTest(failed=failed, identity=identity_status), tempfile.TemporaryDirectory() as temporary:
@@ -54,6 +54,8 @@ stop
                 self.assertEqual(result.stdout.splitlines(), expected, result.stderr)
                 self.assertEqual(result.returncode == 0, success, result.stderr)
                 self.assertEqual(capture.exists(), not success)
+                if failed:
+                    self.assertIn('停止失败：' + failed, result.stderr)
                 self.assertEqual(config.read_text(), 'test configuration')
 
     def test_main_serializes_operations_and_releases_lock_after_failure(self):
@@ -494,10 +496,16 @@ main start
                 self.assertEqual(proxy[proxy.index(b"--upstream-port") + 1], backend_port)
                 self.assertEqual(proxy[proxy.index(b"--tls-cert") + 1], str(cert).encode())
                 self.assertEqual(proxy[proxy.index(b"--tls-key") + 1], str(key).encode())
+                # A crashed backend leaves the proxy alive; stop must still clear
+                # every component so a subsequent start can recover the instance.
+                os.kill(recovered['dsh-web'], signal.SIGKILL)
                 self.assertEqual(run("stop"), 0)
                 self.assertFalse(pids())
                 self.assertFalse(nginx_config.exists())
                 self.assertIn("dsh_token=''", config.read_text())
+                self.assertEqual(run("stop"), 0)
+                self.assertEqual(run("start"), 0, (root / 'launcher.log').read_text())
+                self.assertNotEqual(pids()['dsh-web'], recovered['dsh-web'])
                 self.assertEqual(run("stop"), 0)
             finally:
                 run("stop")
@@ -588,6 +596,49 @@ class ProcessHelperTests(unittest.TestCase):
         source = source_file('dsh_runtime.py').read_text()
         self.ns = {'__name__': 'test_runtime'}
         exec(compile(source, 'dsh_runtime.py', 'exec'), self.ns)
+
+    def test_environment_denied_uses_exact_recorded_identity_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            statefile = root / 'identity'
+            now = dict(pid=123, start='456', boot='boot', uid=os.geteuid(), argv=[b'/bin/sleep', b'60'])
+            state = dict(root=str(root), service='test', launch='launch',
+                         identity={**now, 'argv': ['/bin/sleep', '60']})
+            statefile.write_text(json.dumps(state))
+            self.ns.update(root=root, service='test', statefile=statefile)
+            with mock.patch.object(Path, 'read_bytes', side_effect=PermissionError(errno.EACCES, 'denied')):
+                self.assertEqual(self.ns['owned'](now), state)
+                with self.assertRaises(PermissionError):
+                    self.ns['owned'](now, require_environment=True)
+                for key in ('pid', 'start', 'boot', 'uid', 'argv'):
+                    with self.subTest(key=key), self.assertRaises(ValueError):
+                        self.ns['owned']({**now, key: [] if key == 'argv' else 'wrong'})
+                statefile.unlink()
+                with self.assertRaises(FileNotFoundError):
+                    self.ns['owned'](now)
+
+    def test_exit_during_signal_is_already_stopped(self):
+        from contextlib import nullcontext
+        for phase in ('open', 'recheck', 'signal'):
+            with self.subTest(phase=phase):
+                current = mock.Mock(side_effect=[{'pid': 123}, ProcessLookupError()]
+                                    if phase == 'recheck' else None, return_value={'pid': 123})
+                opener = mock.Mock(side_effect=ProcessLookupError() if phase == 'open' else None,
+                                   return_value=71)
+                sender = mock.Mock(side_effect=ProcessLookupError() if phase == 'signal' else None)
+                with mock.patch.dict(self.ns, operation='signal', current=current,
+                                     owned=mock.Mock(return_value={'launch': 'test'}),
+                                     open_pidfd=opener, send_pidfd=sender,
+                                     state_lock=nullcontext), mock.patch.object(os, 'close') as close:
+                    with self.assertRaises(SystemExit) as result:
+                        self.ns['run_operation']()
+                    self.assertEqual(result.exception.code, 1)
+                    if phase == 'open':
+                        close.assert_not_called()
+                    else:
+                        close.assert_called_once_with(71)
+                    if phase != 'signal':
+                        sender.assert_not_called()
 
     def test_pidfd_missing_python_wrappers_uses_libc(self):
         libc = mock.Mock()
@@ -859,6 +910,23 @@ class ProcessIdentityTests(unittest.TestCase):
         self.assertEqual(self.shell('stop_service magpie-serve'), 0,
                          (self.root / 'launcher.log').read_text())
         self.assertFalse((self.logs / 'magpie-serve.identity').exists())
+
+    def test_stop_with_environment_read_denied(self):
+        self.launch()
+        site = self.root / 'python-site'
+        site.mkdir()
+        (site / 'sitecustomize.py').write_text(
+            "from pathlib import Path\n"
+            "original = Path.read_bytes\n"
+            "def read_bytes(path):\n"
+            "    if str(path).startswith('/proc/') and path.name == 'environ':\n"
+            "        raise PermissionError(13, 'denied')\n"
+            "    return original(path)\n"
+            "Path.read_bytes = read_bytes\n")
+        self.env['PYTHONPATH'] = str(site)
+        self.assertEqual(self.shell('stop'), 0, (self.root / 'launcher.log').read_text())
+        self.assertFalse(list(self.logs.glob('*.pid')))
+        self.assertIn("dsh_token=''", self.config.read_text())
 
     def test_identity_mutations_fail_closed_even_with_python_optimization(self):
         pid = self.launch()

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# 安装 web profile 的九个额外插件；已有 profile 保留启用/禁用状态。
+# 安装 web profile 的十个额外插件；已有 profile 保留启用/禁用状态。
 set -euo pipefail
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 dry_run=false
 upgrade=false
 expected_version=''
@@ -14,9 +14,10 @@ while (( $# )); do
             expected_version="$2"; shift 2 ;;
         -h|--help)
             printf '%s\n' \
-                '用法：bash ds-harness/srcs/dsh_plugins_install.sh [--dry-run] [--upgrade]' \
-                '默认补装九个额外插件；--upgrade 重新安装，第三方使用 latest，Codex 与实际 DSH 同版。' \
-                '已有 web profile 保留启用/禁用状态；新 profile 启用除 dsh-ide-git 外的八个插件。' \
+                '用法：bash ds-harness/dsh_plugins_install.sh [--dry-run] [--upgrade]' \
+                '默认补装十个额外插件；--upgrade 重新安装，普通 npm 插件使用 latest，Codex 与实际 DSH 同版。' \
+                'mobile 默认使用 GitHub，composer-plus 默认使用 1.22.0 压缩包；保留已指定的对应来源。' \
+                '已有 web profile 保留启用/禁用状态；新 profile 启用八个，input-history 和 dsh-ide-git 仅安装。' \
                 '数据固定放在服务目录下 data/.dsh；不配置内置 bundle，不启停服务。' \
                 '--expected-dsh-version 仅供父安装器 dry-run 传入预期版本或占位符。'
             exit 0 ;;
@@ -73,13 +74,23 @@ import path from 'node:path';
 const [dir, version, upgrade] = process.argv.slice(2);
 const manifest = path.join(dir, 'package.json');
 const pkg = fs.existsSync(manifest) ? JSON.parse(fs.readFileSync(manifest, 'utf8')) : {};
-const names = ['@deepseek-ai/dsh-subagent-codex', 'ds-bot', 'dsh-web-mobile', 'dshmarket', 'dsh-ide-git', 'dsh-sidebar-enhancement', 'dsh-sidebar-plus', '@huanlin/dsh-plugin-input-history', '@xbzbing/dsh-git-panel'];
+const names = ['@deepseek-ai/dsh-subagent-codex', 'ds-bot', 'dsh-web-mobile', 'dshmarket', 'dsh-ide-git', 'dsh-sidebar-enhancement', 'dsh-sidebar-plus', '@huanlin/dsh-plugin-input-history', '@xbzbing/dsh-git-panel', 'dsh-composer-plus'];
+// Sources selected in the deployed web profile; keep these on a fresh install too.
+const sources = {
+  'dsh-web-mobile': 'github:mexiaosqwq/dsh-web-mobile',
+  'dsh-composer-plus': 'https://registry.npmjs.org/dsh-composer-plus/-/dsh-composer-plus-1.22.0.tgz',
+};
 for (const name of names) {
-  const target = name === names[0] ? version : 'latest';
   const installedPath = path.join(dir, 'node_modules', name, 'package.json');
   let installed;
   if (fs.existsSync(installedPath)) installed = JSON.parse(fs.readFileSync(installedPath, 'utf8'));
   const declared = pkg.dependencies?.[name] || pkg.devDependencies?.[name] || pkg.optionalDependencies?.[name];
+  // Keep an explicitly selected mobile repository (including a pinned commit).
+  // Replacing it with npm latest could restore the older mobile generation.
+  const githubMobile = name === 'dsh-web-mobile' && typeof declared === 'string' && declared.startsWith('github:');
+  const tarballComposer = name === 'dsh-composer-plus' && typeof declared === 'string' && declared.startsWith('https:');
+  const source = githubMobile || tarballComposer ? declared : sources[name];
+  const target = name === names[0] ? version : source || 'latest';
   if (upgrade !== 'true' && declared && installed?.name === name && installed.version &&
       (name !== names[0] || installed.version === version)) {
     console.error(`已安装 ${name}@${installed.version}，跳过安装。`);
@@ -106,7 +117,7 @@ else
     printf '%s\n' '所需插件均已安装，跳过插件安装。'
 fi
 if "$dry_run"; then
-    printf '%s\n' '预览：已有 profile 保留额外插件启用状态；新 profile 安装九个、启用八个（不启用 dsh-ide-git）。未修改文件。'
+    printf '%s\n' '预览：已有 profile 保留额外插件启用状态；新 profile 安装十个、启用八个（不启用 input-history 和 dsh-ide-git）。未修改文件。'
 else
     # 包管理器可能自动启用插件；安装失败时也恢复已有 profile 的 bundle 状态。
     node --input-type=module - "$profile_dir/package.json" "$bundle_state" "$status" <<'BUNDLES_NODE'
@@ -127,12 +138,12 @@ if (!fs.existsSync(file)) {
       pkg.dsh.profile.bundles = state.bundles;
     }
   } else if (status === '0') {
-    const defaults = ['@deepseek-ai/dsh-subagent-codex', 'ds-bot', 'dsh-web-mobile', 'dshmarket', 'dsh-sidebar-enhancement', 'dsh-sidebar-plus', '@huanlin/dsh-plugin-input-history', '@xbzbing/dsh-git-panel'];
+    const defaults = ['@deepseek-ai/dsh-subagent-codex', 'ds-bot', 'dsh-web-mobile', 'dshmarket', 'dsh-sidebar-enhancement', 'dsh-sidebar-plus', '@xbzbing/dsh-git-panel', 'dsh-composer-plus'];
     pkg.dsh ??= {};
     pkg.dsh.profile ??= {};
     const existing = pkg.dsh.profile.bundles ?? [];
     if (!Array.isArray(existing)) throw new Error('现有 bundles 不是数组，停止修改');
-    pkg.dsh.profile.bundles = [...new Set([...existing.filter(name => name !== 'dsh-ide-git'), ...defaults])];
+    pkg.dsh.profile.bundles = [...new Set([...existing.filter(name => !['dsh-ide-git', '@huanlin/dsh-plugin-input-history'].includes(name)), ...defaults])];
   }
   if (JSON.stringify(pkg) !== before) {
     const temp = `${file}.dsh-plugins-install.${process.pid}.tmp`;
@@ -143,8 +154,9 @@ if (!fs.existsSync(file)) {
 BUNDLES_NODE
 fi
 if (( status != 0 )); then exit "$status"; fi
-# Always validate/apply the full patch set, even when downloads were skipped.
-# A mismatched release must fail installation rather than silently omit fixes.
+# Always validate/migrate the reviewed version pair, even when downloads were skipped.
+# Current Bot/mobile use upstream UI; migrate retired host hooks before fitting tabs.
+# Terminal fixes stay paired. Unknown or mixed releases must fail explicitly.
 run python3 -B "$script_dir/srcs/patches/ds_bot_apply.py"
 run python3 -B "$script_dir/srcs/patches/dsh_mobile_apply.py"
 run python3 -B "$script_dir/srcs/patches/dsh_terminal_apply.py"

@@ -1,4 +1,4 @@
-"""Exercise the standalone patch against isolated current-version package trees."""
+"""Exercise current migration and the separate legacy patch route in isolation."""
 import json
 from pathlib import Path
 import shutil
@@ -104,6 +104,56 @@ class CompletePatchTests(unittest.TestCase):
         manifest.write_text(json.dumps({'name': 'ds-bot', 'version': '0.2.6'}))
         host_manifest = self.host / 'dsh-client-ui-conversation/package.json'
         host_manifest.write_text(json.dumps({'name': '@deepseek-ai/dsh-client-ui-conversation', 'version': '0.2.1'}))
+        self.run_cli(status=1)
+        self.assertEqual(self.sources, {path: path.read_text() for path in self.sources})
+
+
+class CurrentPatchTests(unittest.TestCase):
+    run_cli = CompletePatchTests.run_cli
+
+    def setUp(self):
+        CompletePatchTests.setUp(self)
+        for directory, name, version in (
+            (self.bot, 'ds-bot', '0.2.7'),
+            (self.host / 'dsh-client-ui-chat', '@deepseek-ai/dsh-client-ui-chat', '0.2.2-rc.1'),
+            (self.host / 'dsh-client-ui-conversation', '@deepseek-ai/dsh-client-ui-conversation', '0.2.2-rc.1'),
+        ):
+            (directory / 'package.json').write_text(json.dumps({'name': name, 'version': version}))
+
+    def test_current_upstream_is_unchanged(self):
+        self.run_cli('--check')
+        before = {path: path.stat().st_mtime_ns for path in self.sources}
+        self.run_cli()
+        self.assertEqual(self.sources, {path: path.read_text() for path in self.sources})
+        self.assertEqual(before, {path: path.stat().st_mtime_ns for path in self.sources})
+
+    def test_retires_installed_history_and_enter_without_touching_tabs_or_bot(self):
+        chat = self.host / 'dsh-client-ui-chat/lib/client.js'
+        conversation = self.host / 'dsh-client-ui-conversation/lib/client.js'
+        native = mobile.patch_view_tabs(conversation.read_text())
+        chat.write_text(p.patch_history(chat.read_text(), p.HISTORY_CHAT_REPLACEMENTS))
+        conversation.write_text(p.patch_composer(p.patch_history(native, p.HISTORY_CONVERSATION_REPLACEMENTS)))
+        self.run_cli('--check', status=1)
+        self.run_cli()
+        self.assertEqual(chat.read_text(), self.sources[chat])
+        self.assertEqual(conversation.read_text(), native)
+        self.assertEqual((self.bot / 'client.js').read_text(), self.sources[self.bot / 'client.js'])
+        self.run_cli('--check')
+        before = {path: path.stat().st_mtime_ns for path in self.sources}
+        self.run_cli()
+        self.assertEqual(before, {path: path.stat().st_mtime_ns for path in self.sources})
+
+    def test_incomplete_history_never_publishes(self):
+        conversation = self.host / 'dsh-client-ui-conversation/lib/client.js'
+        patched = p.patch_history(conversation.read_text(), p.HISTORY_CONVERSATION_REPLACEMENTS)
+        conversation.write_text(patched.replace('const [historyContent, setHistoryContent]', 'const [unknown, setUnknown]'))
+        before = {path: path.read_text() for path in self.sources}
+        self.run_cli(status=1)
+        self.assertEqual(before, {path: path.read_text() for path in self.sources})
+
+    def test_mixed_host_versions_are_rejected(self):
+        (self.host / 'dsh-client-ui-chat/package.json').write_text(json.dumps({
+            'name': '@deepseek-ai/dsh-client-ui-chat', 'version': '0.2.2-alpha.2'}))
         self.run_cli(status=1)
         self.assertEqual(self.sources, {path: path.read_text() for path in self.sources})
 
