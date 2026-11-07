@@ -1,5 +1,7 @@
 # DSH 本地补丁
 
+DS Bot 输入框的蓝色语音对话按钮与发送按钮共用最右侧位置。上游 0.3.1 将语音按钮注册在 `conversation.input.right`，宿主 rc.1 在该分组后仍有活动控件及发送按钮；仅改 slot order 无法跨分组排序。本地布局补丁将含语音按钮的可见 standardControls 分组展开为同一 flex 行，把语音按钮排到末尾；保留活动模式的 hidden 状态和上游空草稿/群聊显示条件，不改录音与发送处理器。隔离 Chromium 布局验证覆盖 320/390/820/1600px，语音与发送按钮坐标相同；DS Bot 32 项回归通过。安装后刷新页面生效，无需重启服务。
+
 目录按归属分组：`service/` 保存 DSH 主服务的终端、文件资源及会话信息补丁；`plugins/ds_bot/`、`plugins/mobile/` 和 `plugins/git_panel/` 保存对应插件的兼容处理。`common.py` 是共享执行工具。测试及夹具位于服务根目录的 `tests/`，与 `srcs/` 同级。
 
 
