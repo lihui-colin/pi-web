@@ -47,7 +47,8 @@ function fixture({ conflict = false, failure = '', agent = true, agentVersion = 
   git(root, 'init', '--bare', origin);
   git(dirname(source), 'init', '-b', 'terminal-patch');
   mkdirSync(join(source, 'patches'));
-  writeFileSync(join(source, 'patches', '0001-layout.patch'), patch);
+  mkdirSync(join(source, 'patches/plugins/layout'), {recursive:true});
+  writeFileSync(join(source, 'patches/plugins/layout/0001-layout.patch'), patch);
   writeFileSync(join(source, 'patches', 'base-commit'), (conflict ? git(upstream, 'rev-parse', 'HEAD') : baseCommit) + '\n');
   mkdirSync(join(source, 'scripts'));
   copyFileSync(join(repo, 'pi-web.conf.example'), join(source, 'pi-web.conf.example'));
@@ -558,3 +559,20 @@ for (const [upper, lower] of [[undefined, undefined], ['upper.internal', undefin
     }
   });
 }
+
+
+test('sync applies service and plugin patches in global numeric order', () => {
+  const f = fixture();
+  git(f.upstream, 'checkout', '--detach', f.baseCommit);
+  git(f.upstream, 'apply', join(f.source, 'patches/plugins/layout/0001-layout.patch'));
+  git(f.upstream, 'commit', '-am', 'first patch');
+  const file = join(f.upstream, 'app.txt');
+  writeFileSync(file, readFileSync(file, 'utf8').replace('custom layout', 'final layout'));
+  mkdirSync(join(f.source, 'patches/service'), {recursive:true});
+  writeFileSync(join(f.source, 'patches/service/0002-refine.patch'), git(f.upstream, 'diff', '--binary', '--full-index', 'HEAD') + '\n');
+  const result = f.run('sync.sh');
+  assert.equal(result.status, 0, result.stderr);
+  const release = result.stdout.trim();
+  assert.match(readFileSync(join(release, 'app.txt'), 'utf8'), /^final layout\n/);
+  assert.ok(result.stderr.indexOf('Applying 0001-layout.patch') < result.stderr.indexOf('Applying 0002-refine.patch'));
+});

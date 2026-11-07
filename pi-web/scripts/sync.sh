@@ -7,7 +7,7 @@ Usage: sh scripts/sync.sh [--local]
 
 Reuse the cached upstream commit in patches/base-commit (fetch only if missing),
 then apply
-patches/*.patch in a new release directory. Print that directory on stdout.
+numbered patches under patches/service/ and patches/plugins/ in a new release directory. Print that directory on stdout.
 Downloads are cached in <pi-web>/data/pi-web-upstream.git.
 With --local, require that commit in this cache without fetching.
 Neither mode updates main or pushes to any remote.
@@ -44,8 +44,15 @@ if [ "${#base_commit}" -ne 40 ]; then
   exit 1
 fi
 
-set -- "$source_repo"/patches/*.patch
-if [ ! -f "$1" ]; then
+# Keep the global numeric order across service and plugin directories.
+# Root-level patches are also accepted for standalone fixture/checkouts.
+patch_files=$(
+  for patch_file in "$source_repo"/patches/*.patch "$source_repo"/patches/service/*.patch "$source_repo"/patches/plugins/*/*.patch; do
+    [ -f "$patch_file" ] || continue
+    printf '%s\t%s\n' "${patch_file##*/}" "$patch_file"
+  done | LC_ALL=C sort | cut -f2-
+)
+if [ -z "$patch_files" ]; then
   printf 'No patches found in %s/patches\n' "$source_repo" >&2
   exit 1
 fi
@@ -71,11 +78,13 @@ trap 'result=$?; if [ "$result" -ne 0 ]; then printf "Preparation failed; retain
 git init --quiet "$release_dir" >&2
 git -C "$release_dir" fetch --no-tags "$cache_repo" "$base_commit" >&2
 git -C "$release_dir" checkout --detach "$base_commit" >&2
-for patch_file do
+while IFS= read -r patch_file; do
   printf 'Applying %s\n' "$(basename -- "$patch_file")" >&2
   if ! git -C "$release_dir" apply --3way --index "$patch_file" >&2; then
     printf 'Patch conflict: check patches against patches/base-commit in terminal-patch and retry. Services have not been installed.\n' >&2
     exit 1
   fi
-done
+done <<PATCH_FILES
+$patch_files
+PATCH_FILES
 printf '%s\n' "$release_dir"

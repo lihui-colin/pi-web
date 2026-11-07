@@ -1,13 +1,21 @@
 # DSH 本地补丁
 
-当前核验组合为 **DSH 0.2.2-rc.1、ds-bot 0.2.7、dsh-web-mobile 3.3.0 / 3.3.1、xterm/headless 6.0.0、addon-serialize 0.14.0**。四个入口共用原子写入、备份与回滚函数，未知版本、混合宿主版本或不完整旧补丁会停止。
+目录按归属分组：`service/` 保存 DSH 主服务的终端、文件资源及会话信息补丁；`plugins/ds_bot/`、`plugins/mobile/` 和 `plugins/git_panel/` 保存对应插件的兼容处理。`common.py` 是共享执行工具。测试及夹具位于服务根目录的 `tests/`，与 `srcs/` 同级。
+
+
+`dsh_git_panel_apply.py` 移除 `@xbzbing/dsh-git-panel@1.11.2` 在 `conversation.input.left` 注册的 `git-panel-pill`，保留 Git 页签与侧栏。安装器自动应用；`--check` 验证，`--git-panel-dir` 可指定隔离安装目录。插件未安装或按钮不存在时跳过。复用原子写入与备份机制，未知版本或存在按钮但注册锚点不匹配时拒绝修改。上游已有 `showInputPill` 显示开关；此处按本地偏好直接省略按钮注册，因此插件配置不会将它重新显示。
+
+会话信息 info 图标通过 `conversation.input.right` 注册，ID 为 `dsh-session-info`、`order: -100`，使用宿主 `chat` locale 和会话投影。`dsh_composer_metadata_apply.py` 会撤销旧的 `trailing` 直接挂载，再注册插槽，保留展开状态与元信息的 React Context。mobile 的额外文件按钮同样先检查是否存在，不存在时保持插件原样；存在但注册代码未知时拒绝修改。
+
+当前核验组合为 **DSH 0.2.2-rc.1、ds-bot 0.2.7、dsh-web-mobile 3.3.0 / 3.3.1、xterm/headless 6.0.0、addon-serialize 0.14.0**。六个入口通过 `common.py` 共用补丁校验、宿主定位、原子写入、备份与回滚函数，未知版本、混合宿主版本或不完整旧补丁会停止。
 
 | 入口 | 当前版本的处理 |
 | --- | --- |
-| `ds_bot_apply.py` | 恢复 Bot 0.2.7 输入框、消息操作栏与桌面宽度布局；撤销宿主旧历史插槽和手机 Enter 注入，保留上游历史和提示词实现。 |
-| `dsh_mobile_apply.py` | 保持 mobile 3.3.0 / 3.3.1 文件不变；撤销旧宿主 Enter 注入，保留仅在 mobile 布局生效的页签实际宽度测量。 |
-| `dsh_file_resources_apply.py` | 修复旧手机浏览器解析自定义资源地址时无法匹配文件资源提供器的问题。 |
-| `dsh_terminal_apply.py` | 继续安装前后端配套的重连、剪贴板、键盘协商、查询应答、搜索与链接增强。 |
+| `plugins/ds_bot/ds_bot_apply.py` | 恢复 Bot 0.2.7 输入框、消息操作栏与桌面宽度布局；撤销宿主旧历史插槽和手机 Enter 注入，保留上游历史和提示词实现。 |
+| `plugins/mobile/dsh_mobile_apply.py` | 移除 mobile 3.3.0 / 3.3.1 额外注册的 `ComposerFileButton`；撤销旧宿主 Enter 注入，保留仅在 mobile 布局生效的页签实际宽度测量。 |
+| `service/dsh_composer_metadata_apply.py` | 普通 DSH 输入框工具栏内增加会话信息 info 按钮，按需展开原生会话元信息；DS Bot 队列保持可见。 |
+| `service/dsh_file_resources_apply.py` | 修复旧手机浏览器解析自定义资源地址时无法匹配文件资源提供器的问题。 |
+| `service/dsh_terminal_apply.py` | 继续安装前后端配套的重连、剪贴板、键盘协商、查询应答、搜索与链接增强。 |
 
 历史组合 **Bot 0.2.6 + DSH alpha.2**、**mobile 3.2.1 + DSH alpha.2** 仍走独立旧版路径；不会把旧版 UI 补丁套到新包上。终端也支持原有 alpha.2，但前端与控制器必须同版。
 
@@ -32,18 +40,18 @@ bash ds-harness/dsh_install.sh
 # 单独补装插件并应用全部补丁
 bash ds-harness/dsh_plugins_install.sh
 # 手动应用／只检查全部补丁
-python3 ds-harness/srcs/patches/ds_bot_apply.py
-python3 ds-harness/srcs/patches/ds_bot_apply.py --check
-python3 ds-harness/srcs/patches/dsh_mobile_apply.py
-python3 ds-harness/srcs/patches/dsh_mobile_apply.py --check
-python3 ds-harness/srcs/patches/dsh_terminal_apply.py
-python3 ds-harness/srcs/patches/dsh_terminal_apply.py --check
+python3 ds-harness/srcs/patches/plugins/ds_bot/ds_bot_apply.py
+python3 ds-harness/srcs/patches/plugins/ds_bot/ds_bot_apply.py --check
+python3 ds-harness/srcs/patches/plugins/mobile/dsh_mobile_apply.py
+python3 ds-harness/srcs/patches/plugins/mobile/dsh_mobile_apply.py --check
+python3 ds-harness/srcs/patches/service/dsh_terminal_apply.py
+python3 ds-harness/srcs/patches/service/dsh_terminal_apply.py --check
 # 回归测试
-python3 -B -m unittest discover -s ds-harness/srcs -p 'test_ds_bot*.py'
-python3 -B -m unittest discover -s ds-harness/srcs -p 'test_dsh_composer_enter.py'
-python3 -B -m unittest discover -s ds-harness/srcs -p 'test_dsh_plugins_install.py'
-python3 -B -m unittest discover -s ds-harness/srcs -p 'test_dsh_mobile_apply.py'
-python3 -B -m unittest discover -s ds-harness/srcs -p 'test_dsh_terminal_apply.py'
+python3 -B -m unittest discover -s ds-harness/tests -p 'test_ds_bot*.py'
+python3 -B -m unittest discover -s ds-harness/tests -p 'test_dsh_composer_enter.py'
+python3 -B -m unittest discover -s ds-harness/tests -p 'test_dsh_plugins_install.py'
+python3 -B -m unittest discover -s ds-harness/tests -p 'test_dsh_mobile_apply.py'
+python3 -B -m unittest discover -s ds-harness/tests -p 'test_dsh_terminal_apply.py'
 ```
 
 默认定位本服务的 web profile 与 PATH 中的 DSH 安装；测试或明确的自定义安装可传 `--bot-dir` 和 `--host-dir`（DSH 的 `node_modules/@deepseek-ai` 目录）。升级到其他版本前必须重新核对上游实现；安装器仍按现有策略选择依赖版本，不会为了通过补丁检查静默降级。
@@ -60,7 +68,7 @@ python3 -B -m unittest discover -s ds-harness/srcs -p 'test_dsh_terminal_apply.p
 
 ## 校验与生效
 
-每个入口先核验其全部包版本和目标文件，再统一写入。每个目标在同目录暂存后原子替换；原件与清单备份到 `ds-harness/log/patch-backups/`，该入口后续写入失败会回滚已完成的替换。四个入口依次执行，不构成跨入口事务。进程被强制终止或断电后，先检查备份及 `--check` 结果。
+每个入口先核验其全部包版本和目标文件，再统一写入。每个目标在同目录暂存后原子替换；原件与清单备份到 `ds-harness/log/patch-backups/`，该入口后续写入失败会回滚已完成的替换。五个入口依次执行，不构成跨入口事务。进程被强制终止或断电后，先检查备份及 `--check` 结果。
 
 安装器不启停服务。运行实例可能缓存前端 bundle 或服务端模块，安装成功不代表线上已更新；应检查实际 `/plugins/` 响应。需要重载时先检查活跃任务、保存恢复信息，再安排维护，不能默认重启。
 
@@ -78,7 +86,7 @@ python3 -B -m unittest discover -s ds-harness/srcs -p 'test_dsh_terminal_apply.p
 
 ## 历史 mobile 3.2.1 顶栏按钮
 
-`python3 -B ds-harness/srcs/patches/dsh_mobile_apply.py`（仓库根目录运行，`--check` 只验证）统一修复 3.2.1 的手机顶栏布局及 DSH 0.2.2-alpha.2 的页签宽度折叠，插件安装入口自动执行。先校验插件和宿主两个目标，再共用原子写入与备份机制发布；任一目标版本或锚点不符都不写入。`--check` 同时检查两个目标，`--mobile-dir` / `--host-dir` 可指定隔离安装目录。
+`python3 -B ds-harness/srcs/patches/plugins/mobile/dsh_mobile_apply.py`（仓库根目录运行，`--check` 只验证）统一修复 3.2.1 的手机顶栏布局及 DSH 0.2.2-alpha.2 的页签宽度折叠，插件安装入口自动执行。先校验插件和宿主两个目标，再共用原子写入与备份机制发布；任一目标版本或锚点不符都不写入。`--check` 同时检查两个目标，`--mobile-dir` / `--host-dir` 可指定隔离安装目录。
 
 本机 3.2.1 发布源码把 `MobileNavToggle` 注入 `conversation.session.header.actions`，同时给其祖先 `headerActions` / `titleCluster` 设置滚动裁剪；侧边栏、文件按钮绝对定位到顶栏两端，落在裁剪区外而不可见，标题仍留有 32px。DSH 0.2.2-alpha.2 已有独立的 `conversation.header.leading` 槽位，因此补丁复用该槽位，只在手机且槽内存在本插件按钮时解除其隐藏。保留标题滚动、原有按钮事件及桌面隐藏条件；不修改宿主布局、不重启服务。
 
@@ -134,7 +142,7 @@ Paseo 终端增强：参考 [Paseo 运行时](https://github.com/getpaseo/paseo/
 - 右侧栏图标与文案替换属于本地偏好，上游仍使用文件夹图标和 Files 文案；新版不再覆盖。
 - 根据页签实际宽度计算可见数量：mobile 上游未实现；当前 DSH rc.1 原始逻辑仍按固定 120px 估算，保留宿主侧自适应补丁。
 
-3.3.0 分支保持 mobile 文件原样，仅迁移宿主旧 Enter 注入并维护页签自适应。3.2.1 的旧 UI 补丁已隔离到 `dsh_mobile_legacy.py`，仅在确认 3.2.1 / alpha.2 版本组合后加载；新版不加载这些变换。
+3.3.0 / 3.3.1 分支移除 `conversation.input.left` 中 `mobile-nav-file-upload` 的插槽注册，不再显示额外的 `ComposerFileButton`；宿主原有上传入口保留。该按钮注册已在本地安装的上游 3.3.1 bundle 中核实，属于本地界面偏好调整。安装器会重用此补丁，重复执行不产生额外变更；注册锚点未知或混合时拒绝写入。同时迁移宿主旧 Enter 注入并维护页签自适应。3.2.1 的旧 UI 补丁已隔离到 `dsh_mobile_legacy.py`，仅在确认 3.2.1 / alpha.2 版本组合后加载；新版不加载这些变换。
 
 ### Bot 0.2.7 布局补丁恢复
 
@@ -155,11 +163,37 @@ Paseo 终端增强：参考 [Paseo 运行时](https://github.com/getpaseo/paseo/
 依据：[上游讨论 #6217](https://github.com/deepseek-ai/deepseek-harness/discussions/6217)。讨论对 Chromium 版本分界有更正，故不按浏览器 UA 或版本号决定是否修复；现代 URL 解析返回主机名时保留原行为，仅当主机名为空时识别大小写不敏感的标准资源提供器名称。保留原文件地址、会话授权和文件读取接口，不改 mobile 插件。
 
 ```sh
-python3 -B ds-harness/srcs/patches/dsh_file_resources_apply.py
-python3 -B ds-harness/srcs/patches/dsh_file_resources_apply.py --check
-python3 -B -m unittest discover -s ds-harness/srcs -p 'test_dsh_file_resources.py'
+python3 -B ds-harness/srcs/patches/service/dsh_file_resources_apply.py
+python3 -B ds-harness/srcs/patches/service/dsh_file_resources_apply.py --check
+python3 -B -m unittest discover -s ds-harness/tests -p 'test_dsh_file_resources.py'
 ```
 
 插件安装器在其余补丁后自动执行。覆盖现代及模拟旧版 URL 解析、大小写协议、非法地址、未知版本拒绝、重复执行和发布检查。安装器不重启服务；手机需要重新加载页面，才能用到更新后的前端代码。
 
 手机触屏页面回归使用真实 DSH 前端与文件读取接口，在仅模拟旧 URL 主机名解析的条件下，修复前仓库 README 显示资源不可用，修复后进入 `text` 状态且无浏览器异常；25228 响应确认包含新补丁。未操作线上服务启停。
+
+## 主聊天会话信息
+
+`dsh_composer_metadata_apply.py` 适配 DSH `0.2.2-rc.1`，`alpha.2` 明确跳过此 UI 功能。核对当前上游 `ui-conversation` 的 InputBar/ContextMeter 与 `ui-chat` 的 StatsPills：已有实时用量和各项详情，但没有整个元信息区的收起控件。
+
+在输入框工具栏的录音/发送控制之前增加 info 按钮；提示文字复用 `contextPressure` 与 `contextOccupancy` 的上下文用量计算。工作目录、轮次、步骤、速度、Token、缓存命中和原上下文详情默认收起，点击 info 图标展开或收起。保留原生指标组件、弹层和实时更新，切换会话恢复默认收起。按钮有读屏标签、`aria-expanded`/`aria-controls`，支持键盘；展开后点击区域外或按 Esc 自动收起，内部详情操作不触发关闭；鼠标点击保留输入焦点，按钮不会提交表单。DS Bot 替换指标后的 BTW 队列及空状态区不显示此按钮。mobile 的旧圆环定位在元信息内部回退为正常文档流，避免出现第二个工具栏圆环。
+
+```sh
+python3 -B ds-harness/srcs/patches/service/dsh_composer_metadata_apply.py
+python3 -B ds-harness/srcs/patches/service/dsh_composer_metadata_apply.py --check
+python3 -B -m unittest discover -s ds-harness/tests -p 'test_dsh_composer_metadata.py'
+```
+
+插件安装器自动应用。浏览器交互回归位于 `tests/test_dsh_composer_metadata.cjs`，依赖通过 `DSH_TEST_PLAYWRIGHT`、`DSH_TEST_REACT_UMD`、`DSH_TEST_REACT_DOM_UMD` 指定已有 Playwright 与 React 18 / ReactDOM 18 的 UMD 文件；Python 测试在缺少这些变量时跳过浏览器项。独立浏览器覆盖 390/820/1600px、默认收起、实时用量、原详情按钮、草稿和输入焦点、键盘切换、会话重置及 Bot 队列，不连接线上服务、不发送消息。
+
+输入工具栏间距修复：mobile 3.3.1 对上传按钮保留 `margin-left:-9px!important`，权限按钮的 18px 图标与 14px 箭头合计 32px，而 modes 分组允许收缩。390px 页面实测上传按钮与权限点击区重叠约 3px。元信息补丁的 CSS 现固定左侧工具分组及权限组的完整宽度，撤销上传负边距，保留 8px 间隔，并限制上传按钮伪元素只向纵向扩展，避免横向盖住箭头。350px 以下右侧控制组换行；规则仅作用于启用了原生元信息圆环的移动主聊天输入框，未改上传或权限处理器。支持从上一版元信息补丁精确迁移，未知修改拒绝覆盖。
+
+实际 25228 主聊天手机页在 320/360/390/820px 下验证权限按钮与箭头到上传按钮均有 8px 间隔，点击命中区域分离，页面无横向溢出；未发送消息或改变权限设置。
+
+## 执行器精简（2026-11-07）
+
+- `common.py` 提供精确锚点替换、宿主路径解析、包版本校验、文件变换与发布检查；原子发布保留原有备份、权限、并发修改检查和失败回滚。终端、资源、Git 面板和会话信息执行器不再为了通用函数加载 DS Bot 的历史/UI 补丁。
+- mobile 的旧版入口复用已校验的包信息，避免再次读取相同 manifest。保留 3.2.1 / alpha.2 的独立支持，未删除仍被迁移和回归覆盖的历史锚点。
+- 资源解析的替换内容从原始锚点派生；当前 info SVG 从 JS helper 提取，避免 Python 重复维护相同实现。生成的目标 bundle 内容不变，安装实例只做 `--check` 验证。
+
+上游核查依据为 `data/patch-audit-20261106/pristine/` 中已按注册表完整性校验的 DSH rc.1 发布包，以及当前安装的 mobile 3.3.1 和 Git panel 1.11.2。原包仍需要终端增强和资源地址兼容处理；mobile 已有的 Enter/布局处理继续复用上游。Git panel 已有 `showInputPill` 开关，但既有本地偏好明确省略注册，不将其改为可被设置重新开启的隐藏逻辑。此次没有联网核验这些包之后的新版本。

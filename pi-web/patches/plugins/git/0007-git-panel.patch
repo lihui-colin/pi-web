@@ -1,0 +1,47 @@
+diff --git a/pi-web-plugins/git/browser/git-panel.ts b/pi-web-plugins/git/browser/git-panel.ts
+index fbe1650712808edf1161455bcf6eca92828d4fc3..b10327c9cbf5c6dc1882218e00f77076efc991e2 100644
+--- a/pi-web-plugins/git/browser/git-panel.ts
++++ b/pi-web-plugins/git/browser/git-panel.ts
+@@ -1,3 +1,4 @@
++import { renderVerticalSplit, verticalSplitStyle, verticalSplitStyles } from "./verticalSplit.js";
+ import type {
+   HtmlTemplateTag,
+   JsonValue,
+@@ -439,8 +440,9 @@ function renderGitPanel(html: HtmlTemplateTag, controller: GitUiController, cont
+         </div>
+       </section>
+       ${state.error === undefined ? null : html`<div class="git-error" role="alert">${state.error}</div>`}
+-      <section class="git-split">
++      <section class="git-split" style=${verticalSplitStyle("pi-web:git:split")}>
+         <div class="ui-file-list git-file-list">${renderFileList(html, controller, context, state, viewState)}</div>
++        ${renderVerticalSplit(html, "pi-web:git:split", "Resize changed files and diff")}
+         <div class="git-viewer">${renderDiffViewer(html, state)}</div>
+       </section>
+     </section>
+@@ -744,6 +746,7 @@ function errorMessage(error: unknown): string {
+ }
+ 
+ const gitPanelStyles = `
++  ${verticalSplitStyles(".git-panel ")}
+   .git-panel { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; overflow: hidden; color: var(--pi-text); background: var(--pi-bg); font: 13px var(--pi-font, system-ui, sans-serif); }
+   .git-panel ${activityElementTag} { display: none; }
+   .git-panel small, .git-panel .git-muted { color: var(--pi-muted); }
+@@ -755,8 +758,8 @@ const gitPanelStyles = `
+   .git-panel .git-toolbar .ui-button[aria-pressed="true"] { background: var(--pi-surface-hover); color: var(--pi-text); }
+   .git-panel .git-stale { border: 1px solid var(--pi-warning-border); border-radius: 999px; color: var(--pi-warning); padding: 1px 6px; font-size: 12px; align-self: center; }
+   .git-panel .git-error { flex: 0 0 auto; margin: 8px; border: 1px solid var(--pi-danger); border-radius: 7px; color: var(--pi-danger); padding: 8px; }
+-  .git-panel .git-split { flex: 1 1 auto; min-height: 0; display: grid; grid-template-rows: minmax(160px, 34%) minmax(0, 1fr); }
+-  .git-panel .git-file-list { border-bottom: 1px solid var(--pi-border); }
++  .git-panel .git-split { flex: 1 1 auto; min-height: 0; display: grid; }
++  .git-panel .git-file-list { border-bottom: 0; }
+   .git-panel .git-summary { margin: 10px 12px 8px; color: var(--pi-muted); }
+   .git-panel .submodule-badge { display: inline-block; margin-left: 6px; border: 1px solid var(--pi-border); border-radius: 999px; color: var(--pi-muted); padding: 0 5px; font-size: 11px; font-weight: 400; vertical-align: baseline; }
+   .git-panel .git-viewer { min-height: 0; overflow: auto; display: flex; flex-direction: column; }
+diff --git a/pi-web-plugins/git/browser/verticalSplit.ts b/pi-web-plugins/git/browser/verticalSplit.ts
+new file mode 120000
+index 0000000000000000000000000000000000000000..d0734f8b99dd4f8b28178b355fe6b6f3d8c21d56
+--- /dev/null
++++ b/pi-web-plugins/git/browser/verticalSplit.ts
+@@ -0,0 +1 @@
++../../files/verticalSplit.ts
+\ No newline at end of file

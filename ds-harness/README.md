@@ -189,8 +189,18 @@ Cookie 使用 DSH 原生 authority 哈希命名，只向后端传递本实例登
 ## 验证
 
 ```bash
-python3 -B -m unittest discover -s ds-harness/srcs -p 'test_*.py' -v
+python3 -B -m unittest discover -s ds-harness/tests -p 'test_*.py' -v
 bash -n ds-harness/dsh_web_run.sh
 ```
 
 测试使用临时证书、随机本地端口和模拟服务，覆盖安装计划、源码校验与失败清理、证书校验、Nginx 登录/Cookie、HTTPS/WSS、连接复用、流式传输、请求不重放、全部临时目录权限和启动器生命周期，不启停线上服务。代理集成测试需要先安装项目本地 Nginx。`test_support.py` 提供共享证书和本地 Nginx 测试夹具。
+
+主聊天输入框下方的元信息默认收起，通过工具栏内的 info 按钮展开或收起，点击区域外或按 Esc 自动收起。该功能由 `srcs/patches/service/dsh_composer_metadata_apply.py` 为 DSH rc.1 安装，详见 [补丁说明](srcs/patches/README.md)。
+
+### Codex 额度按钮（本地插件）
+
+运行 `bash ds-harness/srcs/install-codex-quota.sh`，在 web profile 中启用 `@local/dsh-codex-quota`。插件源码位于 `srcs/plugins/codex-quota/`，通过本地链接安装，无须重新下载现有插件。安装脚本可重复运行，保留其他依赖与 bundle。新插件在 DSH 下次加载 profile 时生效；安装器不会重启服务，重启前须检查活跃会话。
+
+输入框的 `conversation.composer.dock` 中显示圆圈图标，悬停提示“Codex 额度”。仅当前会话选择 Codex 来源时显示：Magpie provider（`magpie` 或 `magpie-*`）下的 `codex/…` 模型查询 `magpie accounts codex --json`；原生 `codex` / `openai-codex` provider 通过 `codex app-server --listen stdio://` 的 `account/read` 和 `account/rateLimits/read` 查询本机登录账户。其他来源隐藏入口；切换来源会关闭旧面板并取消旧请求。查询结果展示账户套餐、各额度窗口的已用比例与进度条、重置倒计时、剩余积分、邮箱和数据更新时间，可手动刷新。手机端显示底部面板。数据由 DSH 已认证的连接接口返回，只保留展示字段；查询超时为 20 秒，并发查询合并，失败可重试。未登录或缺失窗口、积分时显示相应提示。
+
+验证：`node --test tests/test_codex_quota.mjs`；浏览器回归使用 `tests/test_codex_quota_browser.cjs`，通过 `DSH_TEST_PLAYWRIGHT`、`DSH_TEST_REACT_UMD` 和 `DSH_TEST_REACT_DOM_UMD` 指定本地测试依赖。

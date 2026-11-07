@@ -12,18 +12,21 @@ cd pi-web
 
 `main` 是可独立维护的纯上游分支，安装和同步脚本不更新或依赖它。`terminal-patch` 是独立根提交开始的补丁分支，只保存定制维护所需的文件。不要将这两个分支相互 merge 或 rebase；通过应用 `.patch` 文件组合代码。
 
-`patches/0001-terminal.patch` 包含终端重连重绘、回放模式保留、OSC 52 剪贴板、触摸滚动、Shift+← 软键和 iOS 输入兼容修复及测试。Chat 与 Workspace Panel 使用官方布局。`patches/base-commit` 是整组补丁的唯一上游基线，必须包含一个完整的 40 位小写十六进制 commit ID。同步和普通安装使用这个提交；`update` 会先用官方 `main` 最新提交更新该文件。补丁和基线应一起审查、验证、提交。
+`patches/plugins/terminal/0001-terminal.patch` 包含终端重连重绘、回放模式保留、OSC 52 剪贴板、触摸滚动、Shift+← 软键和 iOS 输入兼容修复及测试。Chat 与 Workspace Panel 使用官方布局。`patches/base-commit` 是整组补丁的唯一上游基线，必须包含一个完整的 40 位小写十六进制 commit ID。同步和普通安装使用这个提交；`update` 会先用官方 `main` 最新提交更新该文件。补丁和基线应一起审查、验证、提交。
 
 ## 补丁分组
 
-当前维护 4 个按功能划分的补丁，保留主要分组编号，按文件名顺序应用：
+当前保留 4 组功能编号，按主服务与插件归档为 7 个文件；跨目录按文件名的全局数字顺序应用（以下路径相对于 `patches/`）：
 
 | 文件 | 内容 |
 | --- | --- |
-| `0001-terminal.patch` | 终端重绘、回放模式、OSC 52 复制及共用剪贴板检查、触摸滚动、Shift+← 软键、iOS 输入兼容及测试 |
-| `0006-codex-panel.patch` | 完整 Codex 插件、移动端布局、Plan 入口、复制兼容、Codex / Files 共用公式与历史图片渲染、构建集成及测试 |
-| `0007-workspace-panels.patch` | 项目弹窗长路径显示，以及 Files / Git 列表与预览区域拖动调整及测试 |
-| `0008-test-isolation.patch` | 网站单元测试禁用外部 CSS/脚本加载，保留本地资源和原有断言，避免依赖公网 |
+| `service/0001-clipboard.patch` | 主服务剪贴板检查与测试 |
+| `plugins/terminal/0001-terminal.patch` | 终端重绘、回放、OSC 52、触摸滚动、软键、iOS 输入兼容及测试 |
+| `plugins/codex/0006-codex-panel.patch` | 完整 Codex 插件、共用公式和历史图片渲染、构建集成及测试 |
+| `plugins/files/0007-files-panel.patch` | Files 列表与预览区域拖动调整及测试 |
+| `plugins/git/0007-git-panel.patch` | Git 面板拖动调整，复用 Files 分隔条实现 |
+| `service/0007-workspace.patch` | 主服务项目弹窗与工作区调整 |
+| `service/0008-test-isolation.patch` | 网站单元测试禁用外部 CSS/脚本加载，避免依赖公网 |
 
 原 `0001`–`0005` 和 `0008` 合并为终端补丁；原 `0006` 和 `0010` 合并为 Codex 补丁；原 `0007` 和 `0009` 合并为工作区界面补丁。共用剪贴板修复归入 `0001`。后续 `0008-files-markdown-math.patch` 已归入 `0006`，Codex 与 Files 直接使用同一 Markdown 渲染器，不再先新增再覆盖公式实现。未来修改已有功能时，更新对应补丁，不再堆叠同一功能的后续补丁。
 
@@ -40,7 +43,7 @@ sh scripts/install.sh
 
 `install.sh` 首先检查 `data/pi-web.conf`，不存在时从 Pi Web 根目录的 `pi-web.conf.example` 创建，已有配置保持不变。随后执行：
 
-1. 创建独立安装仓库，以 detached HEAD 检出 `patches/base-commit` 指定的提交（先由 sync.sh 同步至 data/pi-web-upstream.git），按文件名顺序应用当前工作区 `patches/*.patch`，使用 Git 三方合并。
+1. 创建独立安装仓库，以 detached HEAD 检出 `patches/base-commit` 指定的提交（先由 sync.sh 同步至 data/pi-web-upstream.git），跨目录按文件名全局顺序应用当前工作区 `patches/service/` 与 `patches/plugins/<插件>/` 下的补丁，使用 Git 三方合并。
 2. 在生成目录的 `.npmrc` 中配置 node-pty/esbuild 的安装脚本权限，安装依赖。
 3. 运行测试并构建。
 4. 若 PATH 中没有 `pi` 命令，全局安装 `@earendil-works/pi-coding-agent`（默认 `latest`，可设置 `PI_VERSION`）；已有 Agent 保留当前版本。安装失败会停止，不替换 pi-web。
@@ -103,12 +106,12 @@ sh scripts/sync.sh
 ```bash
 # HEAD 必须是当前补丁应用前的状态：上游基线 + 已提交的前序补丁
 # 将路径和编号替换为实际值
-git apply --3way --index /补丁工作区/patches/0001-terminal.patch
+git apply --3way --index /补丁工作区/patches/plugins/terminal/0001-terminal.patch
 # 如有冲突，编辑解决后仅暂存对应文件
 git add <已解决的文件>
 # 全部解决后，该命令应无输出
 git diff --name-only --diff-filter=U
-git diff --cached --binary --full-index HEAD > /补丁工作区/patches/0001-terminal.patch
+git diff --cached --binary --full-index HEAD > /补丁工作区/patches/plugins/terminal/0001-terminal.patch
 git commit -m "Apply patch 0001"
 # 对 0006、0007 依次重复，然后安装依赖、运行测试和构建
 ```
@@ -149,4 +152,4 @@ bash scripts/pi-web-run-jmfederico.sh update --dry-run        # 预览操作
 
 ## Files / Git 面板高度
 
-拖动文件列表与预览内容之间的分隔条可调整上下区域高度，Files 和 Git 分别记住比例。双击分隔条恢复默认；聚焦分隔条后也可用上下方向键调整，Shift 加速，Home / End 移至上下限。此改动需要安装包含 `0007-workspace-panels.patch` 的版本，并在允许中断会话的时机完成服务切换后刷新页面。
+拖动文件列表与预览内容之间的分隔条可调整上下区域高度，Files 和 Git 分别记住比例。双击分隔条恢复默认；聚焦分隔条后也可用上下方向键调整，Shift 加速，Home / End 移至上下限。此改动需要安装包含 `0007` 工作区和插件补丁组的版本，并在允许中断会话的时机完成服务切换后刷新页面。

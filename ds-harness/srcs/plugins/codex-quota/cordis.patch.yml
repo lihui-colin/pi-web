@@ -1,0 +1,3 @@
+- insert:
+    - id: local-codex-quota
+      name: '@local/dsh-codex-quota'
