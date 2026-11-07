@@ -208,6 +208,7 @@ bash "$script_dir/dsh_plugins_install.sh" "${plugin_args[@]}"
 # 补齐内置 bundle，并保留额外插件启用状态及其他已有 bundle 配置。
 run node --input-type=module - "$profile_dir/package.json" <<'NODE'
 import fs from 'node:fs';
+import { dirname, join } from 'node:path';
 const path = process.argv[2];
 const pkg = JSON.parse(fs.readFileSync(path, 'utf8'));
 const expected = [
@@ -229,6 +230,21 @@ fs.writeFileSync(temp, `${JSON.stringify(pkg, null, 2)}\n`, { mode: fs.statSync(
 fs.renameSync(temp, path);
 console.log('已配置 bundle：\n' + pkg.dsh.profile.bundles.join('\n'));
 console.log('插件实际安装版本：\n' + JSON.stringify(pkg.dependencies, null, 2));
+
+// Stats is a shipped client plugin, not a bundle selected by dsh-web-app.
+// Insert it into the user patch layer; preserve explicit existing choices.
+const patchPath = join(dirname(path), 'cordis.patch.yml');
+const patch = fs.existsSync(patchPath) ? fs.readFileSync(patchPath, 'utf8') : '';
+const hasStats = /^\s*(?:-\s*)?(?:id:\s*['"]?ui-stats['"]?\s*(?:#.*)?$|name:\s*['"]?@deepseek-ai\/dsh-experimental-client-ui-stats['"]?\s*(?:#.*)?$)/m.test(patch);
+if (!hasStats) {
+  const content = patch.replace(/^\s*\[\]\s*(?:#.*)?$/m, '').trimEnd();
+  const tempPatch = `${patchPath}.dsh-install.${process.pid}.tmp`;
+  fs.writeFileSync(tempPatch, `${content}${content ? '\n' : ''}- insert:\n    - id: ui-stats\n      name: '@deepseek-ai/dsh-experimental-client-ui-stats'\n`, {
+    mode: fs.existsSync(patchPath) ? fs.statSync(patchPath).mode & 0o777 : 0o600,
+  });
+  fs.renameSync(tempPatch, patchPath);
+  console.log('已启用主聊天统计页签');
+}
 NODE
 
 ensure_config() {

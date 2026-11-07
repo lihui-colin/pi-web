@@ -217,6 +217,27 @@ class InstallPlanTests(unittest.TestCase):
         self.assertEqual(result.returncode, 42, result.stderr)
         self.assertFalse(self.config.exists())
 
+    def test_stats_tab_inserted_once_in_profile_patch(self):
+        patch = self.profile / 'cordis.patch.yml'
+        patch.write_text('# profile overrides\n[]\n')
+        for _ in range(2):
+            result = self.install('127.0.0.1\n25228\n')
+            self.assertEqual(result.returncode, 0, result.stderr)
+        text = patch.read_text()
+        self.assertIn('# profile overrides', text)
+        self.assertNotIn('[]', text)
+        self.assertEqual(text.count('id: ui-stats'), 1)
+        self.assertIn('- insert:\n    - id: ui-stats', text)
+        self.assertIn("name: '@deepseek-ai/dsh-experimental-client-ui-stats'", text)
+
+    def test_stats_tab_preserves_explicit_disabled_choice(self):
+        patch = self.profile / 'cordis.patch.yml'
+        original = '- insert:\n    - id: ui-stats\n      name: "@deepseek-ai/dsh-experimental-client-ui-stats"\n      disabled: true\n'
+        patch.write_text(original)
+        result = self.install('127.0.0.1\n25228\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(patch.read_text(), original)
+
     def test_upgrade_preview_includes_git_panel(self):
         (self.profile / 'node_modules/@xbzbing/dsh-git-panel/package.json').unlink()
         self.assertIn('@xbzbing/dsh-git-panel@1.13.1', self.run_plan('--upgrade'))
