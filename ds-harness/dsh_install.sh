@@ -41,6 +41,10 @@ for bin in node npm curl sh; do
     fi
 done
 node -e 'if (Number(process.versions.node.split(".")[0]) < 24) { console.error("需要 Node.js >=24"); process.exit(1); }'
+if ! "$dry_run"; then
+    command -v python3 >/dev/null 2>&1 || { printf '缺少命令：python3（用于 DSH 兼容补丁）。\n' >&2; exit 1; }
+    python3 -B "$script_dir/srcs/patches/apply.py" --validate-tools
+fi
 export DSH_HOME="$script_dir/data/.dsh"
 export DSH_AGENTS_HOME="$script_dir/data/.agents"
 # magpie 官方安装器默认把 CLI 放在 ~/.local/bin。

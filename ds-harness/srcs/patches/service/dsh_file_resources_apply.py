@@ -32,13 +32,13 @@ def patch(text):
     return replace_once(text, OLD, NEW)
 
 
-def plan_changes(host=None):
+def plan_changes(host=None, *, read_text=Path.read_text):
     host = host_directory(host)
     package = Path(host) / 'dsh-client-resources'
     # Both published bundles share protocolOf.
     verify_package(package, '@deepseek-ai/dsh-client-resources', ('0.2.2-alpha.2', '0.2.2-rc.1'))
     path = package / 'lib/client.js'
-    return [read_change(path, patch)]
+    return [read_change(path, patch, read_text=read_text)]
 
 
 def main():

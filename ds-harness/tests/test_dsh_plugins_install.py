@@ -1,4 +1,4 @@
-from test_support import source_file, fixture_file
+from test_support import source_file, fixture_file, copy_patch_tools
 #!/usr/bin/env python3
 """Isolated installer tests: only fake dsh and temporary profiles are modified."""
 import json
@@ -61,17 +61,7 @@ class PluginInstallerTests(unittest.TestCase):
             (self.bin / name).symlink_to(executable)
         for name in ('dsh_install.sh', 'dsh_plugins_install.sh'):
             shutil.copy2(source_file(name), fixture_file(self.root, name))
-        (self.root / 'srcs/patches/service').mkdir(parents=True, exist_ok=True)
-        (self.root / 'srcs/patches/plugins/ds_bot').mkdir(parents=True, exist_ok=True)
-        (self.root / 'srcs/patches/plugins/mobile').mkdir(parents=True, exist_ok=True)
-        (self.root / 'srcs/patches/plugins/git_panel').mkdir(parents=True, exist_ok=True)
-        (self.root / 'srcs/patches/plugins/ds_bot/ds_bot_apply.py').write_text(
-            'import os, sys\nprint("PATCH_BUNDLE_APPLIED")\nsys.exit(int(os.environ.get("FAKE_PATCH_FAIL", "0")))\n')
-        (self.root / 'srcs/patches/plugins/mobile/dsh_mobile_apply.py').write_text('print("MOBILE_PATCH_APPLIED")\n')
-        (self.root / 'srcs/patches/plugins/git_panel/dsh_git_panel_apply.py').write_text('print("GIT_PANEL_PATCH_APPLIED")\n')
-        (self.root / 'srcs/patches/service/dsh_terminal_apply.py').write_text('print("TERMINAL_PATCH_APPLIED")\n')
-        (self.root / 'srcs/patches/service/dsh_composer_metadata_apply.py').write_text('print("COMPOSER_METADATA_PATCH_APPLIED")\n')
-        (self.root / 'srcs/patches/service/dsh_file_resources_apply.py').write_text('print("FILE_RESOURCES_PATCH_APPLIED")\n')
+        copy_patch_tools(self.root)
         (fixture_file(self.root, 'dsh_nginx_install.sh')).write_text('#!/bin/bash\nexit 0\n')
         self.fake('dsh', '#!' + shutil.which('python3') + '\n' + FAKE_DSH)
         for name in ('npm', 'curl'):
@@ -219,6 +209,15 @@ class PluginInstallerTests(unittest.TestCase):
         for parent in (False, True):
             self.run_script(parent=parent, status=29)
         self.assertFalse((self.root / 'data/dsh.conf').exists())
+
+    def test_missing_patch_tool_aborts_before_installation(self):
+        self.seed(['custom'], installed=False)
+        fixture_file(self.root, 'patches/service/dsh_composer_metadata_apply.py').unlink()
+        before = self.snapshot()
+        for parent in (False, True):
+            self.run_script(parent=parent, status=1)
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(self.snapshot(), before)
 
     def test_upgrade_preserves_explicit_mobile_repository_and_pin(self):
         self.seed(['custom', 'dsh-web-mobile'])

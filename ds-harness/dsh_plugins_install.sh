@@ -30,8 +30,9 @@ if [[ -n "$expected_version" ]] && ! "$dry_run"; then
 fi
 command -v node >/dev/null 2>&1 || { printf '缺少命令：node。\n' >&2; exit 1; }
 if ! "$dry_run"; then
-    command -v python3 >/dev/null 2>&1 || { printf '缺少命令：python3（用于 DS Bot 兼容补丁）。\n' >&2; exit 1; }
-    [[ -f "$script_dir/srcs/patches/plugins/ds_bot/ds_bot_apply.py" ]] || { printf '缺少 DS Bot 统一补丁文件。\n' >&2; exit 1; }
+    command -v python3 >/dev/null 2>&1 || { printf '缺少命令：python3（用于 DSH 兼容补丁）。\n' >&2; exit 1; }
+    # Validate every local tool and helper before downloading or changing the profile.
+    python3 -B "$script_dir/srcs/patches/apply.py" --validate-tools
 fi
 export DSH_HOME="$script_dir/data/.dsh"
 export DSH_AGENTS_HOME="$script_dir/data/.agents"
@@ -154,12 +155,6 @@ if (!fs.existsSync(file)) {
 BUNDLES_NODE
 fi
 if (( status != 0 )); then exit "$status"; fi
-# Always validate/migrate the reviewed version pair, even when downloads were skipped.
-# Current Bot/mobile use upstream UI; migrate retired host hooks before fitting tabs.
-# Terminal fixes stay paired. Unknown or mixed releases must fail explicitly.
-run python3 -B "$script_dir/srcs/patches/plugins/ds_bot/ds_bot_apply.py"
-run python3 -B "$script_dir/srcs/patches/plugins/mobile/dsh_mobile_apply.py"
-run python3 -B "$script_dir/srcs/patches/plugins/git_panel/dsh_git_panel_apply.py"
-run python3 -B "$script_dir/srcs/patches/service/dsh_terminal_apply.py"
-run python3 -B "$script_dir/srcs/patches/service/dsh_file_resources_apply.py"
-run python3 -B "$script_dir/srcs/patches/service/dsh_composer_metadata_apply.py"
+# Validate the complete patch set before publishing any target file.
+# Shared host files are composed in memory and backed up only once.
+run python3 -B "$script_dir/srcs/patches/apply.py"

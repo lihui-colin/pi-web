@@ -129,7 +129,7 @@ def patch_composer_file_button(text):
     return replace_once(text, COMPOSER_FILE_BUTTON, COMPOSER_FILE_BUTTON_REMOVED)
 
 
-def plan_changes(package=None, host=None):
+def plan_changes(package=None, host=None, *, read_text=Path.read_text):
     package = Path(package) if package is not None else COMPONENT_ROOT / 'data/.dsh/profiles/web/node_modules/dsh-web-mobile'
     host = host_directory(host)
     conversation = Path(host) / 'dsh-client-ui-conversation'
@@ -140,9 +140,9 @@ def plan_changes(package=None, host=None):
             and (host_manifest.get('name'), host_manifest.get('version')) == (
                 '@deepseek-ai/dsh-client-ui-conversation', '0.2.2-rc.1')):
         plugin_path = package / 'lib/client.js'
-        plugin = plugin_path.read_text()
+        plugin = read_text(plugin_path)
         path = conversation / 'lib/client.js'
-        original = path.read_text()
+        original = read_text(path)
         # Reviewed upstream 522db94f552d89934f814853ad10c96f31eba6da (3.3.0):
         # 3.3.1 at 4e71eb67de7dac9d8b2572757c81e47aa32a32fb keeps these
         # layout and Enter sources unchanged (drawer/packaging fixes only).
@@ -161,8 +161,8 @@ def plan_changes(package=None, host=None):
     from patches.plugins.mobile.dsh_mobile_legacy import patch
     # Both manifests were validated above; prepare both before publishing either.
     return [
-        read_change(package / 'lib/client.js', patch),
-        read_change(conversation / 'lib/client.js', patch_view_tabs),
+        read_change(package / 'lib/client.js', patch, read_text=read_text),
+        read_change(conversation / 'lib/client.js', patch_view_tabs, read_text=read_text),
     ]
 
 

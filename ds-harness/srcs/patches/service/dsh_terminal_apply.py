@@ -194,7 +194,7 @@ def patch_host(text):
     return apply_replacements(text, HOST_REPLACEMENTS)
 
 
-def plan_changes(host=None):
+def plan_changes(host=None, *, read_text=Path.read_text):
     host = host_directory(host)
     version = json.loads((host / 'dsh-client-ui-sidebar-terminal/package.json').read_text()).get('version')
     if version not in ('0.2.2-alpha.2', '0.2.2-rc.1'):
@@ -210,7 +210,7 @@ def plan_changes(host=None):
     paths = [(host / 'dsh-client-ui-sidebar-terminal/lib/client.terminal.js', patch_frontend),
              (host / 'dsh-api-terminal-controller/lib/client.js', patch_model),
              (host / 'dsh-api-terminal-controller/lib/index.js', patch_host)]
-    return [read_change(path, transform) for path, transform in paths]
+    return [read_change(path, transform, read_text=read_text) for path, transform in paths]
 
 
 def main():

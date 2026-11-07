@@ -19,13 +19,13 @@ def patch(text):
     return replace_once(text, PILL, REMOVED)
 
 
-def plan_changes(package=None):
+def plan_changes(package=None, *, read_text=Path.read_text):
     package = Path(package) if package else COMPONENT_ROOT / 'data/.dsh/profiles/web/node_modules/@xbzbing/dsh-git-panel'
     if not package.exists():
         return []
     verify_package(package, '@xbzbing/dsh-git-panel', ('1.11.2',))
     path = package / 'lib/client.js'
-    return [read_change(path, patch)]
+    return [read_change(path, patch, read_text=read_text)]
 
 
 def main():

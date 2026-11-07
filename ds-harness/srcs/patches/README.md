@@ -7,7 +7,7 @@
 
 会话信息 info 图标通过 `conversation.input.right` 注册，ID 为 `dsh-session-info`、`order: -100`，使用宿主 `chat` locale 和会话投影。`dsh_composer_metadata_apply.py` 会撤销旧的 `trailing` 直接挂载，再注册插槽，保留展开状态与元信息的 React Context。mobile 的额外文件按钮同样先检查是否存在，不存在时保持插件原样；存在但注册代码未知时拒绝修改。
 
-当前核验组合为 **DSH 0.2.2-rc.1、ds-bot 0.2.7、dsh-web-mobile 3.3.0 / 3.3.1、xterm/headless 6.0.0、addon-serialize 0.14.0**。六个入口通过 `common.py` 共用补丁校验、宿主定位、原子写入、备份与回滚函数，未知版本、混合宿主版本或不完整旧补丁会停止。
+当前核验组合为 **DSH 0.2.2-rc.1、ds-bot 0.2.7、dsh-web-mobile 3.3.0 / 3.3.1、xterm/headless 6.0.0、addon-serialize 0.14.0**。六个独立入口通过 `common.py` 共用补丁校验、宿主定位、原子写入、备份与回滚函数；`apply.py` 统一编排全部补丁，未知版本、混合宿主版本或不完整旧补丁会停止。
 
 | 入口 | 当前版本的处理 |
 | --- | --- |
@@ -33,13 +33,16 @@
 
 ## 安装与检查
 
-主安装器 `dsh_install.sh` 调用插件安装器 `dsh_plugins_install.sh`；插件安装成功后，后者依次执行 DS Bot 迁移、mobile 兼容处理、terminal 补丁和文件资源兼容补丁。首次安装、`--upgrade`、插件已安装而跳过下载时都会执行。mobile 已声明的 `github:` 来源（包括提交固定值）会保留，Codex 插件与 DSH 同版。补丁失败会使安装返回非零退出码；`--dry-run` 只打印计划，不修改文件。
+主安装器 `dsh_install.sh` 调用插件安装器 `dsh_plugins_install.sh`；后者在下载插件前通过 `apply.py --validate-tools` 检查本地补丁模块及导入时读取的辅助文件；主安装器也会在安装依赖前执行该检查。插件安装成功后，通过 `apply.py` 按 DS Bot、mobile、Git panel、terminal、文件资源、会话信息的顺序规划全部补丁。首次安装、`--upgrade`、插件已安装而跳过下载时都会执行。mobile 已声明的 `github:` 来源（包括提交固定值）会保留，Codex 插件与 DSH 同版。补丁失败会使安装返回非零退出码；`--dry-run` 只打印计划，不修改文件。
 
 ```sh
 bash ds-harness/dsh_install.sh
 # 单独补装插件并应用全部补丁
 bash ds-harness/dsh_plugins_install.sh
 # 手动应用／只检查全部补丁
+python3 -B ds-harness/srcs/patches/apply.py
+python3 -B ds-harness/srcs/patches/apply.py --check
+# 需要单独检查某组补丁时仍可使用原入口
 python3 ds-harness/srcs/patches/plugins/ds_bot/ds_bot_apply.py
 python3 ds-harness/srcs/patches/plugins/ds_bot/ds_bot_apply.py --check
 python3 ds-harness/srcs/patches/plugins/mobile/dsh_mobile_apply.py
@@ -47,6 +50,7 @@ python3 ds-harness/srcs/patches/plugins/mobile/dsh_mobile_apply.py --check
 python3 ds-harness/srcs/patches/service/dsh_terminal_apply.py
 python3 ds-harness/srcs/patches/service/dsh_terminal_apply.py --check
 # 回归测试
+python3 -B -m unittest discover -s ds-harness/tests -p 'test_dsh_patches.py'
 python3 -B -m unittest discover -s ds-harness/tests -p 'test_ds_bot*.py'
 python3 -B -m unittest discover -s ds-harness/tests -p 'test_dsh_composer_enter.py'
 python3 -B -m unittest discover -s ds-harness/tests -p 'test_dsh_plugins_install.py'
@@ -54,7 +58,7 @@ python3 -B -m unittest discover -s ds-harness/tests -p 'test_dsh_mobile_apply.py
 python3 -B -m unittest discover -s ds-harness/tests -p 'test_dsh_terminal_apply.py'
 ```
 
-默认定位本服务的 web profile 与 PATH 中的 DSH 安装；测试或明确的自定义安装可传 `--bot-dir` 和 `--host-dir`（DSH 的 `node_modules/@deepseek-ai` 目录）。升级到其他版本前必须重新核对上游实现；安装器仍按现有策略选择依赖版本，不会为了通过补丁检查静默降级。
+统一入口默认定位本服务的 web profile 与 PATH 中的 DSH 安装，可用 `--profile-dir`、`--host-dir` 指向隔离安装。DS Bot 独立入口可传 `--bot-dir` 和 `--host-dir`（DSH 的 `node_modules/@deepseek-ai` 目录）。升级到其他版本前必须重新核对上游实现；安装器仍按现有策略选择依赖版本，不会为了通过补丁检查静默降级。
 
 ## 历史组合的修复（Bot 0.2.6 / DSH alpha.2）
 
@@ -68,7 +72,7 @@ python3 -B -m unittest discover -s ds-harness/tests -p 'test_dsh_terminal_apply.
 
 ## 校验与生效
 
-每个入口先核验其全部包版本和目标文件，再统一写入。每个目标在同目录暂存后原子替换；原件与清单备份到 `ds-harness/log/patch-backups/`，该入口后续写入失败会回滚已完成的替换。五个入口依次执行，不构成跨入口事务。进程被强制终止或断电后，先检查备份及 `--check` 结果。
+统一入口先核验全部包版本和目标文件，将对同一文件的多组变换按顺序合并到内存中；全部规划成功后才发布，每个目标只备份和替换一次。每个目标在同目录暂存后原子替换；原件与清单备份到 `ds-harness/log/patch-backups/`，后续写入失败会回滚本次全部已完成的替换。`--check` 只校验，不写入；重复应用不创建新备份或改动目标时间戳。独立入口只保证本组文件的回滚范围；npm 插件安装与补丁发布不构成共同事务。进程被强制终止或断电后，先检查备份及 `--check` 结果。
 
 安装器不启停服务。运行实例可能缓存前端 bundle 或服务端模块，安装成功不代表线上已更新；应检查实际 `/plugins/` 响应。需要重载时先检查活跃任务、保存恢复信息，再安排维护，不能默认重启。
 

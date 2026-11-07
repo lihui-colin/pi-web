@@ -337,7 +337,7 @@ HISTORY_CONVERSATION_REPLACEMENTS = [
 ] + HISTORY_VIEW_REPLACEMENTS
 
 
-def plan_changes(bot=None, host=None):
+def plan_changes(bot=None, host=None, *, read_text=Path.read_text):
     bot = Path(bot) if bot is not None else COMPONENT_ROOT / 'data/.dsh/profiles/web/node_modules/ds-bot'
     host = host_directory(host)
     packages = [
@@ -355,14 +355,14 @@ def plan_changes(bot=None, host=None):
         # width / inline composer / More-menu layouts. Its message components
         # use import_react19; keep the exact version gate and anchor validation.
         bot_client = bot / 'client.js'
-        original = bot_client.read_text()
+        original = read_text(bot_client)
         fixed = patch_presentation(patch_mobile(original, 'import_react19'), 'import_react19')
         changes = [(bot_client, original, fixed)]
         for path, replacements in (
             (host / 'dsh-client-ui-chat/lib/client.js', HISTORY_CHAT_REPLACEMENTS),
             (host / 'dsh-client-ui-conversation/lib/client.js', HISTORY_CONVERSATION_REPLACEMENTS),
         ):
-            original = path.read_text()
+            original = read_text(path)
             fixed = retire_host_history(original, replacements)
             if path.parent.parent.name == 'dsh-client-ui-conversation':
                 fixed = retire_composer(fixed)
@@ -379,7 +379,7 @@ def plan_changes(bot=None, host=None):
     ]
     changes = []
     for path, steps in transforms:
-        original = path.read_text()
+        original = read_text(path)
         fixed = original
         for transform in steps:
             fixed = transform(fixed)

@@ -1,4 +1,4 @@
-from test_support import source_file, fixture_file
+from test_support import source_file, fixture_file, copy_patch_tools
 """Isolated installer tests: no network, real builds, or service changes."""
 import hashlib
 import io
@@ -33,16 +33,7 @@ def copy_installers(root):
     project.mkdir()
     for source in (SCRIPT, NGINX_SCRIPT, PLUGIN_SCRIPT):
         shutil.copy2(source, fixture_file(project, source.name))
-    (project / 'srcs/patches/service').mkdir(parents=True, exist_ok=True)
-    (project / 'srcs/patches/plugins/ds_bot').mkdir(parents=True, exist_ok=True)
-    (project / 'srcs/patches/plugins/mobile').mkdir(parents=True, exist_ok=True)
-    (project / 'srcs/patches/plugins/git_panel').mkdir(parents=True, exist_ok=True)
-    (project / 'srcs/patches/plugins/ds_bot/ds_bot_apply.py').write_text('print("PATCH_BUNDLE_APPLIED")\n')
-    (project / 'srcs/patches/plugins/mobile/dsh_mobile_apply.py').write_text('print("MOBILE_PATCH_APPLIED")\n')
-    (project / 'srcs/patches/plugins/git_panel/dsh_git_panel_apply.py').write_text('print("GIT_PANEL_PATCH_APPLIED")\n')
-    (project / 'srcs/patches/service/dsh_terminal_apply.py').write_text('print("TERMINAL_PATCH_APPLIED")\n')
-    (project / 'srcs/patches/service/dsh_composer_metadata_apply.py').write_text('print("COMPOSER_METADATA_PATCH_APPLIED")\n')
-    (project / 'srcs/patches/service/dsh_file_resources_apply.py').write_text('print("FILE_RESOURCES_PATCH_APPLIED")\n')
+    copy_patch_tools(project)
     return project
 
 

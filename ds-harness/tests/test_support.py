@@ -11,6 +11,11 @@ import unittest
 SRC_DIR = Path(__file__).resolve().parents[1] / "srcs"
 sys.path.insert(0, str(SRC_DIR))
 
+ENTRY_SCRIPTS = frozenset((
+    'dsh_install.sh', 'dsh_web_run.sh', 'dsh_proxy.sh',
+    'dsh_plugins_install.sh', 'dsh_nginx_install.sh', 'dsh_cert.sh',
+))
+
 
 def local_nginx():
     prefix = Path(__file__).resolve().parents[1] / "data/.local/nginx"
@@ -48,12 +53,27 @@ def copy_test_launcher(directory):
 
 
 def source_file(name):
-    base = SRC_DIR
-    return (base.parent if name in ('dsh_install.sh', 'dsh_web_run.sh', 'dsh_proxy.sh',
-                                   'dsh_plugins_install.sh', 'dsh_nginx_install.sh', 'dsh_cert.sh') else base) / name
+    return (SRC_DIR.parent if name in ENTRY_SCRIPTS else SRC_DIR) / name
 
 def fixture_file(root, name):
-    target = Path(root) / (name if name in ('dsh_install.sh', 'dsh_web_run.sh', 'dsh_proxy.sh',
-                                           'dsh_plugins_install.sh', 'dsh_nginx_install.sh', 'dsh_cert.sh') else 'srcs/' + name)
+    target = Path(root) / (name if name in ENTRY_SCRIPTS else 'srcs/' + name)
     target.parent.mkdir(parents=True, exist_ok=True)
     return target
+
+
+def copy_patch_tools(root):
+    """Use the real coordinator with isolated planners in installer tests."""
+    from patches.apply import PATCHES
+    for name in ('patches/apply.py', 'patches/common.py'):
+        shutil.copy2(source_file(name), fixture_file(root, name))
+    markers = ('PATCH_BUNDLE', 'MOBILE_PATCH', 'GIT_PANEL_PATCH', 'TERMINAL_PATCH',
+               'FILE_RESOURCES_PATCH', 'COMPOSER_METADATA_PATCH')
+    for (module, _, _), marker in zip(PATCHES, markers, strict=True):
+        fixture_file(root, 'patches/' + module.replace('.', '/') + '.py').write_text(
+            'import os\n'
+            'def plan_changes(**options):\n'
+            f'    print("{marker}_APPLIED")\n'
+            '    status = int(os.environ.get("FAKE_PATCH_FAIL", "0"))\n'
+            '    if status: raise SystemExit(status)\n'
+            '    return []\n'
+        )

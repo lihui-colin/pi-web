@@ -82,8 +82,8 @@ def verify_package(directory, name, versions):
     return manifest['version']
 
 
-def read_change(path, transform):
-    original = path.read_text()
+def read_change(path, transform, *, read_text=Path.read_text):
+    original = read_text(path)
     return path, original, transform(original)
 
 
