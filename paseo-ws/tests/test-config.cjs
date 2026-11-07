@@ -156,6 +156,8 @@ test('proxy configuration uses local certificates, configured port, and intact N
   assert.ok(text.includes('server_name 127.0.0.2;'));
   assert.ok(text.includes(`${home}/tls/127.0.0.2/fullchain.pem`));
   assert.ok(text.includes('$http_upgrade'));
+  assert.ok(text.includes('gzip on;'));
+  assert.ok(text.includes('gzip_types application/javascript application/json text/css image/svg+xml;'));
   assert.ok(text.includes(`error_log ${path.resolve(home, '..', 'log')}/nginx/error.log warn;`));
   assert.ok(text.includes(`pid ${home}/nginx/nginx.pid;`));
   assert.ok(!text.includes('@PASEO_'));

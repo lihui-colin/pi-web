@@ -5,6 +5,11 @@ error_log @PASEO_LOG@/nginx/error.log warn;
 events { worker_connections 1024; }
 http {
     access_log off;
+    gzip on;
+    gzip_min_length 1024;
+    gzip_comp_level 5;
+    gzip_vary on;
+    gzip_types application/javascript application/json text/css image/svg+xml;
     client_body_temp_path @PASEO_DATA@/nginx/body;
     proxy_temp_path @PASEO_DATA@/nginx/proxy;
     fastcgi_temp_path @PASEO_DATA@/nginx/fastcgi;
