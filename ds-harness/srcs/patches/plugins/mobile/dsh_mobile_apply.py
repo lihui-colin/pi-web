@@ -3,13 +3,11 @@
 
 The old plugin UI transforms only apply to the separate 3.2.1 / alpha.2 pair.
 """
-import argparse
-import json
 from pathlib import Path
 if not __package__:
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-from patches.common import COMPONENT_ROOT, host_directory, publish, read_change, replace_once
+from patches.common import COMPONENT_ROOT, host_directory, publish, read_change, replace_once, verify_package, patch_cli
 from patches.plugins.ds_bot.ds_bot_apply import retire_composer
 
 # Preserve native pin/menu behavior; fit tabs using their rendered widths.
@@ -133,12 +131,10 @@ def plan_changes(package=None, host=None, *, read_text=Path.read_text):
     package = Path(package) if package is not None else COMPONENT_ROOT / 'data/.dsh/profiles/web/node_modules/dsh-web-mobile'
     host = host_directory(host)
     conversation = Path(host) / 'dsh-client-ui-conversation'
-    mobile_manifest = json.loads((package / 'package.json').read_text())
-    host_manifest = json.loads((conversation / 'package.json').read_text())
-    if (mobile_manifest.get('name') == 'dsh-web-mobile'
-            and mobile_manifest.get('version') in ('3.3.0', '3.3.1')
-            and (host_manifest.get('name'), host_manifest.get('version')) == (
-                '@deepseek-ai/dsh-client-ui-conversation', '0.2.2-rc.1')):
+    mobile_version = verify_package(package, 'dsh-web-mobile', ('3.2.1', '3.3.0', '3.3.1'))
+    host_version = '0.2.2-alpha.2' if mobile_version == '3.2.1' else '0.2.2-rc.1'
+    verify_package(conversation, '@deepseek-ai/dsh-client-ui-conversation', (host_version,))
+    if mobile_version != '3.2.1':
         plugin_path = package / 'lib/client.js'
         plugin = read_text(plugin_path)
         path = conversation / 'lib/client.js'
@@ -154,10 +150,6 @@ def plan_changes(package=None, host=None, *, read_text=Path.read_text):
         return [(plugin_path, plugin, patch_composer_file_button(plugin)), (path, original, fixed)]
     # Legacy 3.2.1 only: it predates those upstream fixes.
     # Load old UI transforms only for the reviewed legacy version pair.
-    if (mobile_manifest.get('name'), mobile_manifest.get('version'),
-            host_manifest.get('name'), host_manifest.get('version')) != (
-            'dsh-web-mobile', '3.2.1', '@deepseek-ai/dsh-client-ui-conversation', '0.2.2-alpha.2'):
-        raise ValueError('Unsupported mobile / host pair; review upstream before applying')
     from patches.plugins.mobile.dsh_mobile_legacy import patch
     # Both manifests were validated above; prepare both before publishing either.
     return [
@@ -167,19 +159,8 @@ def plan_changes(package=None, host=None, *, read_text=Path.read_text):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--check', action='store_true')
-    parser.add_argument('--mobile-dir', type=Path, help='Installed dsh-web-mobile package')
-    parser.add_argument('--host-dir', type=Path, help='Installed DSH node_modules/@deepseek-ai directory')
-    args = parser.parse_args()
-    changes = plan_changes(args.mobile_dir, args.host_dir)
-    if args.check:
-        pending = [str(path) for path, original, fixed in changes if original != fixed]
-        if pending:
-            raise SystemExit('Mobile fixes missing: ' + ', '.join(pending))
-    else:
-        publish(changes)
-    print('Reviewed mobile UI / host adaptive tabs state verified; no service restarted.')
+    patch_cli(plan_changes, __doc__, {'package': '--mobile-dir', 'host': '--host-dir'},
+              'Reviewed mobile UI / host adaptive tabs verified')
 
 
 if __name__ == '__main__':

@@ -4,6 +4,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const zlib = require('node:zlib');
 const baseline = require('./patch-web-ui.baseline.json');
 
 function checkCompatibility(installed, warn = console.warn) {
@@ -15,6 +16,30 @@ function checkCompatibility(installed, warn = console.warn) {
   } else if (installed.gitHead !== baseline.commit) {
     warn(`[WARN] Web UI 补丁 commit 不匹配：预期 ${baseline.commit}，当前 ${installed.gitHead}。请重新核查补丁；将继续检查资源结构。`);
   }
+}
+
+function patchHoverCards(source) {
+  const replacements = [
+    ['onPointerEnter:s.openNow,onPointerLeave:s.scheduleClose',
+      'onPointerEnter:e=>{"mouse"===e.pointerType&&s.openNow()},onPointerLeave:s.scheduleClose'],
+    ['_.current=n.matches(":focus-visible"),e.contains(n)?I():f.current?.contains(n)&&L()',
+      '_.current=n.matches(":focus-visible"),_.current&&(e.contains(n)?I():f.current?.contains(n)&&L())'],
+    ['document.addEventListener("focusin",n),document.addEventListener("focusout",o)',
+      'document.addEventListener("pointerdown",t),document.addEventListener("focusin",n),document.addEventListener("focusout",o)'],
+    ['document.removeEventListener("focusin",n),document.removeEventListener("focusout",o)',
+      'document.removeEventListener("pointerdown",t),document.removeEventListener("focusin",n),document.removeEventListener("focusout",o)'],
+  ];
+  // Limit these minified anchors to the upstream HoverCard module.
+  const start = source.lastIndexOf('\n__d(', source.indexOf('_e.HoverCard=function'));
+  const end = source.indexOf('\n__d(', start + 1);
+  if (start < 0 || end < 0) throw new Error('Upstream HoverCard module changed; review patch.');
+  let module = source.slice(start, end);
+  for (const [before, after] of replacements) {
+    if (module.split(after).length === 2) continue;
+    if (module.split(before).length !== 2) throw new Error('Upstream HoverCard structure changed; review patch: ' + before);
+    module = module.replace(before, after);
+  }
+  return source.slice(0, start) + module + source.slice(end);
 }
 
 function main() {
@@ -48,6 +73,9 @@ function main() {
   // Align the underlying client timeout (normally 15s) with the TLS probe's budget.
   replaceOnce('if("directTcp"===t.type)return{...h,url:(0,s.buildDaemonWebSocketUrl)(t.endpoint,{useTls:t.useTls??!1})}',
    'if("directTcp"===t.type)return{...h,...t.useTls?{connectTimeoutMs:n?.timeoutMs??20000}:{},url:(0,s.buildDaemonWebSocketUrl)(t.endpoint,{useTls:t.useTls??!1})}');
+  // Touch devices do not reliably emit hover events; keep user-message actions visible.
+  replaceOnce('re=!A&&ie&&(N||T.isNative||U)',
+    're=!A&&ie&&(N||T.isNative||U||("undefined"!=typeof window&&"function"==typeof window.matchMedia&&window.matchMedia("(hover: none)").matches))');
   // Web/remote hosts reuse the daemon's listDirectory API. Electron keeps its native picker.
   replaceOnce('canBrowse:t&&(0,C.getIsElectronRuntime)()&&Z===e.serverId',
     'canBrowse:t&&(_.isWeb&&!(0,C.getIsElectronRuntime)()||(0,C.getIsElectronRuntime)()&&Z===e.serverId)');
@@ -77,6 +105,7 @@ function main() {
     throw new Error('Upstream mobile sidebar structure changed; review swipe patch.');
   }
   const swipe = fs.readFileSync(path.join(__dirname, 'mobile-sidebar-swipe.js'), 'utf8');
+  patched = patchHoverCards(patched);
   patched = pickerStart + '\n' + picker + '\n' + swipe + '\n' + pickerEnd + '\n' + patched;
   // Validate syntax before publishing either the bundle or HTML.
   new (require('node:vm').Script)(patched);
@@ -84,7 +113,12 @@ function main() {
   const newUrl = '/_expo/static/js/web/index-' + hash + '.js';
   const target = path.join(root, newUrl);
   if (fs.existsSync(target) && fs.readFileSync(target, 'utf8') !== patched) throw new Error('Asset hash collision');
-  fs.writeFileSync(target, patched);
+  const source = Buffer.from(patched);
+  fs.writeFileSync(target, source);
+  fs.writeFileSync(target + '.br', zlib.brotliCompressSync(source, {
+    params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 6 }
+  }));
+  fs.writeFileSync(target + '.gz', zlib.gzipSync(source));
   // Remove diagnostics injected by older local patches when publishing the HTML.
   const nextHtml = html.replace(/<script id="paseo-local-diagnostics">[\s\S]*?<\/script>\n?/g, '');
   fs.writeFileSync(indexPath, nextHtml.replaceAll(match[1], newUrl));
@@ -94,4 +128,4 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { checkCompatibility };
+module.exports = { checkCompatibility, patchHoverCards };

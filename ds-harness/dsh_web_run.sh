@@ -91,6 +91,14 @@ start_service() {
 
 stop_service() {
     local service="$1" pid attempt status
+    if [[ "$service" == dsh-web ]]; then
+        # Plugins can detach restart helpers and replace the original host PID.
+        # Stop every verified member before removing the launch registration.
+        process_state stop-launch "$service" || return $?
+        rm -f "$log_dir/$service.pid" "$log_dir/$service.identity"
+        printf '%s 已停止（含插件自重启进程）。\n' "$service"
+        return 0
+    fi
     if pid="$(service_pid "$service")"; then
         if process_state signal "$service"; then :; else
             status=$?

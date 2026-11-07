@@ -7,17 +7,17 @@
 
 会话信息 info 图标通过 `conversation.input.right` 注册，ID 为 `dsh-session-info`、`order: -100`，使用宿主 `chat` locale 和会话投影。`dsh_composer_metadata_apply.py` 会撤销旧的 `trailing` 直接挂载，再注册插槽，保留展开状态与元信息的 React Context。mobile 的额外文件按钮同样先检查是否存在，不存在时保持插件原样；存在但注册代码未知时拒绝修改。
 
-当前核验组合为 **DSH 0.2.2-rc.1、ds-bot 0.2.7、dsh-web-mobile 3.3.0 / 3.3.1、xterm/headless 6.0.0、addon-serialize 0.14.0**。六个独立入口通过 `common.py` 共用补丁校验、宿主定位、原子写入、备份与回滚函数；`apply.py` 统一编排全部补丁，未知版本、混合宿主版本或不完整旧补丁会停止。
+当前核验组合为 **DSH 0.2.2-rc.1、ds-bot 0.3.1、dsh-web-mobile 3.3.0 / 3.3.1、xterm/headless 6.0.0、addon-serialize 0.14.0**。六个独立入口通过 `common.py` 共用补丁校验、宿主定位、原子写入、备份与回滚函数；`apply.py` 统一编排全部补丁，未知版本、混合宿主版本或不完整旧补丁会停止。
 
 | 入口 | 当前版本的处理 |
 | --- | --- |
-| `plugins/ds_bot/ds_bot_apply.py` | 恢复 Bot 0.2.7 输入框、消息操作栏与桌面宽度布局；撤销宿主旧历史插槽和手机 Enter 注入，保留上游历史和提示词实现。 |
+| `plugins/ds_bot/ds_bot_apply.py` | 适配 Bot 0.3.1 的本地输入框、消息操作栏与桌面宽度布局；移除旧手机工具栏覆盖，沿用上游历史、提示词和触屏命中区；撤销宿主旧历史及 Enter 注入。 |
 | `plugins/mobile/dsh_mobile_apply.py` | 移除 mobile 3.3.0 / 3.3.1 额外注册的 `ComposerFileButton`；撤销旧宿主 Enter 注入，保留仅在 mobile 布局生效的页签实际宽度测量。 |
 | `service/dsh_composer_metadata_apply.py` | 普通 DSH 输入框工具栏内增加会话信息 info 按钮，按需展开原生会话元信息；DS Bot 队列保持可见。 |
 | `service/dsh_file_resources_apply.py` | 修复旧手机浏览器解析自定义资源地址时无法匹配文件资源提供器的问题。 |
 | `service/dsh_terminal_apply.py` | 继续安装前后端配套的重连、剪贴板、键盘协商、查询应答、搜索与链接增强。 |
 
-历史组合 **Bot 0.2.6 + DSH alpha.2**、**mobile 3.2.1 + DSH alpha.2** 仍走独立旧版路径；不会把旧版 UI 补丁套到新包上。终端也支持原有 alpha.2，但前端与控制器必须同版。
+历史组合 **Bot 0.2.7 + DSH rc.1**、**Bot 0.2.6 + DSH alpha.2**、**mobile 3.2.1 + DSH alpha.2** 仍走独立旧版路径；不会把旧版 UI 补丁套到新包上。终端也支持原有 alpha.2，但前端与控制器必须同版。
 
 ## 新版上游核查与迁移
 
@@ -33,15 +33,15 @@
 
 ## 安装与检查
 
-主安装器 `dsh_install.sh` 调用插件安装器 `dsh_plugins_install.sh`；后者在下载插件前通过 `apply.py --validate-tools` 检查本地补丁模块及导入时读取的辅助文件；主安装器也会在安装依赖前执行该检查。插件安装成功后，通过 `apply.py` 按 DS Bot、mobile、Git panel、terminal、文件资源、会话信息的顺序规划全部补丁。首次安装、`--upgrade`、插件已安装而跳过下载时都会执行。mobile 已声明的 `github:` 来源（包括提交固定值）会保留，Codex 插件与 DSH 同版。补丁失败会使安装返回非零退出码；`--dry-run` 只打印计划，不修改文件。
+主安装器 `dsh_install.sh` 调用插件安装器 `dsh_plugins_install.sh`；后者在下载插件前通过 `dsh_patches_install.sh --validate-tools` 检查本地补丁模块及导入时读取的辅助文件；主安装器也会在安装依赖前执行该检查。插件安装成功后，通过 `dsh_patches_install.sh` 按 DS Bot、mobile、Git panel、terminal、文件资源、会话信息的顺序规划全部补丁。首次安装、`--upgrade`、插件已安装而跳过下载时都会执行。依赖版本与来源由 `srcs/install-versions.json` 固定，mobile 使用已核验提交，Codex 插件与 DSH 同版。补丁失败会使安装返回非零退出码；`--dry-run` 只打印计划，不修改文件。
 
 ```sh
 bash ds-harness/dsh_install.sh
 # 单独补装插件并应用全部补丁
 bash ds-harness/dsh_plugins_install.sh
 # 手动应用／只检查全部补丁
-python3 -B ds-harness/srcs/patches/apply.py
-python3 -B ds-harness/srcs/patches/apply.py --check
+bash ds-harness/dsh_patches_install.sh
+bash ds-harness/dsh_patches_install.sh --check
 # 需要单独检查某组补丁时仍可使用原入口
 python3 ds-harness/srcs/patches/plugins/ds_bot/ds_bot_apply.py
 python3 ds-harness/srcs/patches/plugins/ds_bot/ds_bot_apply.py --check
@@ -49,67 +49,23 @@ python3 ds-harness/srcs/patches/plugins/mobile/dsh_mobile_apply.py
 python3 ds-harness/srcs/patches/plugins/mobile/dsh_mobile_apply.py --check
 python3 ds-harness/srcs/patches/service/dsh_terminal_apply.py
 python3 ds-harness/srcs/patches/service/dsh_terminal_apply.py --check
-# 回归测试
-python3 -B -m unittest discover -s ds-harness/tests -p 'test_dsh_patches.py'
-python3 -B -m unittest discover -s ds-harness/tests -p 'test_ds_bot*.py'
-python3 -B -m unittest discover -s ds-harness/tests -p 'test_dsh_composer_enter.py'
-python3 -B -m unittest discover -s ds-harness/tests -p 'test_dsh_plugins_install.py'
-python3 -B -m unittest discover -s ds-harness/tests -p 'test_dsh_mobile_apply.py'
-python3 -B -m unittest discover -s ds-harness/tests -p 'test_dsh_terminal_apply.py'
+# 全量回归（隔离服务及夹具，不重启线上实例）
+python3 -B -m unittest discover -s ds-harness/tests -p 'test_*.py'
 ```
 
-统一入口默认定位本服务的 web profile 与 PATH 中的 DSH 安装，可用 `--profile-dir`、`--host-dir` 指向隔离安装。DS Bot 独立入口可传 `--bot-dir` 和 `--host-dir`（DSH 的 `node_modules/@deepseek-ai` 目录）。升级到其他版本前必须重新核对上游实现；安装器仍按现有策略选择依赖版本，不会为了通过补丁检查静默降级。
+统一入口 `dsh_patches_install.sh` 复用 `srcs/patches/apply.py`，先完成全部校验，已安装的目标打印“已安装，跳过”，只写入和备份缺失或需要迁移的目标；全部已安装时不创建备份，也不改变文件时间戳。可从任意工作目录调用。默认定位本服务的 web profile 与 PATH 中的 DSH 安装，可用 `--profile-dir`、`--host-dir` 指向隔离安装。DS Bot 独立入口可传 `--bot-dir` 和 `--host-dir`（DSH 的 `node_modules/@deepseek-ai` 目录）。升级到其他版本前必须重新核对上游实现；安装器按 `srcs/install-versions.json` 对齐依赖版本，可能将其他已安装版本恢复到清单值；补丁执行器本身不会变更包版本。
 
-## 历史组合的修复（Bot 0.2.6 / DSH alpha.2）
+## 旧版本边界
 
-- **历史记录**：通过原生 ChatFlow 展示归档分段，空会话有历史时进入正常聊天视图；保留分页和插槽所有权，不恢复旧 Hero 容器。
-- **提示词接口**：当前 DSH 在 prompt waterfall 结束后附加工具，补丁不再在该钩子访问 tools；保留 sections 过滤、tools.restrict 与执行 guard。已打补丁的当前 0.2.6 安装会转换为同一实现，不支持旧宿主接口。
-- **布局**：修复移动侧栏网格、抽屉占位、窄侧栏名称、群聊头像和操作按钮；手机长回复使用可用宽度。手机与 PC 输入框均为上下两行，工具按钮间距 8px。页签按实际宽度折叠由 `dsh_mobile_apply.py` 负责，保留宿主固定偏好和更多菜单。
-- **桌面聊天宽度**：恢复 DSH 原生聊天区左右拖动条，正文和输入框同步调整，保留宿主输入框多出的 32px 内边距空间，沿用宿主的本地宽度记忆（与普通 DSH 聊天共享）。仅在视口至少 1024px、精确指针且支持悬停时启用；触屏与窄屏维持原有布局。
-- **共用输入框**：普通 DSH 和 ds-bot 手机 Enter 只换行，点击按钮发送；PC 保留 Enter 发送、Shift+Enter 换行。复用宿主移动设备检测，保留输入法组合保护和 `beforeinput` 换行处理。
+Bot 0.2.6 / DSH alpha.2 保留独立的历史、提示词及 Enter 兼容；Bot 0.2.7 / rc.1 保留自己的 React 别名与布局变换。mobile 3.2.1 / alpha.2 的顶栏及侧栏变换隔离在 `dsh_mobile_legacy.py`，新版不加载。所有版本组合先核验包名和版本，旧辅助代码仅接受完整匹配的已知实现，残缺或未知修改不覆盖。
 
-- **消息与操作栏**：保留回复气泡和左对齐文字，回复铺满正文宽度，与发送气泡共用右边界。表情、回复、复制、下载在回复下方独占一行，桌面端悬停显示，触屏端（无悬停或粗指针）常驻显示，无需先触摸消息。
+当前 Bot 的历史、提示词及 mobile 的 Enter 行为由上游维护；迁移会撤销冲突的旧宿主注入。历史排查与部署记录见 [迁移文档](../../MIGRATION.md)。
 
 ## 校验与生效
 
 统一入口先核验全部包版本和目标文件，将对同一文件的多组变换按顺序合并到内存中；全部规划成功后才发布，每个目标只备份和替换一次。每个目标在同目录暂存后原子替换；原件与清单备份到 `ds-harness/log/patch-backups/`，后续写入失败会回滚本次全部已完成的替换。`--check` 只校验，不写入；重复应用不创建新备份或改动目标时间戳。独立入口只保证本组文件的回滚范围；npm 插件安装与补丁发布不构成共同事务。进程被强制终止或断电后，先检查备份及 `--check` 结果。
 
 安装器不启停服务。运行实例可能缓存前端 bundle 或服务端模块，安装成功不代表线上已更新；应检查实际 `/plugins/` 响应。需要重载时先检查活跃任务、保存恢复信息，再安排维护，不能默认重启。
-
-核查依据：2026-11-02/03 的本机发布包中，DS Bot 0.2.6 仍依赖 handoff 展示历史、直接访问 prompt tools 并采用同行输入布局；DSH 0.2.2-alpha.2 的输入键盘逻辑没有手机 Enter 分支。这些匹配点经严格校验，未来版本需重新核查。
-
-消息布局核查：DS Bot 0.2.6 的泡泡模式限制回复宽度并为右侧工具栏预留 82px；原生平铺会去掉气泡背景。因此用 CSS 调整气泡和按钮排版，保留布局偏好。`MessageTools` 的复制、下载原本仅在「更多」菜单中，补丁将其改为直接按钮，复用原有处理器并移除菜单与对应定位分支。
-
-验证：20 项 DS Bot、2 项共用输入框和 13 项插件安装测试通过。25228 Chief 的 20 条回复在 1600px 和 390px 视口中右边界误差为 0px，按钮位于气泡下方 4px，无横向溢出或浏览器错误；复制反馈、下载内容和表情菜单均通过验证。补丁应用保持幂等，未发送消息或重启服务。
-
-宽度调整核查：本机 DSH 0.2.2-alpha.2 的 `dsh-client-ui-conversation/lib/client.js` 已包含 `ConversationWidthControls`、`WidthHandle`、指针捕获、宽度限制和 `dsh.conversation.contentWidth` 持久化。DS Bot 0.2.6 的 `client.js` 隐藏 `_widthHandle`，固定 `--dsh-chat-content-width` 为 960px，并将宿主宽度变量注册为不继承。补丁仅在桌面恢复原生拖动条、让 body 显式继承宿主宽度变量并使用宿主宽度公式，不增加另一套拖动逻辑。
-
-2026-11-03 宽度补丁验证：25228 的 Chief 会话在 1600px 浏览器中左拖 80px，正文从约 845px 增至 1005px，输入框从约 877px 增至 1037px；刷新后保持宽度。900px 窄屏隐藏拖动条；390px 触屏隐藏拖动条且无页面横向溢出。浏览器无运行错误，20 项 DS Bot 回归及 2 项共用输入框测试通过。只刷新独立测试浏览器，未重启服务、未发送消息。
-
-2026-11-03 经授权重启 25228 后，普通 DSH 与 Chief 均完成线上手机换行和 PC 快捷键验证，未发送模型测试消息；25028/25128 的进程未变化。合并补丁的回归覆盖独立单文件执行、四个目标全量应用、缺失输入框补丁检测、幂等性、未知版本拒绝、失败不写入及安装入口调用。历史排查记录见 [迁移文档](../../MIGRATION.md)。
-
-## 历史 mobile 3.2.1 顶栏按钮
-
-`python3 -B ds-harness/srcs/patches/plugins/mobile/dsh_mobile_apply.py`（仓库根目录运行，`--check` 只验证）统一修复 3.2.1 的手机顶栏布局及 DSH 0.2.2-alpha.2 的页签宽度折叠，插件安装入口自动执行。先校验插件和宿主两个目标，再共用原子写入与备份机制发布；任一目标版本或锚点不符都不写入。`--check` 同时检查两个目标，`--mobile-dir` / `--host-dir` 可指定隔离安装目录。
-
-本机 3.2.1 发布源码把 `MobileNavToggle` 注入 `conversation.session.header.actions`，同时给其祖先 `headerActions` / `titleCluster` 设置滚动裁剪；侧边栏、文件按钮绝对定位到顶栏两端，落在裁剪区外而不可见，标题仍留有 32px。DSH 0.2.2-alpha.2 已有独立的 `conversation.header.leading` 槽位，因此补丁复用该槽位，只在手机且槽内存在本插件按钮时解除其隐藏。保留标题滚动、原有按钮事件及桌面隐藏条件；不修改宿主布局、不重启服务。
-
-2026-11-03 验证：25228 实际资源刷新后，360/390/820px 触屏下侧边栏按钮可见且可命中，点击成功打开抽屉；900/1600px 鼠标界面按钮隐藏、leading 槽宽度为 0，均无页面横向溢出。52 项安装相关测试通过，重复 `--check` 通过。未重启服务。
-
-手机页签间距：DSH 0.2.2-alpha.2 的 `.wSkVaW_tab` 通过 `--dsh-tab-hit-inline:10px` 同时设置横向内边距和负外边距；mobile 3.2.1 清零了内边距但保留负外边距，让 16px 的页签间距变成文字重叠 4px。移动补丁在手机页签规则中把该变量归零，同时修正间距及选中下划线宽度，桌面仍使用宿主原值。25228 的 360/390/820px 触屏验证文字间距均为 16px、首项不再被裁切，Chat / Trajectory 切换正常；无服务重启。
-
-手机「更多视图」同行：宿主 `.wSkVaW_tabs` 允许换行，mobile 3.2.1 又将内部 tablist 设为 `width:100%`，导致兄弟节点「更多」独占下一行。补丁仅在移动端使外层不换行、tablist 按内容占宽且允许收缩，并清除页签条和按钮各自的负上边距，统一垂直居中。25228 在 360/390/820px 下验证页签与更多间距 16px、按钮中心高度一致，无横向溢出；页签切换和更多菜单打开均通过，补丁幂等检查通过，未重启服务。
-
-页签自适应验证：DSH 0.2.2-alpha.2 原实现按 `(row.clientWidth - 48) / 120` 估算数量。补丁在同一 CSS 环境中测量候选页签，计入文字截断、内外边距、页签间距及更多按钮占用；宽度、候选视图、固定偏好和字体加载变化时重新计算。25228 的 360/390/820px 触屏均直接显示 Chat、Trajectory、Git、Statistics；240px 时只将 Statistics 收进更多，拉宽自动恢复，页签无横向溢出。20 项 DS Bot 回归、JS 语法及补丁幂等检查通过，未重启服务。
-
-左侧边栏保留日志下载：恢复 3.2.1 的 `createDrawerSessionLogTask` 注册；补丁会迁移已移除该入口的本地安装，保留宿主日志导出服务。顶栏右侧按钮复用宿主 `IconPanelLeft` 并水平镜像，与宿主右侧栏入口一致；提示改为「打开右侧栏 / Open right sidebar」，点击逻辑保持原样。更新后刷新页面生效，无需重启。
-
-顶栏动作横向滑动：3.2.1 将 headerActions 固定为不可收缩，同时隐藏团队文字与后台任务计数。补丁让动作区占用标题之外的剩余宽度并可横向滚动，各控件按自然宽度显示，恢复团队和任务文字，标题与左右侧栏按钮保持固定。复用插件现有手势对横向滚动容器的让位规则及宿主弹层。25228 的真实触屏事件验证滚动 27px、未打开抽屉，Agent team 弹层正常显示；按当前 jobs DOM 构造的浏览器测试节点在 360/390/820px 下文字不隐藏、内容可达、无页面横向溢出。未创建后台任务或重启服务。
-
-移动补丁维护：顶栏样式共用选择器前缀与规则生成函数，保持输出 CSS 字节和选择器权重不变；保留已发布补丁的迁移，移除未发布的临时图标位置迁移。已核验原始 3.2.1、已发布补丁和当前安装三种输入均生成相同结果，重复应用不写入，未知锚点仍拒绝。
-
-页签宽度补丁仅在运行时检测到 mobile 的 frame 标记且匹配 `(max-width:1023px) and (pointer:coarse)` 时使用实际宽度测量；无插件标记、桌面或非触屏布局直接走宿主原有 120px 估算规则。监听插件标记和媒体查询变化，启停插件或切换布局时重新计算。归属与运行时范围回归覆盖原版、旧补丁迁移、缺少宿主修复检测、宿主校验失败不写入，以及三种非移动组合的原生回退。
-
 
 ## 终端与 Codex CLI 重连
 
@@ -135,30 +91,11 @@ Paseo 终端增强：参考 [Paseo 运行时](https://github.com/getpaseo/paseo/
 
 新增 Chromium 验证加载的是隔离副本中补丁后的完整 DSH 前端 bundle，通过轻量 hook harness 挂载真实终端组件，覆盖搜索导航、修饰键链接点击、协商前后的组合键、选区复制、粘贴、中文输入和只读视图；通过环境变量 `DSH_TEST_PLAYWRIGHT` 指定已安装的 Playwright 模块启用，可选 `DSH_TEST_CHROMIUM` 指定浏览器。默认测试不依赖浏览器。未操作在线服务或已登录 Codex 会话，尚未覆盖真实 React 调度及服务网络的端到端交互。
 
-### Mobile 3.3.0 补丁复核（2026-11-06）
+## mobile 与 Git panel 的上游依据
 
-核对上游提交 `522db94f552d89934f814853ad10c96f31eba6da`，当前安装的 `lib/client.js` 与上游文件逐字节一致。
+mobile 3.3.0 提交 [`522db94`](https://github.com/mexiaosqwq/dsh-web-mobile/tree/522db94f552d89934f814853ad10c96f31eba6da) 已修复顶栏裁切、页签命中区及 Enter 仲裁。3.3.1 提交 [`4e71eb6`](https://github.com/mexiaosqwq/dsh-web-mobile/commit/4e71eb67de7dac9d8b2572757c81e47aa32a32fb) 保持 `layout.css.ts` 与 `composer-enter-newline.ts` 不变，继续复用其 UI 和快捷键处理。宿主 rc.1 仍按固定 120px 估算页签宽度，保留 mobile 布局内的实际宽度测量。
 
-- 顶栏开关被裁、文件按钮消失：上游 `src/client/styles/layout.css.ts` 已调整 titleCluster 的 overflow，沿用上游方案，无需旧版移槽补丁。
-- 页签叠字、文字被裁：上游已清零 `--dsh-tab-hit-inline`，恢复自动行高并调整外边距；无需重复注入旧 CSS。上游对齐方式与旧版强制居中偏好不完全相同。
-- 手机 Enter 换行：上游 `src/client/effects/composer-enter-newline.ts` 已实现，并将修饰键、候选菜单及输入法交回宿主；应撤销旧宿主 Enter 注入。
-- 动作区横向滚动：上游已有 overflow 处理，但布局收缩策略、标签显示与旧本地偏好不同，不视为逐项等价；3.3.0 沿用上游布局。
-- 右侧栏图标与文案替换属于本地偏好，上游仍使用文件夹图标和 Files 文案；新版不再覆盖。
-- 根据页签实际宽度计算可见数量：mobile 上游未实现；当前 DSH rc.1 原始逻辑仍按固定 120px 估算，保留宿主侧自适应补丁。
-
-3.3.0 / 3.3.1 分支移除 `conversation.input.left` 中 `mobile-nav-file-upload` 的插槽注册，不再显示额外的 `ComposerFileButton`；宿主原有上传入口保留。该按钮注册已在本地安装的上游 3.3.1 bundle 中核实，属于本地界面偏好调整。安装器会重用此补丁，重复执行不产生额外变更；注册锚点未知或混合时拒绝写入。同时迁移宿主旧 Enter 注入并维护页签自适应。3.2.1 的旧 UI 补丁已隔离到 `dsh_mobile_legacy.py`，仅在确认 3.2.1 / alpha.2 版本组合后加载；新版不加载这些变换。
-
-### Bot 0.2.7 布局补丁恢复
-
-0.2.7 分支此前只迁移宿主，导致 `--check` 通过时 Bot 自身仍没有本地布局效果。核对当前发布包：隐藏宽度拖动条、固定正文及输入框宽度、消息侧边操作栏和更多菜单仍存在；消息组件的 React 编译别名从 `import_react17` 改为 `import_react19`。
-
-当前分支在严格校验版本和完整匹配点后恢复输入框两行、8px 工具间距、群聊头像与时间同行、窄侧栏名称、全宽回复及下方操作栏、触屏操作常驻、复制/下载直接按钮，以及桌面原生宽度拖动。复用上游复制、下载和宽度记忆实现；不覆盖新版历史、提示词及 mobile Enter 处理。检查同时覆盖 Bot 文件和宿主迁移，任何目标不匹配均不发布。
-
-### Mobile 3.3.1 升级
-
-核对上游提交 [`4e71eb6`](https://github.com/mexiaosqwq/dsh-web-mobile/commit/4e71eb67de7dac9d8b2572757c81e47aa32a32fb)：相较 3.3.0 修复抽屉自身的 `aria-modal` 阻塞滑动手势、清理旧下载按钮及冗余查询，并将 React 标为可选 peer。`layout.css.ts` 和 `composer-enter-newline.ts` 未变，继续复用上游 UI/Enter，保留宿主页签自适应。补丁严格支持 3.3.0 / 3.3.1 与 DSH 0.2.2-rc.1 的组合。
-
-升级时 npm 的 3.3.1 元数据尚不可用，使用 `github:mexiaosqwq/dsh-web-mobile#4e71eb67de7dac9d8b2572757c81e47aa32a32fb` 固定到已核验的 3.3.1 源码，后续插件安装器会保留此来源。安装不自动重启服务。
+mobile 的额外 `ComposerFileButton` 和 Git panel 的 `git-panel-pill` 仍按本地偏好省略注册。Git panel 1.11.2 上游已有 `showInputPill` 开关；本地省略注册可以避免设置将按钮重新显示，因此不是缺失上游开关的兼容修复。
 
 ## 手机文件资源不可用
 
@@ -194,10 +131,30 @@ python3 -B -m unittest discover -s ds-harness/tests -p 'test_dsh_composer_metada
 
 实际 25228 主聊天手机页在 320/360/390/820px 下验证权限按钮与箭头到上传按钮均有 8px 间隔，点击命中区域分离，页面无横向溢出；未发送消息或改变权限设置。
 
-## 执行器精简（2026-11-07）
+## 执行器与核查范围
 
-- `common.py` 提供精确锚点替换、宿主路径解析、包版本校验、文件变换与发布检查；原子发布保留原有备份、权限、并发修改检查和失败回滚。终端、资源、Git 面板和会话信息执行器不再为了通用函数加载 DS Bot 的历史/UI 补丁。
-- mobile 的旧版入口复用已校验的包信息，避免再次读取相同 manifest。保留 3.2.1 / alpha.2 的独立支持，未删除仍被迁移和回归覆盖的历史锚点。
-- 资源解析的替换内容从原始锚点派生；当前 info SVG 从 JS helper 提取，避免 Python 重复维护相同实现。生成的目标 bundle 内容不变，安装实例只做 `--check` 验证。
+`common.py` 统一独立入口的参数解析、`--check`、发布和结果输出；包名及版本校验也由共享函数执行。各模块只维护版本组合、变换和文件计划；终端旧剪贴板迁移复用已有撤销函数，会话信息包装从原生片段派生，避免重复维护同一代码。独立入口名称和参数不变，未删除已支持版本及必要迁移，生成的目标 bundle 与精简前一致。
 
-上游核查依据为 `data/patch-audit-20261106/pristine/` 中已按注册表完整性校验的 DSH rc.1 发布包，以及当前安装的 mobile 3.3.1 和 Git panel 1.11.2。原包仍需要终端增强和资源地址兼容处理；mobile 已有的 Enter/布局处理继续复用上游。Git panel 已有 `showInputPill` 开关，但既有本地偏好明确省略注册，不将其改为可被设置重新开启的隐藏逻辑。此次没有联网核验这些包之后的新版本。
+核查依据为 `data/patch-audit-20261106/pristine/` 中已按注册表完整性校验的 DSH rc.1 发布包、`data/bot-audit-20261107/` 中的 Bot 0.3.1 原包，以及当前安装的 mobile 3.3.1 和 Git panel 1.11.2。本次未联网核查这些包之后的新版本；不把本地发布包的核查结论外推到未来版本。
+
+## Bot 0.3.1 补丁复核（2026-11-07）
+
+通过 `npm view ds-bot version dist.tarball dist.integrity gitHead` 确认最新正式版为 0.3.1；标签 [`v0.3.1`](https://github.com/Fei2411/DS-Bot/tree/6559c9e7c4ef71c292e6ac50f690031133536fe0) 与 npm `gitHead` 均为 `6559c9e7c4ef71c292e6ac50f690031133536fe0`。下载发布包并核对注册表 SHA-512，npm 客户端、标签中的客户端和本机安装客户端在应用本次补丁前逐字节一致。原包及隔离验证副本位于不入库的 `data/bot-audit-20261107/`。
+
+| 原补丁或功能 | 上游 0.3.1 的实现及处理 |
+| --- | --- |
+| 历史分段及导航 | [`cells.js`](https://github.com/Fei2411/DS-Bot/blob/6559c9e7c4ef71c292e6ac50f690031133536fe0/ds-bot/src/client/cells.js) 已由 handoff 节点渲染 `EarlierParts`；[`header-navigation.js`](https://github.com/Fei2411/DS-Bot/blob/6559c9e7c4ef71c292e6ac50f690031133536fe0/ds-bot/src/client/header-navigation.js) 复用宿主导航及 store。不注入旧 BotNativeHistory 或宿主历史插槽，仅迁移仍残留的旧宿主改动。 |
+| 提示词 tools 缺失时报错 | [`tools.js`](https://github.com/Fei2411/DS-Bot/blob/6559c9e7c4ef71c292e6ac50f690031133536fe0/ds-bot/src/host/tools.js) 已在 system-prompt/assemble 中以 `Array.isArray(assembled.tools)` 判断后过滤；原生保留 sections 和其他组装字段。新版不修改 Bot 宿主 tools.js。 |
+| 手机工具栏浮动及可点击区域 | [`styles.js`](https://github.com/Fei2411/DS-Bot/blob/6559c9e7c4ef71c292e6ac50f690031133536fe0/ds-bot/src/client/styles.js) 已在 `(hover:none)` 下提供右侧浮动位置及 44px 命中区，`cells.js` 支持点击消息打开工具栏。新版删除旧 `MOBILE_PHONE_CSS` 的 640px 浮动覆盖，保留原生触屏命中区；全宽回复由全尺寸 ALIGN_CSS 负责。若安装文件已有该旧覆盖，会精确撤销。 |
+| 触屏操作按钮始终可见 | 上游通过点击消息显示，行为与本地常驻偏好不同；保留 TOUCH_ACTIONS_CSS，不把它称为上游已覆盖。 |
+| 输入框两行、8px 工具间距 | 上游仍默认单行，仅在有附件时切两行；保留本地常态两行偏好。 |
+| 群聊头像与时间同行、窄栏显示名称 | 上游 bubble 布局仍把头像传入 Bubbles，窄栏仍是图标；保留本地元信息及名称布局。 |
+| 桌面原生宽度拖动 | 上游仍隐藏宿主 widthHandle、固定正文 960px / 输入框 992px；保留恢复宿主拖动和继承宽度变量的补丁，不另写拖动器。 |
+| 全宽回复及下方操作栏、复制/下载直达按钮 | 上游仍是 bubble 侧边工具栏及 More 菜单；保留布局和直达按钮，复用上游复制、下载、引用及表情处理器。 |
+| mobile 侧栏网格与测量 | 上游 `styles.js` 仍保留三列网格，`frame-watch.js` 仍将 sidebarCol 的矩形宽度当作网格占位；未识别 mobile 的 absolute/fixed 抽屉。保留 mobile 标记下网格兼容及浮动侧栏占位修正。 |
+
+新版消息组件的 React 别名为 `import_react31`，portal 别名为 `import_react_dom3`；只支持已核对的 0.3.1 + DSH rc.1 版本组合，不以通配版本跳过锚点校验。0.2.7 / rc.1 和 0.2.6 / alpha.2 继续走各自的历史兼容路径，其旧代码不会套用到 0.3.1。
+
+测试夹具 `tests/fixtures/ds_bot_031.js` 摘录自原始发布包，保留原始函数和规则，避免仅用补丁常量拼接测试。回归验证复制、下载、引用、表情弹层、头像点击、flat/bubble 元信息位置、旧覆盖撤销、旧宿主迁移、未知版本和残缺锚点不写入、重复应用不写入，以及完整补丁集的共享文件合并与回滚。完整发布包另在隔离副本验证 JS 语法、原生 tools.js 不变及幂等性。
+
+返回主聊天使用上游入口：左下角头像/齿轮 → Bot 设置 → 常规 → 模式 → 经典 Agent 模式 → 切换；不增加重复的模式切换逻辑。应用本次客户端补丁无需重启服务，浏览器需重新加载资源；已打开页面的视觉效果仍需刷新后验收。

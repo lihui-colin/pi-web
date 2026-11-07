@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """Collapse the native DSH composer metadata behind a session-info disclosure."""
-import argparse
 import json
 from pathlib import Path
 
 if not __package__:
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from patches.common import check_or_publish, host_directory, publish, read_change, replace_once, verify_package
+from patches.common import host_directory, publish, read_change, replace_once, verify_package, patch_cli
 
 HELPER = Path(__file__).with_name('dsh_composer_metadata.js').read_text().strip() + '\n'
 ANCHOR = '\t\tconst InputBar = (0, react.memo)(function InputBar('
@@ -19,16 +18,8 @@ OLD = '''					(0, react_jsx_runtime.jsxs)("div", {
 							t
 						})]
 					})'''
-NEW = '''					(0, react_jsx_runtime.jsx)(DshComposerMetadata, {
-												children: (0, react_jsx_runtime.jsxs)("div", {
-						className: InputBar_module_css_default.dock,
-						"data-composer-dock": true,
-						children: [variant === "composer" && input !== void 0 && sessionId !== void 0 ? renderSlot("conversation.composer.dock", {}) : null, activity ? null : (0, react_jsx_runtime.jsx)(ContextMeter, {
-							useProjection,
-							t
-						})]
-					})
-					}, sessionId)'''
+NEW = ('\t\t\t\t\t(0, react_jsx_runtime.jsx)(DshComposerMetadata, {\n'
+       '\t\t\t\t\t\t\t\t\t\t\t\tchildren: ' + OLD.lstrip() + '\n\t\t\t\t\t}, sessionId)')
 TRANSLATIONS = {'运行中…': '会话信息', 'Running…': 'Session info', '実行中…': 'セッション情報', 'Corriendo…': 'Información de sesión', 'Courir…': 'Informations de session', 'Laufen…': 'Sitzungsinformationen', 'Бег…': 'Сведения о сеансе', 'Correndo…': 'Informações da sessão'}
 
 
@@ -100,16 +91,8 @@ def plan_changes(host=None, *, read_text=Path.read_text):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--check', action='store_true')
-    parser.add_argument('--host-dir', type=Path)
-    args = parser.parse_args()
-    changes = plan_changes(args.host_dir)
-    if not changes:
-        print('Composer metadata disclosure skipped on legacy alpha.2.')
-        return
-    check_or_publish(changes, args.check, 'Composer metadata disclosure missing')
-    print('Composer metadata disclosure verified; no service restarted.')
+    patch_cli(plan_changes, __doc__, {'host': '--host-dir'},
+              'Composer metadata disclosure verified')
 
 
 if __name__ == '__main__':

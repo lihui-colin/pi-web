@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 安装当前团队使用的 DSH 与插件，DSH/普通 npm 插件使用 latest，mobile/composer 来源由插件安装器管理，官方 Codex 插件与 DSH 同版。
+# 安装当前团队使用的 DSH 与插件，DSH、pnpm 与插件按 srcs/install-versions.json 固定版本安装。
 # 适用于 Linux/macOS；需要 Node.js >=24、npm、curl 和 sh。
 # 用法：bash ds-harness/dsh_install.sh [--dry-run] [--upgrade]
 # HTTPS 证书由dsh_cert.sh 单独生成。
@@ -18,11 +18,11 @@ while (( $# )); do
             printf '%s\n' \
                 '用法：bash ds-harness/dsh_install.sh [--dry-run] [--upgrade]' \
                 '前置：Node.js >=24、npm、curl、sh，npm 全局目录需要当前用户可写。' \
-                '默认补装缺失程序和插件；--upgrade 更新 DSH、pnpm、Magpie 和插件。' \
+                '默认补装或校正 DSH、pnpm 和插件的固定版本；--upgrade 重装固定版本并更新 Magpie。' \
                 'Nginx 及静态依赖安装到本目录 data/.local/nginx；首次构建需要 cc、make、perl、tar、Python 3。' \
                 'Linux 缺少 xdg-open 时安装系统包 xdg-utils（非 root 使用 sudo）；macOS 使用系统 open。' \
                 '不使用系统 Nginx；已有本地 Nginx 只检查版本 >=1.24 和 HTTP SSL 模块。' \
-                'DSH/普通 npm 插件使用 latest，mobile/composer 来源由插件安装器管理，官方 Codex 插件与 DSH 同版；保留已有额外插件启用状态，新 profile 默认启用八个。' \
+                'DSH、pnpm 与插件使用 srcs/install-versions.json 的固定版本；保留已有额外插件启用状态，新 profile 默认启用九个。' \
                 '安装结束时创建 data/dsh.conf：已有配置保留，否则从控制台输入 IP 和端口。' \
                 'HTTPS 证书请单独运行 bash ds-harness/dsh_cert.sh 创建。' \
                 '数据固定放在脚本同级 data/.dsh，共享 agent 配置放在 data/.agents。' \
@@ -43,7 +43,7 @@ done
 node -e 'if (Number(process.versions.node.split(".")[0]) < 24) { console.error("需要 Node.js >=24"); process.exit(1); }'
 if ! "$dry_run"; then
     command -v python3 >/dev/null 2>&1 || { printf '缺少命令：python3（用于 DSH 兼容补丁）。\n' >&2; exit 1; }
-    python3 -B "$script_dir/srcs/patches/apply.py" --validate-tools
+    bash "$script_dir/dsh_patches_install.sh" --validate-tools
 fi
 export DSH_HOME="$script_dir/data/.dsh"
 export DSH_AGENTS_HOME="$script_dir/data/.agents"
@@ -130,17 +130,31 @@ else
 fi
 
 printf '目标数据目录：%s\n' "$DSH_HOME"
-printf '%s\n' 'DSH/普通 npm 插件使用 latest，mobile/composer 来源由插件安装器管理，官方 Codex 插件与 DSH 同版；不会启动或重启服务。'
+printf '%s\n' 'DSH、pnpm 与插件使用 srcs/install-versions.json 的固定版本；不会启动或重启服务。'
+version_pins="$(node --input-type=module - "$script_dir/srcs/install-versions.json" <<'PINS_NODE'
+import fs from 'node:fs';
+const pins = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+for (const name of ['dsh', 'pnpm']) {
+  if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(pins[name])) throw new Error(`Invalid pinned version: ${name}`);
+}
+console.log(pins.dsh, pins.pnpm);
+PINS_NODE
+)"
+read -r dsh_pin pnpm_pin <<< "$version_pins"
 npm_packages=()
 dsh_will_install=false
 for bin in dsh pnpm; do
-    if "$upgrade" || ! command -v "$bin" >/dev/null 2>&1; then
+    target_version="$pnpm_pin"
+    if [[ "$bin" == dsh ]]; then target_version="$dsh_pin"; fi
+    current_version=''
+    if command -v "$bin" >/dev/null 2>&1; then current_version="$("$bin" --version)"; fi
+    if "$upgrade" || [[ "$current_version" != "$target_version" ]]; then
         package="$bin"
         if [[ "$bin" == dsh ]]; then
             package='@deepseek-ai/dsh'
             dsh_will_install=true
         fi
-        npm_packages+=("$package@latest")
+        npm_packages+=("$package@$target_version")
     else
         printf '已存在 %s，跳过安装。\n' "$bin"
     fi
@@ -177,7 +191,7 @@ plugin_args=()
 if "$dry_run"; then
     plugin_args+=(--dry-run)
     if "$dsh_will_install"; then
-        plugin_args+=(--expected-dsh-version '<安装后的 DSH 版本>')
+        plugin_args+=(--expected-dsh-version "$dsh_pin")
     fi
 fi
 if "$upgrade"; then plugin_args+=(--upgrade); fi

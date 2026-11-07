@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """Fix legacy mobile URL resource lookup on reviewed DSH client-resources."""
-import argparse
 from pathlib import Path
 
 if not __package__:
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from patches.common import check_or_publish, host_directory, publish, read_change, replace_once, verify_package
+from patches.common import host_directory, publish, read_change, replace_once, verify_package, patch_cli
 
 # Upstream discussion #6217; rc.1 still derives provider names from URL.hostname.
 OLD = '''		function protocolOf(address) {
@@ -42,13 +41,8 @@ def plan_changes(host=None, *, read_text=Path.read_text):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--host-dir', type=Path)
-    parser.add_argument('--check', action='store_true')
-    args = parser.parse_args()
-    changes = plan_changes(args.host_dir)
-    check_or_publish(changes, args.check, 'File-resource browser compatibility patch missing')
-    print('File-resource browser compatibility verified; no service restarted.')
+    patch_cli(plan_changes, __doc__, {'host': '--host-dir'},
+              'File-resource browser compatibility verified')
 
 
 if __name__ == '__main__':

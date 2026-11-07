@@ -28,7 +28,7 @@ bash ds-harness/dsh_install.sh --dry-run
 bash ds-harness/dsh_install.sh --upgrade
 ```
 
-默认复用已有的 DSH、pnpm 和 magpie，只补装缺失插件；`--upgrade` 更新 DSH、pnpm、Magpie 和插件。官方 Codex 插件版本与 DSH 对齐，保留上游兼容性检查，同版包缺失或不兼容时停止安装。安装器在安装结束时检查 `data/dsh.conf`：存在则原样保留；只有旧位置 `dsh.conf` 时复制到新位置并保留原文件；两处都没有时提示输入 IPv4/IPv6 地址及 HTTPS 端口（回车默认 `25228`）。无效输入会重新询问，输入结束或中断时不创建半成品；新文件权限为 `600`。`--dry-run` 不询问、不创建配置。安装器不生成证书、不启停服务；安装或更新应在目标 DSH 停机时执行。
+DSH、pnpm 与全部额外插件统一使用 `srcs/install-versions.json` 的固定版本：DSH `0.2.2-rc.1`、pnpm `12.15.0`，官方 Codex 插件与 DSH 同版。默认补装缺失项并校正版本或声明来源不一致的项；`--upgrade` 重装清单中的固定版本，不解析 `latest`。Magpie 沿用官方安装器，其接口只支持最新版本，因此仍是默认复用、`--upgrade` 更新的独立例外。安装器在安装结束时检查 `data/dsh.conf`：存在则原样保留；只有旧位置 `dsh.conf` 时复制到新位置并保留原文件；两处都没有时提示输入 IPv4/IPv6 地址及 HTTPS 端口（回车默认 `25228`）。无效输入会重新询问，输入结束或中断时不创建半成品；新文件权限为 `600`。`--dry-run` 不询问、不创建配置。安装器不生成证书、不启停服务；安装或更新应在目标 DSH 停机时执行。
 
 额外插件由独立脚本 `dsh_plugins_install.sh` 管理，主安装器会调用它。已有 DSH 环境只安装或更新插件时，可以单独运行：
 
@@ -38,7 +38,7 @@ bash ds-harness/dsh_plugins_install.sh
 bash ds-harness/dsh_plugins_install.sh --upgrade
 ```
 
-脚本管理以下 10 个额外安装包：
+脚本管理以下 11 个额外安装包：
 
 | 插件 | 新 profile 默认状态 |
 | --- | --- |
@@ -50,12 +50,13 @@ bash ds-harness/dsh_plugins_install.sh --upgrade
 | `dsh-sidebar-enhancement` | 启用 |
 | `dsh-sidebar-plus` | 启用 |
 | `@huanlin/dsh-plugin-input-history` | 仅安装，不启用 |
+| `@local/dsh-codex-quota` | 启用（链接本服务 `srcs/plugins/codex-quota`） |
 | `dsh-composer-plus` | 启用 |
 | `dsh-ide-git` | 仅安装，不启用 |
 
-已有 profile 保留额外插件的启用／停用状态和其他 bundle。默认跳过已完整安装的插件，Codex 插件版本仍与当前 DSH 对齐；普通 npm 插件首次安装和 `--upgrade` 使用 `latest`；mobile 默认使用 `github:mexiaosqwq/dsh-web-mobile`，composer-plus 默认使用 `https://registry.npmjs.org/dsh-composer-plus/-/dsh-composer-plus-1.22.0.tgz`，并分别保留已有的 GitHub 来源（含提交固定值）和 HTTPS 压缩包来源。实际安装版本由包清单与锁文件记录。`--dry-run` 仅预览，不安装包、不写入 profile。独立脚本不安装 DSH、Nginx 或 Magpie，也不启停服务。
+已有 profile 保留额外插件的启用／停用状态和其他 bundle。固定版本和来源统一由 `srcs/install-versions.json` 维护：DS Bot `0.3.1`、dshmarket `1.73.12`、dsh-ide-git `0.23.0`、sidebar-enhancement `1.4.1`、sidebar-plus `0.4.4`、input-history `0.4.2`、Git panel `1.11.2`；mobile `3.3.1` 固定提交 `4e71eb67de7dac9d8b2572757c81e47aa32a32fb`，composer-plus 使用 `1.23.0` 压缩包。本地 codex-quota `1.0.0` 使用相对 profile 的 `link:../../../../srcs/plugins/codex-quota` 来源，不从 npm 下载。版本和声明来源均匹配时跳过；存在 `^` 范围、其他版本或其他来源时恢复为清单值。新 profile 默认启用 9 个，input-history 和 dsh-ide-git 仅安装。独立插件安装器遇到其他 DSH 版本会要求先运行主安装器，避免混装。`--dry-run` 仅预览，不安装包、不写入 profile；独立脚本不安装 DSH、Nginx 或 Magpie，也不启停服务。
 
-主安装器及插件安装器会在安装前检查本地补丁工具是否完整；插件安装后通过 `srcs/patches/apply.py` 统一校验并迁移全部本地补丁，同一文件的变换按顺序合并，全部校验通过后才写入，写入失败会回滚本次已替换文件。可使用 `python3 -B ds-harness/srcs/patches/apply.py --check` 只读检查全部补丁。当前支持 DSH 0.2.2-rc.1、ds-bot 0.2.7 和 mobile 3.3.0 / 3.3.1：Bot 恢复本地输入框、消息操作栏和桌面宽度布局，mobile 保持上游界面；撤销旧宿主历史及 Enter 注入，保留页签宽度与终端增强，并修复旧手机浏览器文件资源地址解析；mobile 已指定的 GitHub 来源不会在升级时换成 npm 来源。参见 [补丁说明](srcs/patches/README.md)。
+主安装器及插件安装器会在安装前检查本地补丁工具是否完整；插件安装后通过 `dsh_patches_install.sh` 统一校验并迁移全部本地补丁，同一文件的变换按顺序合并，全部校验通过后才写入，写入失败会回滚本次已替换文件。可单独运行 `bash ds-harness/dsh_patches_install.sh` 安装主服务与插件补丁；已安装的补丁打印“已安装，跳过”，不重复写入、备份或修改时间戳。加 `--check` 只读检查，支持 `--profile-dir`、`--host-dir` 指定安装目录；该入口不下载依赖、不重启服务。当前支持 DSH 0.2.2-rc.1、ds-bot 0.3.1（兼容旧 0.2.7）和 mobile 3.3.0 / 3.3.1：Bot 保留本地输入框、消息操作栏和桌面宽度布局，沿用上游历史、提示词和触屏命中区，移除旧手机工具栏覆盖；mobile 保持上游界面；撤销旧宿主历史及 Enter 注入，保留页签宽度与终端增强，并修复旧手机浏览器文件资源地址解析；mobile 使用版本清单中固定的 GitHub 提交。参见 [补丁说明](srcs/patches/README.md)。
 
 Nginx 固定安装到 `ds-harness/data/.local/nginx/sbin/nginx`；即使系统已有 Nginx，也不会复用系统版本。`dsh_nginx_install.sh` 使用 [Nginx 官方构建流程](https://nginx.org/en/docs/configure.html)，固定 Nginx 1.30.6、OpenSSL 3.5.9、PCRE2 10.49、zlib 1.3.2，下载后先校验 SHA-256。三项库静态链接，不再依赖容器中额外安装的共享库；编译成功、版本和 SSL 模块检查通过后才发布完整安装目录。
 
@@ -149,6 +150,8 @@ test ! -e ds-harness/data/.agents && cp -a "$HOME/.agents" ds-harness/data/.agen
 重复 `start` 会复用身份匹配且 token 已就绪的进程；代理单独退出后，再次 `start` 会复用 DSH 的实际回环端口。整个 `start/stop` 流程共用 `log/.launcher.lock` 的内核文件锁；已有操作进行中时，新调用立即失败并提示重试。锁在操作结束时自动释放，后台服务和日志读取器不继承锁。锁文件应长期保留，运行中不要删除。不要另外启动一套 `magpie serve` 或 `dsh web`。
 
 每个 PID 配有 `.identity` 记录，校验启动时间、系统启动标识、完整参数、用户和实例随机标识；发信号使用 pidfd 固定进程，避免 PID 复用误停。缺少或不匹配身份记录的存活进程会被拒绝接管，原文件保留。升级旧实例时，须安排独立维护，核验并停止旧进程后再用新版启动；不要删除 PID 或身份文件绕过检查。
+
+DSH 插件自重启可能替换主进程 PID。启动检查仅在实例随机标识、完整命令、用户及启动时间匹配时登记替代进程；存在待执行的自重启且尚无主进程时，拒绝另起一份服务。`stop` 根据同一实例的 `DSH_LAUNCH_ID` 与 `DSH_LAUNCH_ROOT` 查找并停止主进程、插件及其脱离父进程运行的自重启辅助进程，使用 pidfd 逐个复核并发送 TERM，反复扫描以处理退出期间新拉起的进程。确认无残留后才清除登记；超时或身份核验失败时返回失败并保留记录。插件子进程须继承启动环境；主动清除实例标识的进程无法通过此机制识别。
 
 首次登记进程必须读取环境中的实例随机标识。已登记进程的 `/proc/<PID>/environ` 若因权限限制不可读，可在当前用户、PID、启动时间、系统启动标识及完整参数全部匹配时使用已有身份记录；仍使用 pidfd 核验并发送信号，不绕过实际发信号的权限检查。
 

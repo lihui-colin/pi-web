@@ -640,6 +640,26 @@ class ProcessHelperTests(unittest.TestCase):
                     if phase != 'signal':
                         sender.assert_not_called()
 
+    def test_stop_launch_timeout_preserves_registration(self):
+        from contextlib import nullcontext
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'identity'
+            now = {'pid': 123}
+            state = {'identity': now, 'launch': 'test'}
+            original = json.dumps(state)
+            path.write_text(original)
+            with mock.patch.dict(self.ns, statefile=path, current=mock.Mock(return_value=now),
+                                 owned=mock.Mock(return_value=state), state_lock=nullcontext,
+                                 launch_members=mock.Mock(return_value=[now]),
+                                 snapshot=mock.Mock(return_value=now),
+                                 open_pidfd=mock.Mock(return_value=71),
+                                 send_pidfd=mock.Mock()), \
+                 mock.patch.object(time, 'monotonic', side_effect=[0, 11]), \
+                 mock.patch.object(os, 'close'):
+                with self.assertRaisesRegex(ValueError, 'still running'):
+                    self.ns['stop_launch']()
+                self.assertEqual(path.read_text(), original)
+
     def test_pidfd_missing_python_wrappers_uses_libc(self):
         libc = mock.Mock()
         libc.pidfd_open.return_value = 71
@@ -896,6 +916,110 @@ class ProcessIdentityTests(unittest.TestCase):
         self.assertEqual(int((self.logs / 'magpie-serve.pid').read_text()), pid)
         self.assertEqual(self.shell('stop_service magpie-serve'), 0)
         self.assertFalse((self.logs / 'magpie-serve.identity').exists())
+
+    def launch_dsh(self):
+        script = self.bins / 'dsh'
+        script.write_text(f'#!{sys.executable}\nimport signal\n'
+                          "print('dsh web: https://example.test/?token=test-token', flush=True)\n"
+                          'signal.pause()\n')
+        script.chmod(0o755)
+        self.assertEqual(self.shell('start_service dsh-web dsh web --port 12345 '
+                                    '--public-url https://example.test/'), 0,
+                         (self.root / 'launcher.log').read_text())
+        pid = int((self.logs / 'dsh-web.pid').read_text())
+        self.children.append(pid)
+        return pid
+
+    def marked_child(self, code='import signal; signal.pause()', **overrides):
+        state = json.loads((self.logs / 'dsh-web.identity').read_text())
+        env = {**self.env, 'DSH_LAUNCH_ID': state['launch'],
+               'DSH_LAUNCH_ROOT': str(self.root), **overrides}
+        process = subprocess.Popen([sys.executable, '-c', code], env=env, start_new_session=True,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        def cleanup():
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+
+        self.addCleanup(cleanup)
+        return process
+
+    def test_stop_includes_all_detached_plugin_helpers_and_preserves_other_launches(self):
+        self.launch_dsh()
+        helpers = [self.marked_child() for _ in range(3)]
+        other_launch = self.marked_child(DSH_LAUNCH_ID='another-launch')
+        other_root = self.marked_child(DSH_LAUNCH_ROOT=str(self.root / 'other'))
+        self.assertEqual(self.shell('stop'), 0, (self.root / 'launcher.log').read_text())
+        for process in helpers:
+            process.wait(timeout=3)
+        self.assertIsNone(other_launch.poll())
+        self.assertIsNone(other_root.poll())
+        self.assertFalse((self.logs / 'dsh-web.identity').exists())
+        self.assertIn("dsh_token=''", self.config.read_text())
+
+    def test_stop_after_original_host_exits_kills_pending_restart(self):
+        pid = self.launch_dsh()
+        helper = self.marked_child()
+        os.kill(pid, signal.SIGTERM)
+        # The launcher must not call a missing original PID 'already stopped'
+        # while detached plugin helpers still hold the inherited launch markers.
+        deadline = time.monotonic() + 3
+        while Path(f'/proc/{pid}/cmdline').exists() and Path(f'/proc/{pid}/cmdline').read_bytes():
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(.01)
+        self.assertEqual(self.shell('stop'), 0, (self.root / 'launcher.log').read_text())
+        helper.wait(timeout=3)
+        self.assertFalse((self.logs / 'dsh-web.pid').exists())
+
+    def test_stop_rescans_child_spawned_during_shutdown(self):
+        self.launch_dsh()
+        marker = self.root / 'helper-ready'
+        child_pid = self.root / 'late-child'
+        helper = self.marked_child(f'''
+import os, pathlib, signal, subprocess, sys
+def restart(*args):
+    child = subprocess.Popen([sys.executable, '-c', 'import signal; signal.pause()'], start_new_session=True)
+    pathlib.Path({str(child_pid)!r}).write_text(str(child.pid))
+    os._exit(0)
+signal.signal(signal.SIGTERM, restart)
+pathlib.Path({str(marker)!r}).touch()
+signal.pause()
+''')
+        deadline = time.monotonic() + 3
+        while not marker.exists():
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(.01)
+        self.assertEqual(self.shell('stop'), 0, (self.root / 'launcher.log').read_text())
+        helper.wait(timeout=3)
+        pid = int(child_pid.read_text())
+        self.children.append(pid)
+        stat = Path(f'/proc/{pid}/stat')
+        self.assertTrue(not stat.exists() or stat.read_text().rsplit(')', 1)[1].split()[0] == 'Z')
+
+    def test_exact_self_restart_replacement_is_registered_then_stopped(self):
+        pid = self.launch_dsh()
+        state = json.loads((self.logs / 'dsh-web.identity').read_text())
+        os.kill(pid, signal.SIGTERM)
+        deadline = time.monotonic() + 3
+        while Path(f'/proc/{pid}/cmdline').exists() and Path(f'/proc/{pid}/cmdline').read_bytes():
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(.01)
+        replacement = subprocess.Popen(state['identity']['argv'], start_new_session=True,
+                                       env={**self.env, 'DSH_LAUNCH_ID': state['launch'],
+                                            'DSH_LAUNCH_ROOT': str(self.root)},
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.children.append(replacement.pid)
+        try:
+            self.assertEqual(self.shell('service_pid dsh-web'), 0,
+                             (self.root / 'launcher.log').read_text())
+            self.assertEqual(int((self.logs / 'dsh-web.pid').read_text()), replacement.pid)
+            self.assertEqual(self.shell('stop'), 0, (self.root / 'launcher.log').read_text())
+            replacement.wait(timeout=3)
+        finally:
+            if replacement.poll() is None:
+                replacement.kill()
+            replacement.wait(timeout=3)
 
     def test_pidfd_stop_without_python_wrappers(self):
         # Lead's main namespace exercises the real libc path with a private child.

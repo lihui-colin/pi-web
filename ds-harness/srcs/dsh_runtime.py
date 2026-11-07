@@ -47,11 +47,136 @@ def snapshot(pid):
             raise ProcessLookupError() from None
         raise
 
-def current():
+def current(recover=True):
     pid = int(pidfile.read_text().strip())
     if pid <= 1:
         raise ValueError('unsafe PID')
-    return snapshot(pid)
+    try:
+        return snapshot(pid)
+    except ProcessLookupError:
+        if recover and service == 'dsh-web':
+            return recover_replacement()
+        raise
+
+
+def recover_replacement():
+    # Market self-restart inherits our launch markers but cannot update our PID
+    # file. Only an exact replacement of the recorded invocation may be adopted.
+    # Keep the old identity until the replacement is verified, including while
+    # the detached restart helper is waiting to spawn it.
+    with state_lock():
+        try:
+            return current(recover=False)
+        except ProcessLookupError:
+            pass
+        try:
+            state = json.loads(statefile.read_text())
+        except FileNotFoundError:
+            raise ProcessLookupError() from None
+        previous = state['identity']
+        members = launch_members(state)
+        candidates = [now for now in members
+                      if settled_command(now, Path(previous['argv'][0]).resolve(), previous['argv'])]
+        if members and not candidates:
+            raise ValueError('self-restart still pending; use stop to terminate the launch')
+        if len(candidates) > 1:
+            raise ValueError('multiple replacement processes; refusing ambiguous adoption')
+        if not candidates:
+            raise ProcessLookupError()
+        now = candidates[0]
+        # Recheck before publishing. Never grant the environment-permission
+        # fallback to an unverified replacement.
+        if snapshot(now['pid']) != now:
+            raise ValueError('replacement identity changed')
+        replacement = {**state, 'launch_start': state.get('launch_start', previous['start']),
+                       'identity': {**now, 'argv': [os.fsdecode(x) for x in now['argv']]}}
+        atomic(statefile, json.dumps(replacement))
+        atomic(pidfile, str(now['pid']) + '\n')
+        print(f"dsh-web: 已登记自重启后的进程 PID {now['pid']}", file=sys.stderr)
+        return now
+
+def launch_members(state):
+    previous = state['identity']
+    if (state['root'] != str(root) or state['service'] != service or
+            not state['launch'] or previous['uid'] != os.geteuid() or
+            previous['boot'] != Path('/proc/sys/kernel/random/boot_id').read_text().strip()):
+        raise ValueError('invalid launch origin')
+    markers = {('DSH_LAUNCH_ID=' + state['launch']).encode(),
+               ('DSH_LAUNCH_ROOT=' + str(root)).encode()}
+    members = []
+    for proc in Path('/proc').iterdir():
+        if not proc.name.isdecimal():
+            continue
+        try:
+            now = snapshot(int(proc.name))
+            if (now['uid'] != previous['uid'] or
+                    int(now['start']) < int(state.get('launch_start', previous['start']))):
+                continue
+            try:
+                environment = set((proc / 'environ').read_bytes().split(b'\0'))
+            except PermissionError:
+                if now['pid'] == previous['pid']:
+                    owned(now)  # Exact registered identity is the only fallback.
+                    members.append(now)
+                elif [os.fsdecode(x) for x in now['argv']] == previous['argv']:
+                    raise ValueError('cannot verify possible replacement environment')
+                continue
+            if markers <= environment:
+                members.append(now)
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+    return members
+
+
+def stop_launch():
+    # Stop the entire marked launch, including detached plugin restart helpers.
+    # Rescan after TERM: a helper can race with shutdown and spawn a new host.
+    # Never discard the registration while any verified launch member survives.
+    with state_lock():
+        try:
+            state = json.loads(statefile.read_text())
+        except FileNotFoundError:
+            try:
+                current(recover=False)
+            except (FileNotFoundError, ProcessLookupError):
+                return
+            raise
+        try:
+            owned(current(recover=False))
+        except (FileNotFoundError, ProcessLookupError):
+            pass
+        deadline = time.monotonic() + 10
+        quiet = False
+        while True:
+            members = launch_members(state)
+            if not members:
+                if quiet:
+                    return
+                # /proc enumeration can overlap a helper exiting just after it
+                # spawns its replacement. Require a second empty observation.
+                quiet = True
+                time.sleep(.1)
+                continue
+            quiet = False
+            for now in sorted(members, key=lambda item: item['pid'] == state['identity']['pid']):
+                fd = None
+                try:
+                    fd = open_pidfd(now['pid'])
+                    if snapshot(now['pid']) != now:
+                        raise ValueError('launch member identity changed')
+                    # Revalidate environment/ownership after pinning the PID.
+                    if now not in launch_members(state):
+                        raise ValueError('launch member ownership changed')
+                    send_pidfd(fd, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                finally:
+                    if fd is not None:
+                        os.close(fd)
+            if time.monotonic() >= deadline:
+                raise ValueError('launch processes still running; registration preserved')
+            time.sleep(.1)
+
 
 def owned(now, require_environment=False):
     state = json.loads(statefile.read_text())
@@ -292,7 +417,7 @@ def capture_output():
                 else:
                     raise ValueError('missing launch identity')
                 with state_lock():
-                    if not (owned(current()) == state):
+                    if not (owned(current(recover=False)) == state):
                         raise ValueError("state verification failed")
                     save_token(token)
                     atomic(readyfile, json.dumps(dict(state=state, token_sha256=hashlib.sha256(token.encode()).hexdigest())))
@@ -317,6 +442,8 @@ def run_operation():
         elif operation == 'check-nginx':
             from dsh_nginx import require_local_nginx
             require_local_nginx()
+        elif operation == 'stop-launch':
+            stop_launch()
         elif operation == 'record':
             record_process()
         elif operation == 'capture':
@@ -341,7 +468,7 @@ def run_operation():
                     sys.exit(1)
                 try:
                     with state_lock():
-                        if not (owned(current()) == state):
+                        if not (owned(current(recover=False)) == state):
                             raise ValueError("state verification failed")
                         send_pidfd(fd, signal.SIGTERM)
                 except ProcessLookupError:

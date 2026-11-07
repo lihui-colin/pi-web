@@ -13,7 +13,7 @@ sys.path.insert(0, str(SRC_DIR))
 
 ENTRY_SCRIPTS = frozenset((
     'dsh_install.sh', 'dsh_web_run.sh', 'dsh_proxy.sh',
-    'dsh_plugins_install.sh', 'dsh_nginx_install.sh', 'dsh_cert.sh',
+    'dsh_plugins_install.sh', 'dsh_patches_install.sh', 'dsh_nginx_install.sh', 'dsh_cert.sh',
 ))
 
 
@@ -64,6 +64,7 @@ def fixture_file(root, name):
 def copy_patch_tools(root):
     """Use the real coordinator with isolated planners in installer tests."""
     from patches.apply import PATCHES
+    shutil.copy2(source_file('dsh_patches_install.sh'), fixture_file(root, 'dsh_patches_install.sh'))
     for name in ('patches/apply.py', 'patches/common.py'):
         shutil.copy2(source_file(name), fixture_file(root, name))
     markers = ('PATCH_BUNDLE', 'MOBILE_PATCH', 'GIT_PANEL_PATCH', 'TERMINAL_PATCH',

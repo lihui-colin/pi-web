@@ -36,13 +36,8 @@ class PatchSetTests(unittest.TestCase):
                 path.write_text(source)
                 self.sources[path] = source
 
-        bot_source = '\n'.join([
-            bot.MOBILE_GRID, bot.MOBILE_TRACK, bot.MOBILE_GROUP_OLD, bot.MOBILE_META_CSS,
-            bot.MOBILE_RAIL_CSS, bot.MOBILE_COMPOSER, bot.WIDTH_HANDLES, bot.WIDTH_BODY,
-            bot.WIDTH_COMPOSER, bot.ALIGN_ANCHOR,
-            *[before for before, _ in bot.MESSAGE_ACTION_REPLACEMENTS],
-        ]).replace('import_react17', 'import_react19')
-        package(self.profile / 'node_modules/ds-bot', 'ds-bot', '0.2.7', {'client.js': bot_source})
+        bot_source = (Path(__file__).parent / 'fixtures/ds_bot_031.js').read_text()
+        package(self.profile / 'node_modules/ds-bot', 'ds-bot', '0.3.1', {'client.js': bot_source})
         package(self.profile / 'node_modules/dsh-web-mobile', 'dsh-web-mobile', '3.3.1',
                 {'lib/client.js': mobile.COMPOSER_FILE_BUTTON})
         package(self.profile / 'node_modules/@xbzbing/dsh-git-panel', '@xbzbing/dsh-git-panel',
@@ -80,11 +75,13 @@ class PatchSetTests(unittest.TestCase):
 
         script = self.root / 'srcs/patches'
         shutil.copytree(test_support.SRC_DIR / 'patches', script)
-        self.command = [sys.executable, '-B', str(script / 'apply.py'),
+        entry = self.root / 'dsh_patches_install.sh'
+        shutil.copy2(test_support.source_file(entry.name), entry)
+        self.command = ['bash', str(entry),
                         '--profile-dir', str(self.profile), '--host-dir', str(self.host)]
 
     def cli(self, *args):
-        return subprocess.run([*self.command, *args], capture_output=True, text=True, timeout=15)
+        return subprocess.run([*self.command, *args], cwd='/', capture_output=True, text=True, timeout=15)
 
     def snapshot(self):
         return {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in self.sources}
@@ -105,9 +102,29 @@ class PatchSetTests(unittest.TestCase):
         before = self.snapshot()
         result = self.cli()
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('已安装，跳过：', result.stdout)
+        self.assertNotIn('已应用补丁：', result.stdout)
         self.assertEqual(self.snapshot(), before)
         self.assertFalse((self.root / 'log').exists())
         self.assertEqual(len(list(self.backups.iterdir())), 1)
+
+    def test_partial_install_only_writes_and_backs_up_missing_targets(self):
+        common.publish(apply.plan_changes(self.profile, self.host), self.backups)
+        target = self.host / 'dsh-client-resources/lib/client.js'
+        target.write_text(resources.OLD)
+        before = self.snapshot()
+        result = self.cli()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(f'已应用补丁：{target}', result.stdout)
+        self.assertIn('已安装，跳过：', result.stdout)
+        self.assertEqual(target.read_text(), resources.NEW)
+        after = self.snapshot()
+        for path in self.sources:
+            if path != target:
+                self.assertEqual(after[path], before[path])
+        backups = list((self.root / 'log/patch-backups').iterdir())
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(json.loads((backups[0] / 'manifest.json').read_text()), [str(target)])
 
     def test_final_planner_failure_does_not_write_earlier_targets(self):
         conversation = self.host / 'dsh-client-ui-conversation/lib/client.js'

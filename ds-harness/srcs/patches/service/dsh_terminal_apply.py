@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Apply version-checked DSH terminal recovery, input and browser enhancements."""
-import argparse
 import hashlib
 import json
 from pathlib import Path
@@ -8,7 +7,7 @@ from pathlib import Path
 if not __package__:
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from patches.common import host_directory, publish, read_change, replace_once, verify_package
+from patches.common import host_directory, publish, read_change, replace_once, verify_package, patch_cli
 
 HERE = Path(__file__).resolve().parent
 RUNTIME = (HERE / 'dsh_terminal_runtime.js').read_text().strip() + '\n'
@@ -166,12 +165,9 @@ def patch_frontend(text):
     # Normalize a previously installed clipboard fix back to the redraw-only
     # baseline before applying it again, so both generations remain idempotent.
     if CLIP_FINISH_NEW in text:
-        for old, fixed in reversed([(CLIP_HELPER, CLIP_HELPER_NEW), (CLIP_REF, CLIP_REF_NEW),
+        text = undo_replacements(text, [(CLIP_HELPER, CLIP_HELPER_NEW), (CLIP_REF, CLIP_REF_NEW),
             (CLIP_SETUP, CLIP_SETUP_NEW), (CLIP_CLEANUP, CLIP_CLEANUP_NEW),
-            (CLIP_CAPTURE, CLIP_CAPTURE_NEW), (CLIP_FINISH, CLIP_FINISH_NEW)]):
-            if text.count(fixed) != 1:
-                raise ValueError('Incomplete terminal clipboard patch; inspect before applying')
-            text = text.replace(fixed, old, 1)
+            (CLIP_CAPTURE, CLIP_CAPTURE_NEW), (CLIP_FINISH, CLIP_FINISH_NEW)])
     text = apply_replacements(text, [(SCREEN_REF, SCREEN_REF_NEW), (SETUP, SETUP_NEW),
         (CLEANUP, CLEANUP_NEW), (FONT_FIT, FONT_FIT_NEW), (WRITE, WRITE_NEW),
         (VISIBLE, VISIBLE_NEW), (PHASE, PHASE_NEW), (RUNTIME_ANCHOR, RUNTIME_NEW)])
@@ -214,23 +210,8 @@ def plan_changes(host=None, *, read_text=Path.read_text):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--check', action='store_true', help='Validate without writing')
-    parser.add_argument('--host-dir', type=Path, help='Installed DSH node_modules/@deepseek-ai directory')
-    args = parser.parse_args()
-    changes = plan_changes(args.host_dir)
-    pending = [path for path, original, fixed in changes if original != fixed]
-    if args.check:
-        if pending:
-            for path in pending:
-                print(f'Needs patch: {path}')
-            raise SystemExit(1)
-        print('DSH terminal compatibility fixes are present.')
-        return
-    publish(changes)
-    print('DSH terminal compatibility fixes applied.')
-    if pending:
-        print('Host changes require a planned service restart; frontend resources require reload. No service restarted.')
+    patch_cli(plan_changes, __doc__, {'host': '--host-dir'},
+              'DSH terminal compatibility verified')
 
 
 if __name__ == '__main__':

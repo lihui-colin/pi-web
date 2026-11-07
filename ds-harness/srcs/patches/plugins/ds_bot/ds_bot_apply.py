@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """Migrate reviewed DS Bot / DSH fixes without overriding upstream behavior.
 
-DS Bot 0.2.7 / DSH 0.2.2-rc.1 retires the old host history and Enter patches.
+DS Bot 0.3.1 / DSH 0.2.2-rc.1 uses upstream history, prompt and touch handling.
+Only local layout preferences and mobile sidebar compatibility remain.
+The reviewed 0.2.7 route retains its original layout transforms.
 The isolated 0.2.6 / alpha.2 route remains available for existing old installs.
 """
-import argparse
-import json
 from pathlib import Path
 
 if not __package__:
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-from patches.common import COMPONENT_ROOT, host_directory, publish, replace_once
+from patches.common import COMPONENT_ROOT, host_directory, publish, replace_once, verify_package, patch_cli
 
 
 # History compatibility
@@ -162,15 +162,20 @@ MOBILE_RAIL_FIXED = MOBILE_RAIL_CSS + '''
 .bt-rail .bt-rail-top{align-self:stretch}
 '''
 
-def patch_mobile(text, react_alias='import_react17'):
+def patch_mobile(text, react_alias='import_react17', *, phone_layout=True):
     for old, new in (
         (MOBILE_GRID, MOBILE_GRID_FIXED), (MOBILE_TRACK, MOBILE_TRACK_FIXED),
-        (MOBILE_GRID_FIXED, MOBILE_GRID_FIXED + MOBILE_PHONE_CSS),
         (MOBILE_GROUP_OLD, MOBILE_GROUP_LEFT), (MOBILE_META_CSS, MOBILE_META_FIXED),
         (MOBILE_RAIL_CSS, MOBILE_RAIL_FIXED), (MOBILE_COMPOSER, MOBILE_COMPOSER + MOBILE_COMPOSER_CSS),
     ):
         text = replace_once(text, old.replace('import_react17', react_alias),
                             new.replace('import_react17', react_alias))
+    if phone_layout:
+        text = replace_once(text, MOBILE_GRID_FIXED, MOBILE_GRID_FIXED + MOBILE_PHONE_CSS)
+    else:
+        # 0.3.1 styles.js owns touch toolbar placement and 44px hit targets.
+        # Full-width bubbles are already handled by ALIGN_CSS at every width.
+        text = retire_replacements(text, [(MOBILE_GRID_FIXED, MOBILE_GRID_FIXED + MOBILE_PHONE_CSS)])
     return text
 
 
@@ -245,15 +250,15 @@ MESSAGE_ACTION_REPLACEMENTS = [
 ]
 
 
-def patch_presentation(text, react_alias='import_react17'):
+def patch_presentation(text, react_alias='import_react17', react_dom_alias='import_react_dom'):
     for old, new in [
         (WIDTH_HANDLES, WIDTH_HANDLES_FIXED), (WIDTH_BODY, WIDTH_BODY_FIXED),
         (WIDTH_COMPOSER, WIDTH_COMPOSER_FIXED), (ALIGN_ANCHOR, ALIGN_ANCHOR + ALIGN_CSS),
         (ALIGN_CSS, ALIGN_CSS + TOUCH_ACTIONS_CSS),
         *MESSAGE_ACTION_REPLACEMENTS,
     ]:
-        text = replace_once(text, old.replace('import_react17', react_alias),
-                            new.replace('import_react17', react_alias))
+        text = replace_once(text, old.replace('import_react17', react_alias).replace('import_react_dom', react_dom_alias),
+                            new.replace('import_react17', react_alias).replace('import_react_dom', react_dom_alias))
     return text
 
 
@@ -340,23 +345,21 @@ HISTORY_CONVERSATION_REPLACEMENTS = [
 def plan_changes(bot=None, host=None, *, read_text=Path.read_text):
     bot = Path(bot) if bot is not None else COMPONENT_ROOT / 'data/.dsh/profiles/web/node_modules/ds-bot'
     host = host_directory(host)
-    packages = [
-        (bot, 'ds-bot', '0.2.6'),
-        (host / 'dsh-client-ui-chat', '@deepseek-ai/dsh-client-ui-chat', '0.2.2-alpha.2'),
-        (host / 'dsh-client-ui-conversation', '@deepseek-ai/dsh-client-ui-conversation', '0.2.2-alpha.2'),
-    ]
-    manifests = [json.loads((directory / 'package.json').read_text()) for directory, _, _ in packages]
-    if [(manifest.get('name'), manifest.get('version')) for manifest in manifests] == [
-        ('ds-bot', '0.2.7'),
-        ('@deepseek-ai/dsh-client-ui-chat', '0.2.2-rc.1'),
-        ('@deepseek-ai/dsh-client-ui-conversation', '0.2.2-rc.1'),
-    ]:
-        # Bot 0.2.7 owns history and prompt handling, but still ships the fixed
-        # width / inline composer / More-menu layouts. Its message components
-        # use import_react19; keep the exact version gate and anchor validation.
+    bot_version = verify_package(bot, 'ds-bot', ('0.2.6', '0.2.7', '0.3.1'))
+    host_version = '0.2.2-alpha.2' if bot_version == '0.2.6' else '0.2.2-rc.1'
+    for name in ('dsh-client-ui-chat', 'dsh-client-ui-conversation'):
+        verify_package(host / name, '@deepseek-ai/' + name, (host_version,))
+    if bot_version != '0.2.6':
+        # Reviewed 0.3.1 tag/npm gitHead 6559c9e7c4ef71c292e6ac50f690031133536fe0:
+        # history and safe prompt assembly are native; no Bot host patch is needed.
+        # styles.js still fixes widths and cells.js still uses the More menu.
+        # Compiled message/portal aliases changed; validate every anchor as before.
+        latest = bot_version == '0.3.1'
+        react_alias = 'import_react31' if latest else 'import_react19'
+        dom_alias = 'import_react_dom3' if latest else 'import_react_dom'
         bot_client = bot / 'client.js'
         original = read_text(bot_client)
-        fixed = patch_presentation(patch_mobile(original, 'import_react19'), 'import_react19')
+        fixed = patch_presentation(patch_mobile(original, react_alias, phone_layout=not latest), react_alias, dom_alias)
         changes = [(bot_client, original, fixed)]
         for path, replacements in (
             (host / 'dsh-client-ui-chat/lib/client.js', HISTORY_CHAT_REPLACEMENTS),
@@ -368,9 +371,6 @@ def plan_changes(bot=None, host=None, *, read_text=Path.read_text):
                 fixed = retire_composer(fixed)
             changes.append((path, original, fixed))
         return changes
-    for (directory, name, version), manifest in zip(packages, manifests):
-        if (manifest.get('name'), manifest.get('version')) != (name, version):
-            raise ValueError(f'Unsupported package {manifest.get("name")}@{manifest.get("version")}; expected {name}@{version}. Review upstream before applying.')
     transforms = [
         (bot / 'client.js', [lambda text: patch_history(text, HISTORY_BOT_REPLACEMENTS), patch_mobile, patch_presentation]),
         (bot / 'src/host/tools.js', [patch_prompt]),
@@ -388,24 +388,8 @@ def plan_changes(bot=None, host=None, *, read_text=Path.read_text):
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--check', action='store_true', help='Validate without writing; exit 1 if any fix is missing')
-    parser.add_argument('--bot-dir', type=Path, help='Installed ds-bot package directory')
-    parser.add_argument('--host-dir', type=Path, help='Installed DSH node_modules/@deepseek-ai directory')
-    args = parser.parse_args()
-    changes = plan_changes(args.bot_dir, args.host_dir)
-    pending = [(path, original, fixed) for path, original, fixed in changes if original != fixed]
-    if args.check:
-        for path, _, _ in pending:
-            print(f'Needs patch: {path}')
-        if pending:
-            raise SystemExit(1)
-        print('Reviewed DS Bot / host compatibility state verified.')
-        return
-    publish(changes)
-    print('Reviewed DS Bot / host compatibility changes applied.')
-    if pending:
-        print('Reload frontend resources / server modules during a maintenance window; no service restarted.')
+    patch_cli(plan_changes, __doc__, {'bot': '--bot-dir', 'host': '--host-dir'},
+              'Reviewed DS Bot / host compatibility verified')
 
 
 if __name__ == '__main__':

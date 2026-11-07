@@ -66,7 +66,13 @@ def main():
     if args.validate_tools:
         load_patches()
         return
-    check_or_publish(plan_changes(args.profile_dir, args.host_dir), args.check, 'DSH patches missing')
+    changes = plan_changes(args.profile_dir, args.host_dir)
+    check_or_publish(changes, args.check, 'DSH patches missing')
+    if not args.check:
+        for path, before, after in changes:
+            print(f'已安装，跳过：{path}' if before == after else f'已应用补丁：{path}')
+        if not changes:
+            print('没有需要安装的补丁。')
     print('Reviewed DSH patch set verified; no service restarted.')
 
 

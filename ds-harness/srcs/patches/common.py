@@ -1,4 +1,5 @@
 """Shared validation and atomic publication for DSH bundle patches."""
+import argparse
 import json
 import os
 from pathlib import Path
@@ -94,3 +95,15 @@ def check_or_publish(changes, check, message):
             raise SystemExit(message + ': ' + ', '.join(pending))
     else:
         publish(changes)
+
+
+def patch_cli(planner, description, directories, message):
+    """Keep standalone patch commands consistent with the shared publisher."""
+    parser = argparse.ArgumentParser(description=description)
+    parser.add_argument('--check', action='store_true', help='Validate without writing')
+    for parameter, flag in directories.items():
+        parser.add_argument(flag, dest=parameter, type=Path)
+    options = vars(parser.parse_args())
+    check = options.pop('check')
+    check_or_publish(planner(**options), check, 'Required patches missing')
+    print(message + '; no service restarted.')

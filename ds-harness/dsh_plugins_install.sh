@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 安装 web profile 的十个额外插件；已有 profile 保留启用/禁用状态。
+# 安装 web profile 的十一个额外插件；已有 profile 保留启用/禁用状态。
 set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 dry_run=false
@@ -15,11 +15,12 @@ while (( $# )); do
         -h|--help)
             printf '%s\n' \
                 '用法：bash ds-harness/dsh_plugins_install.sh [--dry-run] [--upgrade]' \
-                '默认补装十个额外插件；--upgrade 重新安装，普通 npm 插件使用 latest，Codex 与实际 DSH 同版。' \
-                'mobile 默认使用 GitHub，composer-plus 默认使用 1.22.0 压缩包；保留已指定的对应来源。' \
-                '已有 web profile 保留启用/禁用状态；新 profile 启用八个，input-history 和 dsh-ide-git 仅安装。' \
+                '默认补装或校正十一个额外插件的固定版本；--upgrade 重新安装固定版本。' \
+                '版本和来源统一固定于 srcs/install-versions.json；mobile 固定 GitHub 提交。' \
+                'codex-quota 链接本服务 srcs/plugins/codex-quota；已有 web profile 保留启用/禁用状态。' \
+                '新 profile 启用九个，input-history 和 dsh-ide-git 仅安装。' \
                 '数据固定放在服务目录下 data/.dsh；不配置内置 bundle，不启停服务。' \
-                '--expected-dsh-version 仅供父安装器 dry-run 传入预期版本或占位符。'
+                '--expected-dsh-version 仅供父安装器 dry-run 传入固定版本。'
             exit 0 ;;
         *) printf '未知参数：%s\n' "$1" >&2; exit 2 ;;
     esac
@@ -32,7 +33,7 @@ command -v node >/dev/null 2>&1 || { printf '缺少命令：node。\n' >&2; exit
 if ! "$dry_run"; then
     command -v python3 >/dev/null 2>&1 || { printf '缺少命令：python3（用于 DSH 兼容补丁）。\n' >&2; exit 1; }
     # Validate every local tool and helper before downloading or changing the profile.
-    python3 -B "$script_dir/srcs/patches/apply.py" --validate-tools
+    bash "$script_dir/dsh_patches_install.sh" --validate-tools
 fi
 export DSH_HOME="$script_dir/data/.dsh"
 export DSH_AGENTS_HOME="$script_dir/data/.agents"
@@ -46,7 +47,7 @@ elif command -v dsh >/dev/null 2>&1; then
         exit 1
     fi
 elif "$dry_run"; then
-    dsh_version='<安装后的 DSH 版本>'
+    dsh_version="$(node -p 'require(process.argv[1]).dsh' "$script_dir/srcs/install-versions.json")"
 else
     printf '缺少命令：dsh。请先运行 dsh_install.sh。\n' >&2
     exit 1
@@ -69,31 +70,23 @@ else {
 STATE_NODE
 )"
 # 声明和实际文件均存在才算已安装；Codex 还必须与 DSH 同版。
-plugin_plan="$(node --input-type=module - "$profile_dir" "$dsh_version" "$upgrade" <<'PLAN_NODE'
+plugin_plan="$(node --input-type=module - "$profile_dir" "$dsh_version" "$upgrade" "$script_dir/srcs/install-versions.json" <<'PLAN_NODE'
 import fs from 'node:fs';
 import path from 'node:path';
-const [dir, version, upgrade] = process.argv.slice(2);
+const [dir, version, upgrade, pinsFile] = process.argv.slice(2);
+const pins = JSON.parse(fs.readFileSync(pinsFile, 'utf8'));
+if (version !== pins.dsh) throw new Error(`DSH ${version} 与固定版本 ${pins.dsh} 不符，请先运行 dsh_install.sh`);
 const manifest = path.join(dir, 'package.json');
 const pkg = fs.existsSync(manifest) ? JSON.parse(fs.readFileSync(manifest, 'utf8')) : {};
-const names = ['@deepseek-ai/dsh-subagent-codex', 'ds-bot', 'dsh-web-mobile', 'dshmarket', 'dsh-ide-git', 'dsh-sidebar-enhancement', 'dsh-sidebar-plus', '@huanlin/dsh-plugin-input-history', '@xbzbing/dsh-git-panel', 'dsh-composer-plus'];
-// Sources selected in the deployed web profile; keep these on a fresh install too.
-const sources = {
-  'dsh-web-mobile': 'github:mexiaosqwq/dsh-web-mobile',
-  'dsh-composer-plus': 'https://registry.npmjs.org/dsh-composer-plus/-/dsh-composer-plus-1.22.0.tgz',
-};
+const names = Object.keys(pins.plugins);
 for (const name of names) {
   const installedPath = path.join(dir, 'node_modules', name, 'package.json');
   let installed;
   if (fs.existsSync(installedPath)) installed = JSON.parse(fs.readFileSync(installedPath, 'utf8'));
   const declared = pkg.dependencies?.[name] || pkg.devDependencies?.[name] || pkg.optionalDependencies?.[name];
-  // Keep an explicitly selected mobile repository (including a pinned commit).
-  // Replacing it with npm latest could restore the older mobile generation.
-  const githubMobile = name === 'dsh-web-mobile' && typeof declared === 'string' && declared.startsWith('github:');
-  const tarballComposer = name === 'dsh-composer-plus' && typeof declared === 'string' && declared.startsWith('https:');
-  const source = githubMobile || tarballComposer ? declared : sources[name];
-  const target = name === names[0] ? version : source || 'latest';
-  if (upgrade !== 'true' && declared && installed?.name === name && installed.version &&
-      (name !== names[0] || installed.version === version)) {
+  const pin = pins.plugins[name];
+  const target = pin.source || pin.version;
+  if (upgrade !== 'true' && declared === target && installed?.name === name && installed.version === pin.version) {
     console.error(`已安装 ${name}@${installed.version}，跳过安装。`);
   } else console.log(`${name}@${target}`);
 }
@@ -118,7 +111,7 @@ else
     printf '%s\n' '所需插件均已安装，跳过插件安装。'
 fi
 if "$dry_run"; then
-    printf '%s\n' '预览：已有 profile 保留额外插件启用状态；新 profile 安装十个、启用八个（不启用 input-history 和 dsh-ide-git）。未修改文件。'
+    printf '%s\n' '预览：已有 profile 保留额外插件启用状态；新 profile 安装十一个、启用九个（不启用 input-history 和 dsh-ide-git）。未修改文件。'
 else
     # 包管理器可能自动启用插件；安装失败时也恢复已有 profile 的 bundle 状态。
     node --input-type=module - "$profile_dir/package.json" "$bundle_state" "$status" <<'BUNDLES_NODE'
@@ -139,7 +132,7 @@ if (!fs.existsSync(file)) {
       pkg.dsh.profile.bundles = state.bundles;
     }
   } else if (status === '0') {
-    const defaults = ['@deepseek-ai/dsh-subagent-codex', 'ds-bot', 'dsh-web-mobile', 'dshmarket', 'dsh-sidebar-enhancement', 'dsh-sidebar-plus', '@xbzbing/dsh-git-panel', 'dsh-composer-plus'];
+    const defaults = ['@deepseek-ai/dsh-subagent-codex', 'ds-bot', 'dsh-web-mobile', 'dshmarket', 'dsh-sidebar-enhancement', 'dsh-sidebar-plus', '@xbzbing/dsh-git-panel', '@local/dsh-codex-quota', 'dsh-composer-plus'];
     pkg.dsh ??= {};
     pkg.dsh.profile ??= {};
     const existing = pkg.dsh.profile.bundles ?? [];
@@ -157,4 +150,4 @@ fi
 if (( status != 0 )); then exit "$status"; fi
 # Validate the complete patch set before publishing any target file.
 # Shared host files are composed in memory and backed up only once.
-run python3 -B "$script_dir/srcs/patches/apply.py"
+run bash "$script_dir/dsh_patches_install.sh"

@@ -183,5 +183,52 @@ class CurrentPatchTests(unittest.TestCase):
         self.assertEqual(self.sources, {path: path.read_text() for path in self.sources})
 
 
+class LatestPatchTests(CurrentPatchTests):
+    """0.3.1 publication excerpts, independent of the patch's generated anchors."""
+
+    def setUp(self):
+        super().setUp()
+        (self.bot / 'package.json').write_text(json.dumps({'name': 'ds-bot', 'version': '0.3.1'}))
+        client = self.bot / 'client.js'
+        client.write_text((Path(__file__).parent / 'fixtures/ds_bot_031.js').read_text())
+        self.sources[client] = client.read_text()
+
+    def test_current_layout_installs_and_preserves_history_and_prompt(self):
+        self.run_cli('--check', status=1)
+        self.run_cli()
+        client = self.bot / 'client.js'
+        fixed = client.read_text()
+        self.assertIn(p.MOBILE_COMPOSER_CSS, fixed)
+        self.assertIn(p.WIDTH_BODY_FIXED, fixed)
+        self.assertNotIn(p.MOBILE_PHONE_CSS, fixed)
+        self.assertNotIn(p.HISTORY_INSERT, fixed)
+        # Keep upstream touch targets and placement; local actions remain below messages.
+        self.assertIn('.bt-tool{width:44px;height:44px}', fixed)
+        self.assertIn(p.TOUCH_ACTIONS_CSS, fixed)
+        self.assertEqual((self.bot / 'src/host/tools.js').read_text(), p.PROMPT_OLD)
+        subprocess.run(['node', '--check', str(client)], check=True, capture_output=True)
+        result = subprocess.run(['node', str(Path(__file__).with_name('test_ds_bot_031.cjs'))],
+                                input=fixed, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.run_cli('--check')
+        before = {path: path.stat().st_mtime_ns for path in self.sources}
+        self.run_cli()
+        self.assertEqual(before, {path: path.stat().st_mtime_ns for path in self.sources})
+
+    def test_retires_redundant_phone_override(self):
+        self.run_cli()
+        client = self.bot / 'client.js'
+        expected = client.read_text()
+        client.write_text(expected.replace(p.MOBILE_GRID_FIXED, p.MOBILE_GRID_FIXED + p.MOBILE_PHONE_CSS))
+        self.run_cli('--check', status=1)
+        self.run_cli()
+        self.assertEqual(client.read_text(), expected)
+
+    def test_unknown_release_is_rejected_without_writes(self):
+        (self.bot / 'package.json').write_text(json.dumps({'name': 'ds-bot', 'version': '0.3.2'}))
+        self.run_cli(status=1)
+        self.assertEqual(self.sources, {path: path.read_text() for path in self.sources})
+
+
 if __name__ == '__main__':
     unittest.main()
