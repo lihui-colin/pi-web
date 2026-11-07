@@ -35,6 +35,9 @@ test('installed upstream bundle accepts the directory picker patch idempotently'
   const bundle = fs.readFileSync(outputPath, 'utf8');
   assert.ok(bundle.includes('globalThis.__paseoPickServerDirectory(je,'));
   assert.ok(bundle.includes('client.listDirectory(path,'));
+  assert.ok(bundle.includes('client.createFileEntry({ cwd: createParent,'));
+  assert.ok(bundle.includes('class="dp-columns"'));
+  assert.equal(bundle.includes('class="dp-tree"'), false, 'old tree picker is replaced');
   assert.ok(bundle.includes('timeoutMs:20000'));
   assert.ok(bundle.includes('__paseoMobileSidebarSwipeCleanup'));
   const moduleContaining = (text, marker) => {

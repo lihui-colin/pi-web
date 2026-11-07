@@ -80,11 +80,11 @@ bash paseo-ws/paseo_web_run.sh stop
 
 ## Web UI 补丁
 
-`srcs/patches/service/patch-web-ui.cjs` 将首次连接探测和后续 TLS 连接等待时间调整为 20 秒，修复手机慢连接超时；同时给网页版 Add projects 增加 **Browse** 服务器目录树入口。补丁生成新哈希资源地址，保留原 JS。安装时自动执行，也可运行 `node paseo-ws/srcs/patches/service/patch-web-ui.cjs` 后刷新网页，无需重启。
+`srcs/patches/service/patch-web-ui.cjs` 将首次连接探测和后续 TLS 连接等待时间调整为 20 秒，修复手机慢连接超时；同时给网页版 Add projects 增加 **Browse** 服务器文件夹选择入口。补丁生成新哈希资源地址，保留原 JS。安装时自动执行，也可运行 `node paseo-ws/srcs/patches/service/patch-web-ui.cjs` 后刷新网页，无需重启。
 
 手机侧栏修复也由该入口自动应用（`srcs/patches/service/mobile-sidebar-swipe.js`）：从屏幕左边缘 32px 内右滑打开左侧栏，在已打开的左侧栏内左滑关闭；保留原有宽度和布局，右侧栏不变。仍由上游手势负责动画和状态提交。已核对 [v0.14.0 上游侧栏手势](https://github.com/getpaseo/paseo/blob/8c6de842a3157530c26a7a94c78a3d647fb96ce9/packages/app/src/mobile-panels/gestures.ts) 和 [根布局](https://github.com/getpaseo/paseo/blob/8c6de842a3157530c26a7a94c78a3d647fb96ce9/packages/app/src/app/_layout.tsx)：原版已经支持侧滑，但 Web 的 `touch-action: auto` 允许浏览器抢占横向触摸。Chromium 手机模拟中可复现 `pointercancel` 导致打开失败。补丁只在紧凑布局下的左边缘右滑、或已打开左侧栏内的左滑时阻止浏览器默认横向移动；不拦截竖向滚动、聊天区中部横向滚动、输入区域、多指触摸、右侧栏或桌面布局，不另建侧栏状态。打开和关闭共用同一方向判定与事件清理逻辑，不注入布局样式、不改写上游手势模块。执行 `node --test paseo-ws/tests/test-mobile-sidebar-swipe.cjs paseo-ws/tests/test-patch-web-ui.cjs paseo-ws/tests/test-directory-picker-patch.cjs` 验证事件边界与资源发布幂等性。
 
-目录选择器由 `srcs/patches/service/server-directory-picker.js` 实现，复用已连接主机的 `listDirectory(cwd, path)` 会话接口。点击名称选中并按需展开子目录，左侧箭头可展开或折叠，再点击 **Select this folder** 添加；支持上级目录、刷新、错误重试、键盘和手机布局。可浏览服务器进程有权限访问的目录，包括隐藏目录；默认从已有推荐绝对路径开始，没有推荐路径则从 `/` 开始。已有路径搜索和 Electron 本机原生选择器保留。
+目录选择器由 `srcs/patches/service/server-directory-picker.js` 实现，替换原自定义目录树，参考已安装的 `@deepseek-ai/dsh-client-ui-directory-picker-browse@0.2.2-rc.1` 的 `DirectoryBrowser`：使用双栏浏览，左栏显示同级文件夹，右栏显示选中文件夹的子目录；点击右栏文件夹向下一级移动。顶部面包屑可返回任意上级，铅笔按钮可编辑绝对路径；输入路径时按目录部分导航、按末段前缀筛选，Enter 跳转，Escape 先退出路径编辑再关闭弹窗。隐藏目录默认不显示，可用 **Show hidden files** 开关或点号前缀显示。**New folder** 在当前选中目录内新建并选中新文件夹，**Open** 确认选择；新建本身不注册项目，取消选择不会删除已建文件夹。浏览复用已连接主机的 `listDirectory(cwd, path)`，新建复用 `createFileEntry({ cwd, parentPath, name, kind })`；不依赖 DSH 运行时。支持权限错误提示和键盘；手机窄屏显示当前目录的单栏列表，使用上级按钮或面包屑返回，触控行和按钮加大，底部操作固定分行显示，桌面保留双栏；迟到响应不会覆盖新导航或重新打开已取消弹窗。默认从已有推荐绝对路径开始，没有推荐路径则从 `/` 开始。已有路径搜索和 Electron 本机原生选择器保留。
 
 上游核查：[`v0.14.0` AddProjectFlow](https://github.com/getpaseo/paseo/blob/v0.14.0/packages/app/src/components/add-project-flow.tsx#L359) 的 Browse 仅适用于 Electron 本机；main 提交 `5afa1a9f8ef4b069ff84278668c1fd030df42273` 同样如此。后端已有 [`listDirectory`](https://github.com/getpaseo/paseo/blob/v0.14.0/packages/client/src/daemon-client.ts#L5068)，本补丁只补界面接入，不新增文件访问服务。
 
@@ -94,6 +94,6 @@ Web 终端使用浏览器原生右键菜单：PC 右键、手机长按的菜单�
 
 `srcs/patches/service/patch-web-ui.baseline.json` 记录适用版本 `v0.14.0` 及上游 commit [`8c6de842a3157530c26a7a94c78a3d647fb96ce9`](https://github.com/getpaseo/paseo/commit/8c6de842a3157530c26a7a94c78a3d647fb96ce9)。版本、commit 不匹配或缺少 `gitHead` 时输出 `[WARN]`；资源结构不匹配时退出，不自动更新基准。适配新版本后应同步更新基准。
 
-验证：`node --test paseo-ws/tests/test-*.cjs` 和 `python3 -B paseo-ws/tests/test-nginx.py`。生命周期测试需要 `cc` 与 Python 3，使用临时目录和独立测试进程，不启停线上服务。目录树浏览器测试需安装 Playwright/Chromium 及其运行库；可用 `PASEO_PLAYWRIGHT_MODULE=/path/to/playwright node --test paseo-ws/tests/test-server-directory-picker.cjs` 指定模块路径。未安装时该浏览器测试明确跳过，其余测试继续运行。浏览器用例覆盖桌面/手机尺寸、懒加载、选择确认、取消、上级导航、空目录、权限失败重试和晚到响应。
+验证：`node --test paseo-ws/tests/test-*.cjs` 和 `python3 -B paseo-ws/tests/test-nginx.py`。生命周期测试需要 `cc` 与 Python 3，使用临时目录和独立测试进程，不启停线上服务。目录选择器浏览器测试需安装 Playwright/Chromium 及其运行库；可用 `PASEO_PLAYWRIGHT_MODULE=/path/to/playwright node --test paseo-ws/tests/test-server-directory-picker.cjs` 指定模块路径。未安装时该浏览器测试明确跳过，其余测试继续运行。浏览器用例覆盖桌面/手机尺寸、双栏切换、面包屑、隐藏目录、路径编辑与筛选、新建成功与失败、选择确认、取消、空目录、权限失败恢复和晚到响应。
 
 测试代码、脚本及测试夹具统一位于 `tests/`，与 `srcs/` 同级。主服务补丁及其辅助资源位于 `srcs/patches/service/`；DSH 插件补丁位于 `srcs/patches/plugins/dsh/`。安装入口使用新路径，测试夹具维持同样的目录结构。

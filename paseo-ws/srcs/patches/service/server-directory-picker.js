@@ -1,12 +1,14 @@
-/* Server-side directory picker for the Paseo web Add Project flow. */
+/* DSH DirectoryBrowser interaction adapted to Paseo's connected-host file API.
+ * Reference: @deepseek-ai/dsh-client-ui-directory-picker-browse/lib/client.js.
+ * A selected folder anchors two columns: its siblings and its children.
+ */
 (() => {
   'use strict';
   let active = null;
-  // Register before the app's overlay keyboard handlers. Native dialog owns focus.
   window.addEventListener('keydown', event => {
     if (!active) return;
-    if (event.key === 'Escape') { event.preventDefault(); active.close(null); }
-    else active.key(event);
+    // Let the native dialog keep Tab handling; isolate the underlying app shortcuts.
+    if (!event.isComposing && event.keyCode !== 229) active.key(event);
     event.stopImmediatePropagation();
   }, true);
 
@@ -19,158 +21,301 @@
       dialog.className = 'paseo-directory-picker';
       dialog.setAttribute('aria-labelledby', 'paseo-directory-picker-title');
       dialog.innerHTML = `<style>
-.paseo-directory-picker{color-scheme:dark;box-sizing:border-box;background:#1c1c1e;color:#ededed;border:1px solid #454549;border-radius:14px;padding:0;width:620px;max-width:calc(100vw - 24px);height:650px;max-height:calc(100dvh - 32px);font:14px/1.5 system-ui,sans-serif;box-shadow:0 20px 70px #0008;overflow:hidden}
+.paseo-directory-picker{color-scheme:dark;--dp-bg:#1c1c1e;--dp-text:#ededed;--dp-muted:#aaa;--dp-border:#38383c;--dp-hover:#303034;--dp-selected:#26476c;--dp-error:#ffb8ad;box-sizing:border-box;background:var(--dp-bg);color:var(--dp-text);border:1px solid var(--dp-border);border-radius:12px;padding:0;width:680px;max-width:calc(100vw - 24px);height:500px;max-height:calc(100dvh - 32px);font:13px/1.5 system-ui,sans-serif;box-shadow:0 20px 70px #0008;overflow:hidden}
 .paseo-directory-picker::backdrop{background:#0009}
 .paseo-directory-picker *{box-sizing:border-box}
 .paseo-directory-picker .dp-shell{height:100%;display:flex;flex-direction:column}
-.paseo-directory-picker header,.paseo-directory-picker footer{padding:16px;border-bottom:1px solid #38383c;flex-shrink:0}
-.paseo-directory-picker h2{font-size:18px;margin:0 0 4px}
-.paseo-directory-picker p{margin:0;color:#aaa;overflow-wrap:anywhere}
-.paseo-directory-picker button{font:inherit;color:inherit;background:#29292d;border:1px solid #48484d;border-radius:7px;min-height:38px;padding:6px 10px;cursor:pointer}
-.paseo-directory-picker button:hover{background:#35353c}
-.paseo-directory-picker button:focus-visible,.paseo-directory-picker [role=treeitem]:focus-visible{outline:2px solid #85b7ff;outline-offset:-2px}
+.paseo-directory-picker header{padding:16px 24px 8px;border-bottom:1px solid var(--dp-border);flex-shrink:0}
+.paseo-directory-picker h2{font-size:16px;line-height:24px;margin:0 0 4px;font-weight:550}
+.paseo-directory-picker p{margin:0;color:var(--dp-muted);overflow-wrap:anywhere}
+.paseo-directory-picker button{font:inherit;color:inherit;background:transparent;border:1px solid var(--dp-border);border-radius:5px;min-height:30px;padding:4px 10px;cursor:pointer}
+.paseo-directory-picker button:hover{background:var(--dp-hover)}
+.paseo-directory-picker button:focus-visible,.paseo-directory-picker input:focus-visible{outline:2px solid #85b7ff;outline-offset:-2px}
 .paseo-directory-picker button:disabled{opacity:.45;cursor:default}
-.paseo-directory-picker .dp-toolbar{display:flex;gap:8px;padding:12px 16px;align-items:center;flex-wrap:wrap}
-.paseo-directory-picker .dp-tree{flex:1;min-height:80px;overflow:auto;padding:0 12px 12px}
-.paseo-directory-picker .dp-row{display:flex;align-items:center;min-height:42px;border-radius:6px;min-width:max-content}
-.paseo-directory-picker .dp-row[aria-selected=true]{background:#26476c}
-.paseo-directory-picker .dp-row button{border:0;background:transparent;text-align:left}
-.paseo-directory-picker .dp-toggle{width:38px;flex-shrink:0;padding:6px}
-.paseo-directory-picker .dp-name{flex:1;min-width:80px}
-.paseo-directory-picker .dp-note{padding:8px 12px;color:#aaa}
-.paseo-directory-picker .dp-error{color:#ffb8ad}
-.paseo-directory-picker footer{border-top:1px solid #38383c;border-bottom:0}
-.paseo-directory-picker .dp-selected{display:block;max-height:65px;overflow:auto;overflow-wrap:anywhere;margin:4px 0 12px}
-.paseo-directory-picker .dp-actions{display:flex;justify-content:flex-end;gap:8px}
-.paseo-directory-picker .dp-confirm{background:#2563a6;border-color:#5287c4}
-@media(prefers-color-scheme:light){.paseo-directory-picker{color-scheme:light;background:#fff;color:#202025}.paseo-directory-picker p,.paseo-directory-picker .dp-note{color:#62626d}.paseo-directory-picker button{background:#f3f3f6;border-color:#ccc}.paseo-directory-picker button:hover{background:#e6e6ee}.paseo-directory-picker .dp-row[aria-selected=true]{background:#dceaff}.paseo-directory-picker .dp-confirm{background:#2563a6;color:white}.paseo-directory-picker .dp-error{color:#a32419}}
-</style><div class="dp-shell"><header><h2 id="paseo-directory-picker-title">Browse server folders</h2><p class="dp-host"></p></header><div class="dp-toolbar"><button type="button" class="dp-up">↑ Parent folder</button><button type="button" class="dp-retry">Refresh</button></div><div class="dp-tree" role="tree" aria-label="Server folders"></div><footer><p>Selected folder</p><strong class="dp-selected" aria-live="polite"></strong><div class="dp-actions"><button type="button" class="dp-cancel">Cancel</button><button type="button" class="dp-confirm">Select this folder</button></div></footer></div>`;
+.paseo-directory-picker .dp-crumbbar{display:flex;align-items:center;gap:4px;min-height:30px;min-width:0}
+.paseo-directory-picker .dp-crumbs{display:flex;align-items:center;gap:4px;overflow:auto;white-space:nowrap;scrollbar-width:none}
+.paseo-directory-picker .dp-crumbs button{border:0;padding:0 3px;color:var(--dp-muted);max-width:160px;overflow:hidden;text-overflow:ellipsis;flex-shrink:0}
+.paseo-directory-picker .dp-edit{border:0;flex:1;min-width:34px;text-align:right}
+.paseo-directory-picker input{font:inherit;background:transparent;color:inherit;border:1px solid var(--dp-border);border-radius:5px;padding:5px 8px;min-width:0}
+.paseo-directory-picker .dp-path{width:100%}
+.paseo-directory-picker [hidden]{display:none!important}
+.paseo-directory-picker .dp-content{flex:1;min-height:0;display:flex;flex-direction:column;padding:16px 16px 12px 24px;position:relative}
+.paseo-directory-picker .dp-columns{display:flex;gap:12px;flex:1;min-height:0;overflow-x:auto}
+.paseo-directory-picker .dp-column{display:flex;flex-direction:column;gap:2px;flex:1 0 256px;min-width:256px;overflow-y:auto;padding-right:8px}
+.paseo-directory-picker .dp-column+.dp-column{border-left:1px solid var(--dp-border);padding-left:12px}
+.paseo-directory-picker .dp-row{display:flex;align-items:center;gap:6px;border:0;flex-shrink:0;text-align:left;width:100%;height:30px;padding:4px}
+.paseo-directory-picker .dp-row[aria-current=true]{background:var(--dp-selected)}
+.paseo-directory-picker .dp-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.paseo-directory-picker .dp-note{padding:4px;color:var(--dp-muted)}
+.paseo-directory-picker .dp-error{color:var(--dp-error);padding-top:8px}
+.paseo-directory-picker .dp-loading{position:absolute;bottom:8px;right:16px;background:var(--dp-bg);padding:2px 8px}
+.paseo-directory-picker footer{display:flex;align-items:center;flex-wrap:wrap;gap:8px;border-top:1px solid var(--dp-border);padding:16px 24px;flex-shrink:0}
+.paseo-directory-picker .dp-hidden{border:0;padding:4px 0;color:var(--dp-muted)}
+.paseo-directory-picker .dp-hidden[aria-pressed=true]{color:var(--dp-text)}
+.paseo-directory-picker .dp-gap{flex:1}
+.paseo-directory-picker .dp-confirm{background:#2563a6;border-color:#5287c4;color:#fff;min-width:72px}
+.paseo-directory-picker .dp-create{position:absolute;inset:0;background:var(--dp-bg);padding:24px;display:flex;flex-direction:column;justify-content:center;gap:12px}
+.paseo-directory-picker .dp-up{display:none}
+.paseo-directory-picker .dp-create-actions{display:flex;justify-content:flex-end;gap:8px}
+@media(max-width:600px){
+.paseo-directory-picker{width:100%;max-width:calc(100vw - 16px);height:calc(100dvh - 16px);max-height:calc(100dvh - 16px);font-size:15px}
+.paseo-directory-picker header{padding:12px 12px 6px}
+.paseo-directory-picker .dp-content{padding:8px 12px;min-height:80px}
+.paseo-directory-picker .dp-columns{overflow-x:hidden;gap:0}
+.paseo-directory-picker .dp-column{min-width:0;flex:1 1 100%;padding:0}
+.paseo-directory-picker .dp-columns:has(.dp-column+.dp-column) .dp-column:first-child{display:none}
+.paseo-directory-picker .dp-column+.dp-column{border:0;padding:0}
+.paseo-directory-picker button{min-height:44px}
+.paseo-directory-picker .dp-row{height:48px;padding:8px 4px}
+.paseo-directory-picker .dp-up{display:block;flex-shrink:0;text-align:left;border:0;margin-bottom:4px}
+.paseo-directory-picker .dp-edit{flex:0 0 44px}
+.paseo-directory-picker .dp-crumbs{flex:1;min-width:0}
+.paseo-directory-picker input{font-size:16px;min-height:44px}
+.paseo-directory-picker footer{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));padding:8px 12px max(8px,env(safe-area-inset-bottom));gap:8px}
+.paseo-directory-picker .dp-hidden{grid-column:1/-1;justify-self:start}
+.paseo-directory-picker .dp-gap{display:none}
+.paseo-directory-picker .dp-create{padding:16px;overflow-y:auto}
+}
+@media(prefers-color-scheme:light){.paseo-directory-picker{color-scheme:light;--dp-bg:#fff;--dp-text:#202025;--dp-muted:#62626d;--dp-border:#ddd;--dp-hover:#f0f0f4;--dp-selected:#dceaff;--dp-error:#a32419}}
+</style><div class="dp-shell"><header><h2 id="paseo-directory-picker-title">Open folder</h2><p class="dp-host"></p><div class="dp-crumbbar"><nav class="dp-crumbs" aria-label="Folder path"></nav><button class="dp-edit" type="button" aria-label="Edit path">✎</button><input class="dp-path" aria-label="Folder path" spellcheck="false" autocomplete="off" hidden></div></header><div class="dp-content"><button type="button" class="dp-up">↑ Parent folder</button><div class="dp-columns" aria-label="Server folders"></div><p class="dp-error" role="alert" hidden></p><span class="dp-loading" role="status" hidden>Loading folders…</span><div class="dp-create" role="group" aria-label="New folder" hidden><h2>New folder</h2><p class="dp-create-in"></p><input class="dp-create-name" aria-label="Folder name" autocomplete="off"><p class="dp-create-error" role="alert" hidden></p><div class="dp-create-actions"><button class="dp-create-cancel" type="button">Cancel</button><button class="dp-create-confirm" type="button">Create</button></div></div></div><footer><button class="dp-hidden" type="button" aria-pressed="false">Show hidden files</button><span class="dp-gap"></span><button class="dp-new" type="button">New folder</button><button class="dp-cancel" type="button">Cancel</button><button class="dp-confirm" type="button">Open</button></footer></div>`;
       const find = selector => dialog.querySelector(selector);
-      const tree = find('.dp-tree'), selectedText = find('.dp-selected');
+      const columns = find('.dp-columns'), crumbs = find('.dp-crumbs'), input = find('.dp-path');
+      const createBox = find('.dp-create'), createInput = find('.dp-create-name');
       find('.dp-host').textContent = options.hostLabel ? 'Folders on ' + options.hostLabel : 'Folders on the connected server';
-      const cache = new Map(), expanded = new Set(), pending = new Set();
-      let closed = false, generation = 0, root = '/', selected = '/';
-      const canonical = value => '/' + value.split('/').filter(Boolean).join('/');
+      let closed = false, sequence = 0, loading = false, slowTimer, draftTimer;
+      let level = null, child = null, selected = null, showHidden = false, editing = false, creating = false, createBusy = false;
+      let createParent = null;
+      const canonical = value => {
+        const parts = [];
+        for (const part of value.split('/')) {
+          if (part === '..') parts.pop();
+          else if (part && part !== '.') parts.push(part);
+        }
+        return '/' + parts.join('/');
+      };
       const parent = value => value.slice(0, value.lastIndexOf('/')) || '/';
+      const join = (path, name) => canonical(path + '/' + name);
+      const target = () => selected || level?.path;
       function button(text, action, className) {
         const el = document.createElement('button'); el.type = 'button'; el.textContent = text;
         if (className) el.className = className;
         el.onclick = action; return el;
       }
+      function error(message) {
+        find('.dp-error').textContent = message || '';
+        find('.dp-error').hidden = !message;
+      }
+      function supersede() {
+        clearTimeout(draftTimer); clearTimeout(slowTimer);
+        find('.dp-loading').hidden = true;
+        loading = false;
+        return ++sequence;
+      }
       function close(value) {
-        if (closed) return;
-        closed = true; active = null;
+        if (closed || createBusy) return;
+        closed = true; supersede(); active = null;
         dialog.close(); dialog.remove();
         if (previousFocus?.isConnected) previousFocus.focus();
         resolve(value);
       }
-      function focusPath(path) {
-        [...tree.querySelectorAll('[role=treeitem]')].find(row => row.dataset.path === path)?.focus();
+      async function list(path) {
+        const result = await client.listDirectory(path, '.');
+        if (!Array.isArray(result?.entries)) throw new Error('The server returned an invalid folder list');
+        const entries = result.entries.filter(entry => entry.kind === 'directory' && typeof entry.name === 'string' && entry.name && entry.name !== '.' && entry.name !== '..' && !/[\x00/]/.test(entry.name));
+        entries.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+        return { path, entries };
       }
-      async function load(path) {
-        if (closed || pending.has(path) || cache.has(path)) return;
-        const epoch = generation;
-        pending.add(path); render();
+      function begin() {
+        const seq = supersede(); loading = true; error(null);
+        slowTimer = setTimeout(() => { if (!closed && seq === sequence) find('.dp-loading').hidden = false; }, 300);
+        updateActions(); return seq;
+      }
+      function finish(seq) {
+        if (closed || seq !== sequence) return false;
+        loading = false; clearTimeout(slowTimer); find('.dp-loading').hidden = true;
+        return true;
+      }
+      // Keep the readable view while a new path loads. A slow parent cannot hold
+      // the target hostage; a late parent upgrades it only under the same intent.
+      async function navigate(path, { preview = false } = {}) {
+        path = canonical(path);
+        const seq = begin();
         try {
-          // Root at the actual absolute folder. Returned entry paths are relative to it.
-          const result = await client.listDirectory(path, '.');
-          if (closed || generation !== epoch) return;
-          if (!Array.isArray(result?.entries)) throw new Error('The server returned an invalid folder list');
-          const entries = result.entries.filter(entry => entry.kind === 'directory' && typeof entry.name === 'string' && entry.name !== '.' && entry.name !== '..' && !entry.name.includes('/'));
-          entries.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
-          cache.set(path, { entries });
-        } catch (error) {
-          if (closed || generation !== epoch) return;
-          cache.set(path, { error: 'Unable to read this folder. Check permissions and host connection.' });
-        } finally {
-          if (!closed && generation === epoch) { pending.delete(path); render(); }
+          const next = await list(path);
+          if (closed || seq !== sequence) return;
+          const commit = upper => {
+            if (closed || seq !== sequence) return;
+            const match = upper?.entries.some(entry => join(upper.path, entry.name) === path);
+            level = match ? upper : next; selected = match ? path : null; child = match ? next : null;
+            finish(seq);
+            if (!preview) editing = false;
+            render();
+          };
+          if (path === '/') commit(null);
+          else {
+            const parentScan = list(parent(path)).catch(() => null);
+            const upper = await Promise.race([parentScan, new Promise(resolve => setTimeout(() => resolve(null), 200))]);
+            commit(upper);
+            if (!upper) void parentScan.then(value => { if (value) commit(value); });
+          }
+        } catch (reason) {
+          if (!finish(seq)) return;
+          render();
+          if (!preview) error('Unable to read this folder. Check the path, permissions and host connection.');
         }
       }
-      function navigate(path) {
-        root = canonical(path); selected = root; expanded.clear(); expanded.add(root);
-        render(); focusPath(root); void load(root);
-      }
-      function toggle(path) {
-        if (expanded.has(path)) {
-          expanded.delete(path);
-          if (selected.startsWith(path === '/' ? '/' : path + '/')) selected = path;
+      async function pick(path, source) {
+        if (selected === path && child && !loading) return;
+        const seq = begin(); editing = false;
+        level = source; selected = path; child = null; render();
+        try {
+          const next = await list(path);
+          if (!finish(seq)) return;
+          child = next; render();
+        } catch (reason) {
+          if (!finish(seq)) return;
+          selected = null; render();
+          error('Unable to read this folder. Check permissions and host connection.');
+          find('.dp-edit').focus();
         }
-        else { expanded.add(path); void load(path); }
-        render(); focusPath(path);
       }
-      function selectAndExpand(path) {
-        selected = path;
-        expanded.add(path);
-        void load(path);
-        render(); focusPath(path);
+      function focusRow(path) {
+        [...columns.querySelectorAll('[data-path]')].find(row => row.dataset.path === path)?.focus();
+      }
+      function updateActions() {
+        find('header').inert = creating;
+        find('footer').inert = creating;
+        find('.dp-confirm').disabled = !target() || loading || editing || creating;
+        find('.dp-new').disabled = !target() || loading || editing || creating || typeof client.createFileEntry !== 'function';
+        find('.dp-cancel').disabled = createBusy;
+        find('.dp-hidden').disabled = creating;
+        find('.dp-edit').disabled = creating;
+        find('.dp-up').disabled = creating || !target() || target() === '/';
       }
       function render() {
         if (closed) return;
-        const focused = tree.contains(document.activeElement) ? document.activeElement.closest('[data-path]')?.dataset.path : null;
-        tree.replaceChildren();
-        find('.dp-up').disabled = selected === '/';
-        selectedText.textContent = selected;
-        find('.dp-confirm').disabled = !cache.has(root) || Boolean(cache.get(root)?.error) || Boolean(cache.get(selected)?.error);
-        function add(path, level) {
-          const row = document.createElement('div'); row.className = 'dp-row'; row.dataset.path = path;
-          row.setAttribute('role', 'treeitem'); row.setAttribute('aria-level', String(level + 1));
-          row.setAttribute('aria-label', path === '/' ? 'Root folder' : path.split('/').pop());
-          row.setAttribute('aria-expanded', String(expanded.has(path)));
-          row.setAttribute('aria-selected', String(selected === path)); row.tabIndex = selected === path ? 0 : -1;
-          row.style.paddingLeft = Math.min(level, 12) * 18 + 'px';
-          const toggleButton = button(expanded.has(path) ? '▾' : '▸', () => toggle(path), 'dp-toggle');
-          toggleButton.tabIndex = -1;
-          toggleButton.setAttribute('aria-label', (expanded.has(path) ? 'Collapse ' : 'Expand ') + path);
-          const name = button(path === '/' ? '/' : path.split('/').pop(), () => selectAndExpand(path), 'dp-name');
-          const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-          icon.setAttribute('viewBox', '0 0 24 24'); icon.setAttribute('width', '17'); icon.setAttribute('height', '17'); icon.setAttribute('aria-hidden', 'true');
-          icon.style.cssText = 'vertical-align:-3px;margin-right:8px';
-          icon.innerHTML = '<path d="M3 7V5a1 1 0 0 1 1-1h5l2 3h9a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>';
-          name.prepend(icon);
-          name.tabIndex = -1;
-          row.append(toggleButton, name); tree.append(row);
-          if (!expanded.has(path)) return;
-          const data = cache.get(path);
-          if (!data || data.error || data.entries.length === 0) {
-            const note = document.createElement('div'); note.className = 'dp-note' + (data?.error ? ' dp-error' : '');
-            note.setAttribute('role', data?.error ? 'alert' : 'status');
-            note.textContent = data?.error || (data ? 'No subfolders' : 'Loading folders…');
-            if (data?.error) note.append(button('Retry', () => { cache.delete(path); void load(path); }));
-            tree.append(note);
-          } else {
-            for (const entry of data.entries) add(canonical(path + '/' + entry.name), level + 1);
+        const focus = columns.contains(document.activeElement) ? document.activeElement.dataset.path : null;
+        input.hidden = !editing; crumbs.hidden = editing; find('.dp-edit').hidden = editing;
+        crumbs.replaceChildren();
+        const path = target() || '/';
+        let prefix = '';
+        for (const name of ['/', ...path.split('/').filter(Boolean)]) {
+          prefix = name === '/' ? '/' : join(prefix, name);
+          const crumbPath = prefix;
+          if (crumbs.childNodes.length) crumbs.append(document.createTextNode('›'));
+          crumbs.append(button(name, () => { if (!creating) void navigate(crumbPath); }));
+        }
+        crumbs.scrollLeft = crumbs.scrollWidth;
+        columns.replaceChildren();
+        const tail = editing ? input.value.slice(input.value.lastIndexOf('/') + 1).toLowerCase() : '';
+        for (const listing of [level, ...(selected ? [child] : [])]) {
+          const column = document.createElement('div'); column.className = 'dp-column';
+          column.setAttribute('role', 'list'); column.setAttribute('aria-label', listing?.path || selected || 'Server folders');
+          columns.append(column);
+          if (!listing) {
+            const note = document.createElement('span'); note.className = 'dp-note'; note.textContent = loading ? 'Loading folders…' : 'Choose a folder path'; column.append(note); continue;
+          }
+          const filterTail = editing && listing === (child || level) ? tail : '';
+          const displayable = entry => showHidden || !entry.name.startsWith('.') || filterTail.startsWith('.');
+          const matches = entry => displayable(entry) && entry.name.toLowerCase().startsWith(filterTail);
+          const narrowing = filterTail && listing.entries.some(matches);
+          const visible = listing.entries.filter(entry => join(listing.path, entry.name) === selected || (narrowing ? matches(entry) : showHidden || !entry.name.startsWith('.')));
+          for (const entry of visible) {
+            const entryPath = join(listing.path, entry.name);
+            const seat = document.createElement('div'); seat.setAttribute('role', 'listitem');
+            const row = button('', () => { if (!creating) void pick(entryPath, listing); }, 'dp-row');
+            row.dataset.path = entryPath; row.setAttribute('aria-label', entry.name); row.setAttribute('aria-current', String(entryPath === selected));
+            const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+            icon.setAttribute('viewBox', '0 0 24 24'); icon.setAttribute('width', '16'); icon.setAttribute('height', '16'); icon.setAttribute('aria-hidden', 'true');
+            icon.innerHTML = '<path d="M3 7V5h6l2 2h10v13H3Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>';
+            const name = document.createElement('span'); name.className = 'dp-name'; name.textContent = entry.name;
+            const arrow = document.createElement('span'); arrow.textContent = '›'; arrow.setAttribute('aria-hidden', 'true');
+            row.append(icon, name, arrow); seat.append(row); column.append(seat);
+          }
+          if (!visible.length) {
+            const note = document.createElement('span'); note.className = 'dp-note'; note.textContent = 'No subfolders'; column.append(note);
           }
         }
-        add(root, 0);
-        if (focused) focusPath(focused);
+        find('.dp-hidden').setAttribute('aria-pressed', String(showHidden));
+        updateActions();
+        if (focus) focusRow(focus);
       }
-      function key(event) {
-        const row = event.target.closest?.('[role=treeitem]');
-        if (!row || !tree.contains(row)) return;
-        const path = row.dataset.path, rows = [...tree.querySelectorAll('[role=treeitem]')], index = rows.indexOf(row);
-        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-          event.preventDefault(); rows[Math.max(0, Math.min(rows.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1)))].focus();
-        } else if (event.key === 'ArrowRight') {
-          event.preventDefault();
-          if (!expanded.has(path)) toggle(path);
-          else if (Number(rows[index + 1]?.getAttribute('aria-level')) > Number(row.getAttribute('aria-level'))) rows[index + 1].focus();
-        } else if (event.key === 'ArrowLeft') {
-          event.preventDefault(); if (expanded.has(path)) toggle(path); else focusPath(parent(path));
-        } else if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault(); selectAndExpand(path);
-        } else if (event.key === 'Home' || event.key === 'End') {
-          event.preventDefault(); rows[event.key === 'Home' ? 0 : rows.length - 1]?.focus();
+      function edit() {
+        if (creating) return;
+        supersede(); editing = true;
+        const path = target() || '/'; input.value = path + (path === '/' ? '' : '/');
+        render(); input.focus(); input.setSelectionRange(input.value.length, input.value.length);
+      }
+      function cancelEdit() { supersede(); editing = false; if (!child) selected = null; error(null); render(); find('.dp-edit').focus(); }
+      input.addEventListener('input', () => {
+        supersede(); error(null); render();
+        if (!input.value.startsWith('/')) return;
+        const directory = canonical(input.value.slice(0, input.value.lastIndexOf('/') + 1));
+        if (directory === (child || level)?.path) return;
+        draftTimer = setTimeout(() => void navigate(directory, { preview: true }), 250);
+      });
+      function dismissCreate() {
+        if (createBusy) return;
+        creating = false; createBox.hidden = true; columns.inert = false; updateActions(); find('.dp-new').focus();
+      }
+      async function create() {
+        const name = createInput.value;
+        const message = find('.dp-create-error');
+        if (!name.trim() || name !== name.trim() || name === '.' || name === '..' || /[\x00/\\]/.test(name)) {
+          message.textContent = 'Enter a folder name without path separators.'; message.hidden = false; return;
+        }
+        if (createBusy) return;
+        createBusy = true; find('.dp-create-confirm').disabled = true; find('.dp-create-cancel').disabled = true; createInput.disabled = true; updateActions();
+        try {
+          const result = await client.createFileEntry({ cwd: createParent, parentPath: '.', name, kind: 'directory' });
+          if (!result?.success) throw new Error(result?.error || 'Unable to create folder');
+          createBusy = false; dismissCreate();
+          await navigate(join(createParent, name));
+        } catch (reason) {
+          message.textContent = reason instanceof Error ? reason.message : 'Unable to create folder'; message.hidden = false;
+        } finally {
+          createBusy = false; createInput.disabled = false; find('.dp-create-confirm').disabled = false; find('.dp-create-cancel').disabled = false; updateActions();
         }
       }
-      find('.dp-up').onclick = () => navigate(parent(selected));
-      find('.dp-retry').onclick = () => { generation++; cache.clear(); pending.clear(); expanded.clear(); expanded.add(root); selected = root; render(); void load(root); };
+      function key(event) {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          if (creating) dismissCreate(); else if (editing) cancelEdit(); else close(null);
+        } else if (creating) {
+          if (event.key === 'Enter' && event.target === createInput) { event.preventDefault(); void create(); }
+        } else if (editing && event.target === input) {
+          if (event.key === 'Enter') {
+            event.preventDefault();
+            if (!input.value.startsWith('/')) error('Enter an absolute server path.');
+            else void navigate(input.value);
+          }
+        } else if (columns.contains(event.target)) {
+          const rows = [...event.target.closest('.dp-column').querySelectorAll('.dp-row')];
+          const index = rows.indexOf(event.target);
+          if (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'Home' || event.key === 'End') {
+            event.preventDefault();
+            rows[event.key === 'Home' ? 0 : event.key === 'End' ? rows.length - 1 : Math.max(0, Math.min(rows.length - 1, index + (event.key === 'ArrowDown' ? 1 : -1)))]?.focus();
+          } else if (event.key === 'ArrowRight') { event.preventDefault(); event.target.click(); }
+          else if (event.key === 'ArrowLeft' && level) { event.preventDefault(); void navigate(parent(target())); }
+        }
+      }
+      find('.dp-up').onclick = () => void navigate(parent(target()));
+      find('.dp-edit').onclick = edit;
+      find('.dp-hidden').onclick = () => { showHidden = !showHidden; render(); };
+      find('.dp-new').onclick = () => {
+        supersede(); creating = true; createParent = target(); createBox.hidden = false; columns.inert = true;
+        find('.dp-create-in').textContent = 'Create in ' + createParent;
+        find('.dp-create-error').hidden = true; createInput.value = ''; updateActions(); createInput.focus();
+      };
+      find('.dp-create-confirm').onclick = () => void create();
+      find('.dp-create-cancel').onclick = dismissCreate;
       find('.dp-cancel').onclick = () => close(null);
-      find('.dp-confirm').onclick = () => close(selected);
-      dialog.addEventListener('cancel', e => { e.preventDefault(); close(null); });
-      dialog.addEventListener('click', e => { e.stopPropagation(); });
-      document.body.append(dialog); active = { close, key };
-      dialog.showModal();
-      navigate(typeof options.initialPath === 'string' && options.initialPath.startsWith('/') ? options.initialPath : '/');
+      find('.dp-confirm').onclick = () => { if (!find('.dp-confirm').disabled) close(target()); };
+      dialog.addEventListener('cancel', event => { event.preventDefault(); if (creating) dismissCreate(); else if (editing) cancelEdit(); else close(null); });
+      dialog.addEventListener('click', event => event.stopPropagation());
+      document.body.append(dialog); active = { key }; dialog.showModal();
+      render();
+      void navigate(typeof options.initialPath === 'string' && options.initialPath.startsWith('/') ? options.initialPath : '/');
     });
   };
 })();
