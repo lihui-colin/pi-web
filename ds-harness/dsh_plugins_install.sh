@@ -15,7 +15,7 @@ while (( $# )); do
         -h|--help)
             printf '%s\n' \
                 '用法：bash ds-harness/dsh_plugins_install.sh [--dry-run] [--upgrade]' \
-                '默认补装或校正十一个额外插件的固定版本；--upgrade 重新安装固定版本。' \
+                '默认按固定版本安装十一个插件；--upgrade 查询最新版本、更新清单并升级。' \
                 '版本和来源统一固定于 srcs/install-versions.json；mobile 固定 GitHub 提交。' \
                 'codex-quota 链接本服务 srcs/plugins/codex-quota；已有 web profile 保留启用/禁用状态。' \
                 '新 profile 启用九个，input-history 和 dsh-ide-git 仅安装。' \
@@ -30,10 +30,16 @@ if [[ -n "$expected_version" ]] && ! "$dry_run"; then
     exit 2
 fi
 command -v node >/dev/null 2>&1 || { printf '缺少命令：node。\n' >&2; exit 1; }
+
 if ! "$dry_run"; then
     command -v python3 >/dev/null 2>&1 || { printf '缺少命令：python3（用于 DSH 兼容补丁）。\n' >&2; exit 1; }
     # Validate every local tool and helper before downloading or changing the profile.
     bash "$script_dir/dsh_patches_install.sh" --validate-tools
+fi
+if "$upgrade" && ! "$dry_run" && [[ "${DSH_UPGRADE_PINS_RESOLVED:-}" != 1 ]]; then
+    node "$script_dir/srcs/update-install-versions.mjs" "$script_dir/srcs/install-versions.json"
+elif "$upgrade" && "$dry_run"; then
+    printf '%s\n' '预览：实际 --upgrade 会查询最新版本并更新清单；以下使用当前清单，不联网或写入。'
 fi
 export DSH_HOME="$script_dir/data/.dsh"
 export DSH_AGENTS_HOME="$script_dir/data/.agents"
@@ -86,7 +92,7 @@ for (const name of names) {
   const declared = pkg.dependencies?.[name] || pkg.devDependencies?.[name] || pkg.optionalDependencies?.[name];
   const pin = pins.plugins[name];
   const target = pin.source || pin.version;
-  if (upgrade !== 'true' && declared === target && installed?.name === name && installed.version === pin.version) {
+  if (declared === target && installed?.name === name && installed.version === pin.version) {
     console.error(`已安装 ${name}@${installed.version}，跳过安装。`);
   } else console.log(`${name}@${target}`);
 }

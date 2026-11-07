@@ -17,7 +17,7 @@ PLUGINS = [
 ]
 VERSION = '0.2.2-rc.1'
 PINS = json.loads(source_file('install-versions.json').read_text())['plugins']
-MOBILE_SOURCE = 'github:mexiaosqwq/dsh-web-mobile#4e71eb67de7dac9d8b2572757c81e47aa32a32fb'
+MOBILE_SOURCE = 'github:mexiaosqwq/dsh-web-mobile#d3e7e8e21a07ff17188d3b344a3d3acfb5acb1e9'
 QUOTA_SOURCE = 'link:../../../../srcs/plugins/codex-quota'
 COMPOSER_SOURCE = 'https://registry.npmjs.org/dsh-composer-plus/-/dsh-composer-plus-1.23.0.tgz'
 FAKE_DSH = r'''import json, os, sys
@@ -64,12 +64,13 @@ class PluginInstallerTests(unittest.TestCase):
         for name in ('dsh_install.sh', 'dsh_plugins_install.sh'):
             shutil.copy2(source_file(name), fixture_file(self.root, name))
         shutil.copy2(source_file('install-versions.json'), fixture_file(self.root, 'install-versions.json'))
+        fixture_file(self.root, 'update-install-versions.mjs').write_text('console.log("LATEST_VERSIONS_RESOLVED");\n')
         copy_patch_tools(self.root)
         (fixture_file(self.root, 'dsh_nginx_install.sh')).write_text('#!/bin/bash\nexit 0\n')
         self.fake('dsh', '#!' + shutil.which('python3') + '\n' + FAKE_DSH)
         for name in ('npm', 'curl'):
             self.fake(name, '#!/bin/bash\necho unexpected external command >&2\nexit 99\n')
-        self.fake('pnpm', '#!/bin/bash\necho 12.15.0\n')
+        self.fake('pnpm', '#!/bin/bash\necho 12.18.0\n')
         self.fake('magpie', '#!/bin/bash\nexit 0\n')
         self.env = dict(os.environ, PATH=str(self.bin), HOME=str(self.root / 'home'),
                         CALLS=str(self.root / 'calls'))
@@ -139,11 +140,19 @@ class PluginInstallerTests(unittest.TestCase):
 
     def test_upgrade_preserves_enabled_disabled_and_other_config(self):
         bundles = ['@deepseek-ai/dsh-base', 'custom', 'ds-bot', 'dsh-ide-git']
-        self.seed(bundles)
+        self.seed(bundles, installed=False)
         self.assertIn('PATCH_BUNDLE_APPLIED', self.run_script('--upgrade'))
         self.assertEqual(self.package()['dsh']['profile']['bundles'], bundles)
         self.assertEqual(self.package()['dsh']['profile']['other'], {'keep': True})
         self.assertEqual(len(self.calls()[0][6:]), len(PLUGINS))
+
+    def test_upgrade_resolves_versions_and_skips_already_current_packages(self):
+        self.seed(['custom', 'ds-bot'])
+        before = self.snapshot()
+        output = self.run_script('--upgrade')
+        self.assertIn('LATEST_VERSIONS_RESOLVED', output)
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(self.snapshot(), before)
 
     def test_existing_profile_without_bundles_keeps_all_disabled(self):
         self.seed()
@@ -177,7 +186,7 @@ class PluginInstallerTests(unittest.TestCase):
         market = self.manifest.parent / 'node_modules/dshmarket/package.json'
         market.write_text(json.dumps({'name': 'dshmarket', 'version': '1.99.0'}))
         self.run_script()
-        self.assertEqual(self.calls()[0][6:], ['ds-bot@0.3.1', 'dshmarket@1.73.12'])
+        self.assertEqual(self.calls()[0][6:], ['ds-bot@0.3.1', 'dshmarket@1.73.14'])
         self.assertEqual(self.package()['dsh']['profile']['bundles'], ['custom', 'ds-bot'])
 
     def test_other_dsh_version_is_rejected_before_installing_plugins(self):
@@ -194,11 +203,11 @@ class PluginInstallerTests(unittest.TestCase):
         for parent in (False, True):
             output = self.run_script('--dry-run', parent=parent)
             self.assertIn('@deepseek-ai/dsh-subagent-codex@' + VERSION, output)
-            self.assertIn('@xbzbing/dsh-git-panel@1.11.2', output)
+            self.assertIn('@xbzbing/dsh-git-panel@1.13.1', output)
         self.assertEqual(before, self.snapshot())
 
     def test_parent_dry_upgrade_uses_pinned_version(self):
-        self.seed(['custom'])
+        self.seed(['custom'], installed=False)
         before = self.snapshot()
         output = self.run_script('--dry-run', '--upgrade', parent=True)
         self.assertIn('@deepseek-ai/dsh-subagent-codex@' + VERSION, output)

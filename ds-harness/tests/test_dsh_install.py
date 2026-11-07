@@ -35,6 +35,7 @@ def copy_installers(root):
     for source in (SCRIPT, NGINX_SCRIPT, PLUGIN_SCRIPT):
         shutil.copy2(source, fixture_file(project, source.name))
     shutil.copy2(source_file('install-versions.json'), fixture_file(project, 'install-versions.json'))
+    fixture_file(project, 'update-install-versions.mjs').write_text('console.log("LATEST_VERSIONS_RESOLVED");\n')
     copy_patch_tools(project)
     return project
 
@@ -100,14 +101,18 @@ class InstallPlanTests(unittest.TestCase):
         self.assertIn('add -w --save-exact @deepseek-ai/dsh-subagent-codex@0.2.2-rc.1', output)
 
     def test_upgrade_installs_all(self):
+        for name in ('dsh', 'pnpm'):
+            (self.root / 'bin' / name).write_text('#!/bin/sh\necho 0.0.1\n')
+        for name in NAMES:
+            (self.profile / 'node_modules' / name / 'package.json').unlink()
         output = self.run_plan('--upgrade')
         self.assertIn('复用项目 Nginx：', output)
         self.assertIn('+ npm install', output)
         self.assertIn('+ curl', output)
-        self.assertIn('ds-bot@0.3.1 dsh-web-mobile@github:mexiaosqwq/dsh-web-mobile#4e71eb67de7dac9d8b2572757c81e47aa32a32fb dshmarket@1.73.12 dsh-ide-git@0.23.0', output)
+        self.assertIn('ds-bot@0.3.1 dsh-web-mobile@github:mexiaosqwq/dsh-web-mobile#d3e7e8e21a07ff17188d3b344a3d3acfb5acb1e9 dshmarket@1.73.14 dsh-ide-git@0.30.0', output)
         self.assertIn('dsh-sidebar-enhancement@1.4.1 dsh-sidebar-plus@0.4.4 @huanlin/dsh-plugin-input-history@0.4.2', output)
         self.assertNotIn('dsh-file-transfer', output)
-        self.assertIn('npm install --global @deepseek-ai/dsh@0.2.2-rc.1 pnpm@12.15.0', output)
+        self.assertIn('@deepseek-ai/dsh@0.2.2-rc.1 pnpm@12.18.0', output)
         self.assertNotIn('@latest', output)
 
     def test_default_repairs_dsh_version_and_previews_pinned_codex(self):
@@ -115,7 +120,7 @@ class InstallPlanTests(unittest.TestCase):
         binary.write_text('#!/bin/sh\necho 0.2.1-rc.2\n')
         (self.profile / 'node_modules' / NAMES[0] / 'package.json').unlink()
         output = self.run_plan()
-        self.assertIn('npm install --global @deepseek-ai/dsh@0.2.2-rc.1', output)
+        self.assertIn('@deepseek-ai/dsh@0.2.2-rc.1', output)
         self.assertIn('@deepseek-ai/dsh-subagent-codex@0.2.2-rc.1', output)
         self.assertNotIn('@latest', output)
 
@@ -213,7 +218,8 @@ class InstallPlanTests(unittest.TestCase):
         self.assertFalse(self.config.exists())
 
     def test_upgrade_preview_includes_git_panel(self):
-        self.assertIn('@xbzbing/dsh-git-panel@1.11.2', self.run_plan('--upgrade'))
+        (self.profile / 'node_modules/@xbzbing/dsh-git-panel/package.json').unlink()
+        self.assertIn('@xbzbing/dsh-git-panel@1.13.1', self.run_plan('--upgrade'))
 
     def test_certificate_options_rejected(self):
         for option in ['--cert-only', '--config', '--tls-dir', '--tls-host']:

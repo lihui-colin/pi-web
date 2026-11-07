@@ -18,7 +18,7 @@ while (( $# )); do
             printf '%s\n' \
                 '用法：bash ds-harness/dsh_install.sh [--dry-run] [--upgrade]' \
                 '前置：Node.js >=24、npm、curl、sh，npm 全局目录需要当前用户可写。' \
-                '默认补装或校正 DSH、pnpm 和插件的固定版本；--upgrade 重装固定版本并更新 Magpie。' \
+                '默认按固定版本安装；--upgrade 查询最新版本、更新版本清单并升级 DSH、pnpm、Magpie 和插件。' \
                 'Nginx 及静态依赖安装到本目录 data/.local/nginx；首次构建需要 cc、make、perl、tar、Python 3。' \
                 'Linux 缺少 xdg-open 时安装系统包 xdg-utils（非 root 使用 sudo）；macOS 使用系统 open。' \
                 '不使用系统 Nginx；已有本地 Nginx 只检查版本 >=1.24 和 HTTP SSL 模块。' \
@@ -41,9 +41,16 @@ for bin in node npm curl sh; do
     fi
 done
 node -e 'if (Number(process.versions.node.split(".")[0]) < 24) { console.error("需要 Node.js >=24"); process.exit(1); }'
+
 if ! "$dry_run"; then
     command -v python3 >/dev/null 2>&1 || { printf '缺少命令：python3（用于 DSH 兼容补丁）。\n' >&2; exit 1; }
     bash "$script_dir/dsh_patches_install.sh" --validate-tools
+fi
+if "$upgrade" && ! "$dry_run"; then
+    node "$script_dir/srcs/update-install-versions.mjs" "$script_dir/srcs/install-versions.json"
+    export DSH_UPGRADE_PINS_RESOLVED=1
+elif "$upgrade"; then
+    printf '%s\n' '预览：实际 --upgrade 会查询最新版本并更新清单；以下命令使用当前清单，不联网或写入。'
 fi
 export DSH_HOME="$script_dir/data/.dsh"
 export DSH_AGENTS_HOME="$script_dir/data/.agents"
@@ -148,7 +155,7 @@ for bin in dsh pnpm; do
     if [[ "$bin" == dsh ]]; then target_version="$dsh_pin"; fi
     current_version=''
     if command -v "$bin" >/dev/null 2>&1; then current_version="$("$bin" --version)"; fi
-    if "$upgrade" || [[ "$current_version" != "$target_version" ]]; then
+    if [[ "$current_version" != "$target_version" ]]; then
         package="$bin"
         if [[ "$bin" == dsh ]]; then
             package='@deepseek-ai/dsh'
@@ -160,7 +167,7 @@ for bin in dsh pnpm; do
     fi
 done
 if (( ${#npm_packages[@]} )); then
-    run npm install --global "${npm_packages[@]}"
+    run npm install --global --allow-scripts=pnpm,@deepseek-ai/dsh-subprocess-local,koffi,node-pty "${npm_packages[@]}"
 fi
 if ! "$dry_run"; then
     for bin in dsh pnpm; do

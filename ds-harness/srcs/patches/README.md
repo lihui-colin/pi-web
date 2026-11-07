@@ -3,7 +3,7 @@
 目录按归属分组：`service/` 保存 DSH 主服务的终端、文件资源及会话信息补丁；`plugins/ds_bot/`、`plugins/mobile/` 和 `plugins/git_panel/` 保存对应插件的兼容处理。`common.py` 是共享执行工具。测试及夹具位于服务根目录的 `tests/`，与 `srcs/` 同级。
 
 
-`dsh_git_panel_apply.py` 移除 `@xbzbing/dsh-git-panel@1.11.2` 在 `conversation.input.left` 注册的 `git-panel-pill`，保留 Git 页签与侧栏。安装器自动应用；`--check` 验证，`--git-panel-dir` 可指定隔离安装目录。插件未安装或按钮不存在时跳过。复用原子写入与备份机制，未知版本或存在按钮但注册锚点不匹配时拒绝修改。上游已有 `showInputPill` 显示开关；此处按本地偏好直接省略按钮注册，因此插件配置不会将它重新显示。
+`dsh_git_panel_apply.py` 移除 `@xbzbing/dsh-git-panel@1.11.2 / 1.13.1` 在 `conversation.input.left` 注册的 `git-panel-pill`，保留 Git 页签与侧栏。安装器自动应用；`--check` 验证，`--git-panel-dir` 可指定隔离安装目录。插件未安装或按钮不存在时跳过。复用原子写入与备份机制，未知版本或存在按钮但注册锚点不匹配时拒绝修改。上游已有 `showInputPill` 显示开关；此处按本地偏好直接省略按钮注册，因此插件配置不会将它重新显示。
 
 会话信息 info 图标通过 `conversation.input.right` 注册，ID 为 `dsh-session-info`、`order: -100`，使用宿主 `chat` locale 和会话投影。`dsh_composer_metadata_apply.py` 会撤销旧的 `trailing` 直接挂载，再注册插槽，保留展开状态与元信息的 React Context。mobile 的额外文件按钮同样先检查是否存在，不存在时保持插件原样；存在但注册代码未知时拒绝修改。
 
@@ -158,3 +158,12 @@ python3 -B -m unittest discover -s ds-harness/tests -p 'test_dsh_composer_metada
 测试夹具 `tests/fixtures/ds_bot_031.js` 摘录自原始发布包，保留原始函数和规则，避免仅用补丁常量拼接测试。回归验证复制、下载、引用、表情弹层、头像点击、flat/bubble 元信息位置、旧覆盖撤销、旧宿主迁移、未知版本和残缺锚点不写入、重复应用不写入，以及完整补丁集的共享文件合并与回滚。完整发布包另在隔离副本验证 JS 语法、原生 tools.js 不变及幂等性。
 
 返回主聊天使用上游入口：左下角头像/齿轮 → Bot 设置 → 常规 → 模式 → 经典 Agent 模式 → 切换；不增加重复的模式切换逻辑。应用本次客户端补丁无需重启服务，浏览器需重新加载资源；已打开页面的视觉效果仍需刷新后验收。
+
+
+## 2026-11-07 最新版本升级复核
+
+安装器的 `--upgrade` 通过 `update-install-versions.mjs` 先查询 npm 最新标签和 mobile GitHub HEAD，再更新固定版本清单；普通安装使用清单，预览不联网或写入。Codex 的 npm `latest` 标签仍是旧的 0.0.1-rc.1，升级时以 DSH 的 0.2.2-rc.1 精确解析，避免降级。全部查询成功后才发布清单，原清单保存在 `data/version-backups/`。
+
+当前新增 pnpm 12.18.0、dshmarket 1.73.14、dsh-ide-git 0.30.0、Git panel 1.13.1；mobile 同为 3.3.1，但来源从 4e71eb6 更新到 [`d3e7e8e`](https://github.com/mexiaosqwq/dsh-web-mobile/tree/d3e7e8e21a07ff17188d3b344a3d3acfb5acb1e9)。mobile 新增页签布局和滑动手势调整，仍保留额外文件按钮注册；完整新 bundle 已验证能应用现有按钮补丁，宿主宽度测量和 Enter 迁移保持幂等。
+
+Git panel 1.13.1 发布包的注册新增 `useContextMenu`，压缩别名也改变；补丁增加该版本的完整精确注册锚点，复用上游其他视图及菜单，继续按本地偏好省略输入按钮。未知、重复或两代混合注册仍拒绝修改。发布包来自 npm，对照其声明的 [Git panel 上游仓库](https://github.com/xbzbing/dsh-git-panel)，版本兼容范围覆盖 DSH rc.1。最新发布包及安装前备份位于不入库的 `data/upgrade-20261107/`。

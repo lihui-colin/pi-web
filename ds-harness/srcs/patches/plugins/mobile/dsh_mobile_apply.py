@@ -142,6 +142,9 @@ def plan_changes(package=None, host=None, *, read_text=Path.read_text):
         # Reviewed upstream 522db94f552d89934f814853ad10c96f31eba6da (3.3.0):
         # 3.3.1 at 4e71eb67de7dac9d8b2572757c81e47aa32a32fb keeps these
         # layout and Enter sources unchanged (drawer/packaging fixes only).
+        # Also reviewed 3.3.1 HEAD d3e7e8e21a07ff17188d3b344a3d3acfb5acb1e9:
+        # newer tabs/swipe behavior remains upstream; the upload registration
+        # and these host migration anchors remain compatible.
         # layout.css.ts owns header clipping and tab hit-area/layout fixes;
         # composer-enter-newline.ts yields modifier shortcuts and popup selections.
         # Omit the extra file button; retire the conflicting host Enter hook
