@@ -16,5 +16,11 @@ class MobilePatchTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             p.patch_mobile('unknown')
 
+    def test_existing_voice_position_patch_migrates(self):
+        fixed = p.patch_mobile(self.source())
+        previous = fixed.replace(p.VOICE_POSITION_CSS, p.VOICE_POSITION_LEGACY_CSS)
+        self.assertEqual(p.patch_mobile(previous), fixed)
+        self.assertNotIn(p.VOICE_POSITION_LEGACY_CSS, fixed)
+
 if __name__=='__main__':
     unittest.main()

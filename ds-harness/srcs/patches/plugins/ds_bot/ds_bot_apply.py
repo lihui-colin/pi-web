@@ -132,13 +132,21 @@ MOBILE_COMPOSER_CSS = '''
   html body [data-composer-card] [class*="_trailing"]{order:3!important;margin-left:auto!important}
 '''
 
-VOICE_POSITION_CSS = '''
+VOICE_POSITION_LEGACY_CSS = '''
 /* The empty-draft voice action shares the send button's rightmost seat.
    Flatten only visible standard controls; activity mode keeps them hidden. */
 html body [data-composer-card] [class*="_standardControls"]:has(>.bt-voice):not([hidden]){display:contents!important}
 html body [data-composer-card] [class*="_trailing"]>.bt-voice,
 html body [data-composer-card] [class*="_trailing"]>[class*="_standardControls"]>.bt-voice{order:10!important}
 '''
+
+VOICE_POSITION_CSS = VOICE_POSITION_LEGACY_CSS.replace(
+    ':has(>.bt-voice)', ':has(.bt-voice)',
+).replace(
+    'html body [data-composer-card] [class*="_trailing"]>.bt-voice,\n'
+    'html body [data-composer-card] [class*="_trailing"]>[class*="_standardControls"]>.bt-voice',
+    'html body [data-composer-card] [class*="_trailing"] .bt-voice',
+)
 
 MOBILE_GROUP_OLD = '''      { className: "bt-group-name", style: flat ? void 0 : { color: inkText(colorOf(bot)) } },
       flat ? lead : null,
@@ -184,6 +192,8 @@ def patch_mobile(text, react_alias='import_react17', *, phone_layout=True):
         # 0.3.1 styles.js owns touch toolbar placement and 44px hit targets.
         # Full-width bubbles are already handled by ALIGN_CSS at every width.
         text = retire_replacements(text, [(MOBILE_GRID_FIXED, MOBILE_GRID_FIXED + MOBILE_PHONE_CSS)])
+    if VOICE_POSITION_LEGACY_CSS in text:
+        text = replace_once(text, VOICE_POSITION_LEGACY_CSS, VOICE_POSITION_CSS)
     text = replace_once(text, MOBILE_COMPOSER_CSS, MOBILE_COMPOSER_CSS + VOICE_POSITION_CSS)
     return text
 
