@@ -10,6 +10,8 @@ from patches.common import COMPONENT_ROOT, publish, read_change, replace_once, v
 
 PILL = 'r(e.slots.inject("conversation.input.left",()=>e.slots.register({name:"conversation.input.left",id:"git-panel-pill",order:100,locale:er},l=>(0,io.createElement)(iu,{ctx:e,sessionId:l.sessionId,t}))));'
 PILL_1131 = 'r(e.slots.inject("conversation.input.left",()=>e.slots.register({name:"conversation.input.left",id:"git-panel-pill",order:100,locale:sr},c=>(0,Qa.createElement)(Qf,{ctx:e,sessionId:c.sessionId,t,useContextMenu:c.useContextMenu}))));'
+# Reviewed 1.13.2: the same standalone input pill, with new minified names.
+PILL_1132 = 'n(e.slots.inject("conversation.input.left",()=>e.slots.register({name:"conversation.input.left",id:"git-panel-pill",order:100,locale:sn},c=>(0,Yo.createElement)(nf,{ctx:e,sessionId:c.sessionId,t,useContextMenu:c.useContextMenu}))));'
 REMOVED = '/* Local preference: omit the Git composer status pill. */'
 
 
@@ -18,14 +20,15 @@ def patch(text):
         return text
     if text.count('git-panel-pill') != 1:
         raise ValueError('Duplicate or mixed Git pill registration')
-    return replace_once(text, PILL_1131 if PILL_1131 in text else PILL, REMOVED)
+    pill = next((anchor for anchor in (PILL, PILL_1131, PILL_1132) if anchor in text), PILL)
+    return replace_once(text, pill, REMOVED)
 
 
 def plan_changes(package=None, *, read_text=Path.read_text):
     package = Path(package) if package else COMPONENT_ROOT / 'data/.dsh/profiles/web/node_modules/@xbzbing/dsh-git-panel'
     if not package.exists():
         return []
-    verify_package(package, '@xbzbing/dsh-git-panel', ('1.11.2', '1.13.1'))
+    verify_package(package, '@xbzbing/dsh-git-panel', ('1.11.2', '1.13.1', '1.13.2'))
     path = package / 'lib/client.js'
     return [read_change(path, patch, read_text=read_text)]
 

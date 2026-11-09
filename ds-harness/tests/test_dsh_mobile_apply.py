@@ -159,5 +159,9 @@ class Mobile331Tests(CurrentMobileTests):
     mobile_version = '3.3.1'
 
 
+class Mobile335Tests(CurrentMobileTests):
+    mobile_version = '3.3.5'
+
+
 if __name__ == '__main__':
     unittest.main()

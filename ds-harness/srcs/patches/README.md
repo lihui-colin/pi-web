@@ -9,12 +9,12 @@ DS Bot 输入框的蓝色语音对话按钮与发送按钮共用最右侧位置�
 
 会话信息 info 图标通过 `conversation.input.right` 注册，ID 为 `dsh-session-info`、`order: -100`，使用宿主 `chat` locale 和会话投影。`dsh_composer_metadata_apply.py` 会撤销旧的 `trailing` 直接挂载，再注册插槽，保留展开状态与元信息的 React Context。mobile 的额外文件按钮同样先检查是否存在，不存在时保持插件原样；存在但注册代码未知时拒绝修改。
 
-当前核验组合为 **DSH 0.2.2-rc.1、ds-bot 0.3.1、dsh-web-mobile 3.3.0 / 3.3.1、xterm/headless 6.0.0、addon-serialize 0.14.0**。七个独立入口通过 `common.py` 共用补丁校验、宿主定位、原子写入、备份与回滚函数；`apply.py` 统一编排全部补丁，未知版本、混合宿主版本或不完整旧补丁会停止。
+当前核验组合为 **DSH 0.2.2-rc.1、ds-bot 0.3.1、dsh-web-mobile 3.3.0 / 3.3.1 / 3.3.5、xterm/headless 6.0.0、addon-serialize 0.14.0**。七个独立入口通过 `common.py` 共用补丁校验、宿主定位、原子写入、备份与回滚函数；`apply.py` 统一编排全部补丁，未知版本、混合宿主版本或不完整旧补丁会停止。
 
 | 入口 | 当前版本的处理 |
 | --- | --- |
 | `plugins/ds_bot/ds_bot_apply.py` | 适配 Bot 0.3.1 的本地输入框、消息操作栏与桌面宽度布局；移除旧手机工具栏覆盖，沿用上游历史、提示词和触屏命中区；撤销宿主旧历史及 Enter 注入。 |
-| `plugins/mobile/dsh_mobile_apply.py` | 移除 mobile 3.3.0 / 3.3.1 额外注册的 `ComposerFileButton`；撤销旧宿主 Enter 注入，保留仅在 mobile 布局生效的页签实际宽度测量。 |
+| `plugins/mobile/dsh_mobile_apply.py` | 移除 mobile 3.3.0 / 3.3.1 / 3.3.5 额外注册的 `ComposerFileButton`；撤销旧宿主 Enter 注入，保留仅在 mobile 布局生效的页签实际宽度测量。 |
 | `service/dsh_composer_metadata_apply.py` | 普通 DSH 输入框工具栏内增加会话信息 info 按钮，按需展开原生会话元信息；DS Bot 队列保持可见。 |
 | `service/dsh_file_resources_apply.py` | 修复旧手机浏览器解析自定义资源地址时无法匹配文件资源提供器的问题。 |
 | `service/dsh_terminal_apply.py` | 继续安装前后端配套的重连、剪贴板、键盘协商、查询应答、搜索与链接增强。 |
@@ -179,3 +179,5 @@ Git panel 1.13.1 发布包的注册新增 `useContextMenu`，压缩别名也改�
 验证：原生 rc.1 ContextMeter 发布源码夹具驱动手机/PC 浏览器回归，检查无独立额度按钮、按需查询、Magpie/原生 Codex 来源、刷新、错误恢复及原生弹层关闭；接口回归继续使用隔离数据，不调用线上账户查询。
 
 会话信息安装器已删除本轮临时布局的逐项迁移字符串，仅接受原始发布包、当前补丁及仓库上一版完整 helper。上一版以完整 SHA-256 校验后整体替换，避免组合迁移产生混合状态；对应源码仅作为测试夹具保留，未知改动仍拒绝覆盖。桌面原生 dock、手机统计折叠和上下文面板内额度展示不变。
+
+2026-11-09 安装后核查：mobile 3.3.5（GitHub 提交 `646fe837440f9939228bdba0024d407eaac01128`）的额外上传按钮注册与旧版一致；随包 `src/client/styles/layout.css.ts` 仍将页签数量交给宿主，`src/client/effects/composer-enter-newline.ts` 已实现移动 Enter 仲裁，继续复用上游处理。Git panel 1.13.2 发布包仍独立注册 `git-panel-pill`，仅适配其新的压缩变量名，不改 Git 视图、侧栏或菜单。已补充版本兼容及重复应用、未知源码拒绝测试。

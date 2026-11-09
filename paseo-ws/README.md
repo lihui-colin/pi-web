@@ -82,6 +82,8 @@ bash paseo-ws/paseo_web_run.sh stop
 
 `srcs/patches/service/patch-web-ui.cjs` 将首次连接探测和后续 TLS 连接等待时间调整为 20 秒，修复手机慢连接超时；同时给网页版 Add projects 增加 **Browse** 服务器文件夹选择入口。补丁生成新哈希资源地址和 Brotli/Gzip 压缩副本，保留原 JS。安装时自动执行，也可运行 `node paseo-ws/srcs/patches/service/patch-web-ui.cjs` 后刷新网页，无需重启。
 
+`srcs/patches/service/patch-workspace-git-startup.cjs` 让侧栏先收到本地 Git 状态，再异步加载远端 Forge/PR 状态，避免远端 CLI 或网络响应拖慢首次工作区加载。安装时自动执行；单独应用后需重启 Paseo 服务。
+
 触摸屏没有鼠标悬停事件，网页中的用户消息复制操作会在触摸屏上保持可见；支持触摸和鼠标的设备仍可通过鼠标悬停显示消息操作。
 
 侧栏信息卡片修复 iPad 宽屏下触摸误触发与多卡片滞留：仅鼠标指针进入和键盘可见焦点可打开卡片，触摸及触控笔进入、普通点击产生的焦点不打开；页面按下指针时关闭已有卡片。依据基准 v0.14.0 安装包的 `WorkspaceHoverCard` / `HoverCard` 实现：上游仅在紧凑布局禁用卡片，宽屏的 `pointerenter` 与 `focusin` 未过滤触摸输入。补丁保留上游布局、点击导航和菜单；验证使用 `node --test paseo-ws/tests/test-hover-card-patch.cjs paseo-ws/tests/test-directory-picker-patch.cjs`。

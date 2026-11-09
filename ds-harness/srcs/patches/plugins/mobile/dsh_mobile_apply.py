@@ -131,7 +131,7 @@ def plan_changes(package=None, host=None, *, read_text=Path.read_text):
     package = Path(package) if package is not None else COMPONENT_ROOT / 'data/.dsh/profiles/web/node_modules/dsh-web-mobile'
     host = host_directory(host)
     conversation = Path(host) / 'dsh-client-ui-conversation'
-    mobile_version = verify_package(package, 'dsh-web-mobile', ('3.2.1', '3.3.0', '3.3.1'))
+    mobile_version = verify_package(package, 'dsh-web-mobile', ('3.2.1', '3.3.0', '3.3.1', '3.3.5'))
     host_version = '0.2.2-alpha.2' if mobile_version == '3.2.1' else '0.2.2-rc.1'
     verify_package(conversation, '@deepseek-ai/dsh-client-ui-conversation', (host_version,))
     if mobile_version != '3.2.1':
@@ -145,6 +145,9 @@ def plan_changes(package=None, host=None, *, read_text=Path.read_text):
         # Also reviewed 3.3.1 HEAD d3e7e8e21a07ff17188d3b344a3d3acfb5acb1e9:
         # newer tabs/swipe behavior remains upstream; the upload registration
         # and these host migration anchors remain compatible.
+        # Reviewed 3.3.5 at 646fe837440f9939228bdba0024d407eaac01128:
+        # the upload registration is identical; layout CSS still delegates tab
+        # capacity to the host, and Enter arbitration remains plugin-owned.
         # layout.css.ts owns header clipping and tab hit-area/layout fixes;
         # composer-enter-newline.ts yields modifier shortcuts and popup selections.
         # Omit the extra file button; retire the conflicting host Enter hook
