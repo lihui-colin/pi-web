@@ -13,13 +13,13 @@ ROOT = Path(__file__).resolve().parent
 PLUGINS = [
     '@deepseek-ai/dsh-subagent-codex', 'ds-bot', 'dsh-web-mobile',
     'dshmarket', 'dsh-ide-git', 'dsh-sidebar-enhancement', 'dsh-sidebar-plus',
-    '@huanlin/dsh-plugin-input-history', '@xbzbing/dsh-git-panel', '@local/dsh-codex-quota', 'dsh-composer-plus',
+    '@xbzbing/dsh-git-panel', '@local/dsh-codex-quota', 'dsh-composer-plus', 'dsh-better-sidebar',
 ]
 VERSION = '0.2.2-rc.1'
 PINS = json.loads(source_file('install-versions.json').read_text())['plugins']
-MOBILE_SOURCE = 'github:mexiaosqwq/dsh-web-mobile#d3e7e8e21a07ff17188d3b344a3d3acfb5acb1e9'
+MOBILE_SOURCE = 'github:mexiaosqwq/dsh-web-mobile#646fe837440f9939228bdba0024d407eaac01128'
 QUOTA_SOURCE = 'link:../../../../srcs/plugins/codex-quota'
-COMPOSER_SOURCE = 'https://registry.npmjs.org/dsh-composer-plus/-/dsh-composer-plus-1.23.0.tgz'
+COMPOSER_SOURCE = 'https://registry.npmjs.org/dsh-composer-plus/-/dsh-composer-plus-1.24.1.tgz'
 FAKE_DSH = r'''import json, os, sys
 from pathlib import Path
 if sys.argv[1:] == ['--version']:
@@ -36,8 +36,8 @@ pkg = json.loads(manifest.read_text()) if manifest.exists() else {
 bundles = pkg.setdefault('dsh', {}).setdefault('profile', {}).setdefault('bundles', [])
 for spec in sys.argv[7:]:
     name, declared = spec.rsplit('@', 1)
-    version = ('3.3.1' if declared.startswith('github:') else
-               '1.23.0' if declared.startswith('https:') else
+    version = ('3.3.5' if declared.startswith('github:') else
+               '1.24.1' if declared.startswith('https:') else
                '1.0.0' if declared.startswith('link:') else declared)
     pkg.setdefault('dependencies', {})[name] = declared
     target = dir / 'node_modules' / name / 'package.json'
@@ -122,7 +122,7 @@ class PluginInstallerTests(unittest.TestCase):
         pkg = self.package()
         self.assertEqual(set(pkg['dependencies']), set(PLUGINS))
         self.assertEqual(set(pkg['dsh']['profile']['bundles']) & set(PLUGINS),
-                         set(PLUGINS) - {'dsh-ide-git', '@huanlin/dsh-plugin-input-history'})
+                         set(PLUGINS) - {'dsh-ide-git', '@xbzbing/dsh-git-panel'})
         self.assertIn('@deepseek-ai/dsh-base', pkg['dsh']['profile']['bundles'])
         self.assertEqual(self.calls()[0][6:],
                          [name + '@' + (VERSION if name == PLUGINS[0] else
@@ -168,7 +168,7 @@ class PluginInstallerTests(unittest.TestCase):
         codex.write_text(json.dumps({'name': PLUGINS[0], 'version': '0.0.1'}))
         self.env['FAKE_VERSION'] = VERSION
         self.run_script()
-        self.assertEqual(self.calls()[0][6:], [PLUGINS[0] + '@' + VERSION, PLUGINS[-1] + '@' + COMPOSER_SOURCE])
+        self.assertEqual(self.calls()[0][6:], [PLUGINS[0] + '@' + VERSION, PLUGINS[-1] + '@' + PINS[PLUGINS[-1]]['version']])
         self.assertEqual(self.package()['dsh']['profile']['bundles'], ['custom'])
 
     def test_dry_run_no_writes_existing_or_upgrade(self):
@@ -186,7 +186,7 @@ class PluginInstallerTests(unittest.TestCase):
         market = self.manifest.parent / 'node_modules/dshmarket/package.json'
         market.write_text(json.dumps({'name': 'dshmarket', 'version': '1.99.0'}))
         self.run_script()
-        self.assertEqual(self.calls()[0][6:], ['ds-bot@0.3.1', 'dshmarket@1.73.14'])
+        self.assertEqual(self.calls()[0][6:], ['ds-bot@0.3.1', 'dshmarket@1.73.16'])
         self.assertEqual(self.package()['dsh']['profile']['bundles'], ['custom', 'ds-bot'])
 
     def test_other_dsh_version_is_rejected_before_installing_plugins(self):
@@ -203,7 +203,7 @@ class PluginInstallerTests(unittest.TestCase):
         for parent in (False, True):
             output = self.run_script('--dry-run', parent=parent)
             self.assertIn('@deepseek-ai/dsh-subagent-codex@' + VERSION, output)
-            self.assertIn('@xbzbing/dsh-git-panel@1.13.1', output)
+            self.assertIn('@xbzbing/dsh-git-panel@1.13.2', output)
         self.assertEqual(before, self.snapshot())
 
     def test_parent_dry_upgrade_uses_pinned_version(self):

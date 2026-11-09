@@ -9,11 +9,11 @@
       "version": "0.3.1"
     },
     "dsh-web-mobile": {
-      "version": "3.3.1",
-      "source": "github:mexiaosqwq/dsh-web-mobile#d3e7e8e21a07ff17188d3b344a3d3acfb5acb1e9"
+      "version": "3.3.5",
+      "source": "github:mexiaosqwq/dsh-web-mobile#646fe837440f9939228bdba0024d407eaac01128"
     },
     "dshmarket": {
-      "version": "1.73.14"
+      "version": "1.73.16"
     },
     "dsh-ide-git": {
       "version": "0.30.0"
@@ -24,19 +24,19 @@
     "dsh-sidebar-plus": {
       "version": "0.4.4"
     },
-    "@huanlin/dsh-plugin-input-history": {
-      "version": "0.4.2"
-    },
     "@xbzbing/dsh-git-panel": {
-      "version": "1.13.1"
+      "version": "1.13.2"
     },
     "@local/dsh-codex-quota": {
       "version": "1.0.0",
       "source": "link:../../../../srcs/plugins/codex-quota"
     },
     "dsh-composer-plus": {
-      "version": "1.23.0",
-      "source": "https://registry.npmjs.org/dsh-composer-plus/-/dsh-composer-plus-1.23.0.tgz"
+      "version": "1.24.1",
+      "source": "https://registry.npmjs.org/dsh-composer-plus/-/dsh-composer-plus-1.24.1.tgz"
+    },
+    "dsh-better-sidebar": {
+      "version": "0.30.1"
     }
   }
 }

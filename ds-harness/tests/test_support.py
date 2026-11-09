@@ -68,7 +68,7 @@ def copy_patch_tools(root):
     for name in ('patches/apply.py', 'patches/common.py'):
         shutil.copy2(source_file(name), fixture_file(root, name))
     markers = ('PATCH_BUNDLE', 'MOBILE_PATCH', 'GIT_PANEL_PATCH', 'TERMINAL_PATCH',
-               'FILE_RESOURCES_PATCH', 'COMPOSER_METADATA_PATCH')
+               'FILE_RESOURCES_PATCH', 'COMPOSER_METADATA_PATCH', 'CONTEXT_DETAILS_PATCH')
     for (module, _, _), marker in zip(PATCHES, markers, strict=True):
         fixture_file(root, 'patches/' + module.replace('.', '/') + '.py').write_text(
             'import os\n'

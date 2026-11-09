@@ -18,7 +18,7 @@ while (( $# )); do
                 '默认按固定版本安装十一个插件；--upgrade 查询最新版本、更新清单并升级。' \
                 '版本和来源统一固定于 srcs/install-versions.json；mobile 固定 GitHub 提交。' \
                 'codex-quota 链接本服务 srcs/plugins/codex-quota；已有 web profile 保留启用/禁用状态。' \
-                '新 profile 启用九个，input-history 和 dsh-ide-git 仅安装。' \
+                '新 profile 启用九个，dsh-ide-git 和 Git panel 仅安装。' \
                 '数据固定放在服务目录下 data/.dsh；不配置内置 bundle，不启停服务。' \
                 '--expected-dsh-version 仅供父安装器 dry-run 传入固定版本。'
             exit 0 ;;
@@ -117,7 +117,7 @@ else
     printf '%s\n' '所需插件均已安装，跳过插件安装。'
 fi
 if "$dry_run"; then
-    printf '%s\n' '预览：已有 profile 保留额外插件启用状态；新 profile 安装十一个、启用九个（不启用 input-history 和 dsh-ide-git）。未修改文件。'
+    printf '%s\n' '预览：已有 profile 保留额外插件启用状态；新 profile 安装十一个、启用九个（不启用 dsh-ide-git 和 Git panel）。未修改文件。'
 else
     # 包管理器可能自动启用插件；安装失败时也恢复已有 profile 的 bundle 状态。
     node --input-type=module - "$profile_dir/package.json" "$bundle_state" "$status" <<'BUNDLES_NODE'
@@ -138,12 +138,12 @@ if (!fs.existsSync(file)) {
       pkg.dsh.profile.bundles = state.bundles;
     }
   } else if (status === '0') {
-    const defaults = ['@deepseek-ai/dsh-subagent-codex', 'ds-bot', 'dsh-web-mobile', 'dshmarket', 'dsh-sidebar-enhancement', 'dsh-sidebar-plus', '@xbzbing/dsh-git-panel', '@local/dsh-codex-quota', 'dsh-composer-plus'];
+    const defaults = ['@deepseek-ai/dsh-subagent-codex', 'ds-bot', 'dsh-web-mobile', 'dshmarket', 'dsh-sidebar-enhancement', 'dsh-sidebar-plus', '@local/dsh-codex-quota', 'dsh-composer-plus', 'dsh-better-sidebar'];
     pkg.dsh ??= {};
     pkg.dsh.profile ??= {};
     const existing = pkg.dsh.profile.bundles ?? [];
     if (!Array.isArray(existing)) throw new Error('现有 bundles 不是数组，停止修改');
-    pkg.dsh.profile.bundles = [...new Set([...existing.filter(name => !['dsh-ide-git', '@huanlin/dsh-plugin-input-history'].includes(name)), ...defaults])];
+    pkg.dsh.profile.bundles = [...new Set([...existing.filter(name => !['dsh-ide-git', '@xbzbing/dsh-git-panel'].includes(name)), ...defaults])];
   }
   if (JSON.stringify(pkg) !== before) {
     const temp = `${file}.dsh-plugins-install.${process.pid}.tmp`;
