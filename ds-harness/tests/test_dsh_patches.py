@@ -1,4 +1,4 @@
-"""Exercise all six real planners and their shared-file publication together."""
+"""Exercise all real planners and their shared-file publication together."""
 import test_support
 import json
 from pathlib import Path
@@ -16,6 +16,7 @@ from patches.plugins.git_panel import dsh_git_panel_apply as git
 from patches.service import dsh_terminal_apply as terminal
 from patches.service import dsh_file_resources_apply as resources
 from patches.service import dsh_composer_metadata_apply as metadata
+from patches.service import dsh_context_details_apply as context_details
 
 
 class PatchSetTests(unittest.TestCase):
@@ -46,6 +47,7 @@ class PatchSetTests(unittest.TestCase):
             *[before for before, _ in bot.HISTORY_CONVERSATION_REPLACEMENTS],
             bot.COMPOSER_ANCHOR, mobile.VIEW_LIMIT_OLD, metadata.ANCHOR, metadata.OLD,
             metadata.TRAILING, metadata.REGISTER_ANCHOR,
+            (Path(__file__).parent / "fixtures/context_meter_rc1.js").read_text(), context_details.DECLARE,
             *['"details.running": ' + json.dumps(label, ensure_ascii=False) + ','
               for label in metadata.TRANSLATIONS],
         ])

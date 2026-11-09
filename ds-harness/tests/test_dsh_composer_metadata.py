@@ -33,17 +33,16 @@ class ComposerMetadataTests(unittest.TestCase):
             stamp = file.stat().st_mtime_ns
             patcher.publish(patcher.plan_changes(root), root / 'backups')
             self.assertEqual(file.stat().st_mtime_ns,stamp)
-            # Upgrade only the exact reviewed first helper, preserving the UI.
             current = file.read_text()
             self.assertIn(patcher.REGISTER_TRIGGER, current)
-            self.assertEqual(patcher.patch(current.replace(patcher.CURRENT_FRAME, patcher.PREVIOUS_FRAME)), current)
             self.assertNotIn(patcher.TRAILING_NEW, current)
             previous = current.replace(patcher.REGISTER_TRIGGER, '').replace(patcher.TRAILING, patcher.TRAILING_NEW)
             self.assertEqual(patcher.patch(previous), current)
-            first = current.replace(patcher.CURRENT_STYLE, patcher.PREVIOUS_STYLE)
-            self.assertEqual(patcher.patch(first), current)
+            legacy = (Path(__file__).parent / 'fixtures/composer_metadata_v1.js').read_text()
+            previous = current.replace(patcher.HELPER, legacy).replace(patcher.NEW, patcher.DOCK)
+            self.assertEqual(patcher.patch(previous), current)
             with self.assertRaises(ValueError):
-                patcher.patch(first.replace('const dshSessionInfoCss', 'const unknownCss'))
+                patcher.patch(previous.replace('const dshSessionInfoCss', 'const unknownCss'))
             version('0.2.3')
             with self.assertRaises(ValueError): patcher.plan_changes(root)
             version('0.2.2-alpha.2')

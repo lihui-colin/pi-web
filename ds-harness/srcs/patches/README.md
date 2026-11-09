@@ -9,7 +9,7 @@ DS Bot 输入框的蓝色语音对话按钮与发送按钮共用最右侧位置�
 
 会话信息 info 图标通过 `conversation.input.right` 注册，ID 为 `dsh-session-info`、`order: -100`，使用宿主 `chat` locale 和会话投影。`dsh_composer_metadata_apply.py` 会撤销旧的 `trailing` 直接挂载，再注册插槽，保留展开状态与元信息的 React Context。mobile 的额外文件按钮同样先检查是否存在，不存在时保持插件原样；存在但注册代码未知时拒绝修改。
 
-当前核验组合为 **DSH 0.2.2-rc.1、ds-bot 0.3.1、dsh-web-mobile 3.3.0 / 3.3.1、xterm/headless 6.0.0、addon-serialize 0.14.0**。六个独立入口通过 `common.py` 共用补丁校验、宿主定位、原子写入、备份与回滚函数；`apply.py` 统一编排全部补丁，未知版本、混合宿主版本或不完整旧补丁会停止。
+当前核验组合为 **DSH 0.2.2-rc.1、ds-bot 0.3.1、dsh-web-mobile 3.3.0 / 3.3.1、xterm/headless 6.0.0、addon-serialize 0.14.0**。七个独立入口通过 `common.py` 共用补丁校验、宿主定位、原子写入、备份与回滚函数；`apply.py` 统一编排全部补丁，未知版本、混合宿主版本或不完整旧补丁会停止。
 
 | 入口 | 当前版本的处理 |
 | --- | --- |
@@ -119,7 +119,7 @@ python3 -B -m unittest discover -s ds-harness/tests -p 'test_dsh_file_resources.
 
 `dsh_composer_metadata_apply.py` 适配 DSH `0.2.2-rc.1`，`alpha.2` 明确跳过此 UI 功能。核对当前上游 `ui-conversation` 的 InputBar/ContextMeter 与 `ui-chat` 的 StatsPills：已有实时用量和各项详情，但没有整个元信息区的收起控件。
 
-在输入框工具栏的录音/发送控制之前增加 info 按钮；提示文字复用 `contextPressure` 与 `contextOccupancy` 的上下文用量计算。工作目录、轮次、步骤、速度、Token、缓存命中和原上下文详情默认收起，点击 info 图标展开或收起。保留原生指标组件、弹层和实时更新，切换会话恢复默认收起。按钮有读屏标签、`aria-expanded`/`aria-controls`，支持键盘；展开后点击区域外或按 Esc 自动收起，内部详情操作不触发关闭；鼠标点击保留输入焦点，按钮不会提交表单。DS Bot 替换指标后的 BTW 队列及空状态区不显示此按钮。mobile 的旧圆环定位在元信息内部回退为正常文档流，避免出现第二个工具栏圆环。
+PC 和手机均使用上游 composer dock 的对齐方式，不覆盖 dock 宽度或居中设置。PC 浏览器保持上游 dock 的展示和布局，不注入会话信息按钮，也不折叠统计或底部终端。仅在手机触屏布局（不超过 1023px 且粗指针）中，在输入框工具栏的录音/发送控制之前增加 info 按钮；提示文字复用 `contextPressure` 与 `contextOccupancy` 的上下文用量计算。工作目录、轮次、步骤、速度、Token、缓存命中和原上下文详情在手机上默认收起，点击 info 图标展开或收起。仅隐藏统计项、项目名称及上下文信息，dock 和插件注入的终端始终挂载且可见；终端不随按钮开关重新挂载。保留原生指标组件、弹层和实时更新，切换会话恢复默认收起。按钮有读屏标签、`aria-expanded`/`aria-controls`，支持键盘；展开后点击区域外或按 Esc 自动收起，内部详情操作不触发关闭；鼠标点击保留输入焦点，按钮不会提交表单。DS Bot 替换指标后的 BTW 队列及空状态区不显示此按钮。mobile 的旧圆环定位在元信息内部回退为正常文档流，避免出现第二个工具栏圆环。
 
 ```sh
 python3 -B ds-harness/srcs/patches/service/dsh_composer_metadata_apply.py
@@ -169,3 +169,13 @@ python3 -B -m unittest discover -s ds-harness/tests -p 'test_dsh_composer_metada
 当前新增 pnpm 12.18.0、dshmarket 1.73.14、dsh-ide-git 0.30.0、Git panel 1.13.1；mobile 同为 3.3.1，但来源从 4e71eb6 更新到 [`d3e7e8e`](https://github.com/mexiaosqwq/dsh-web-mobile/tree/d3e7e8e21a07ff17188d3b344a3d3acfb5acb1e9)。mobile 新增页签布局和滑动手势调整，仍保留额外文件按钮注册；完整新 bundle 已验证能应用现有按钮补丁，宿主宽度测量和 Enter 迁移保持幂等。
 
 Git panel 1.13.1 发布包的注册新增 `useContextMenu`，压缩别名也改变；补丁增加该版本的完整精确注册锚点，复用上游其他视图及菜单，继续按本地偏好省略输入按钮。未知、重复或两代混合注册仍拒绝修改。发布包来自 npm，对照其声明的 [Git panel 上游仓库](https://github.com/xbzbing/dsh-git-panel)，版本兼容范围覆盖 DSH rc.1。最新发布包及安装前备份位于不入库的 `data/upgrade-20261107/`。
+
+## 上下文详情中的 Codex 额度
+
+移除独立的额度圆圈按钮，`@local/dsh-codex-quota` 改在原生上下文详情面板内显示额度、重置时间、积分及刷新操作；仅打开面板时查询，切换非 Codex 模型时不显示。沿用原生上下文按钮、弹层定位、滚动及 Esc/点击外部关闭逻辑，PC 与手机一致。
+
+核对 DSH `0.2.2-rc.1` 的 `ContextMeter`：已有上下文详情 portal，但没有面板内扩展插槽。`service/dsh_context_details_apply.py` 增加 session 作用域的 `conversation.context.details` 列表插槽，`dsh_composer_metadata_apply.py` 只负责将当前输入框的 `renderSlot` 传入；不移动或隐藏 composer dock。原生 `alpha.2` 不启用此扩展。七项补丁由统一安装器按顺序规划并原子发布。
+
+验证：原生 rc.1 ContextMeter 发布源码夹具驱动手机/PC 浏览器回归，检查无独立额度按钮、按需查询、Magpie/原生 Codex 来源、刷新、错误恢复及原生弹层关闭；接口回归继续使用隔离数据，不调用线上账户查询。
+
+会话信息安装器已删除本轮临时布局的逐项迁移字符串，仅接受原始发布包、当前补丁及仓库上一版完整 helper。上一版以完整 SHA-256 校验后整体替换，避免组合迁移产生混合状态；对应源码仅作为测试夹具保留，未知改动仍拒绝覆盖。桌面原生 dock、手机统计折叠和上下文面板内额度展示不变。

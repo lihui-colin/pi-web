@@ -18,6 +18,7 @@ PATCHES = (
     ('service.dsh_terminal_apply', None, None),
     ('service.dsh_file_resources_apply', None, None),
     ('service.dsh_composer_metadata_apply', None, None),
+    ('service.dsh_context_details_apply', None, None),
 )
 
 

@@ -10,7 +10,7 @@ const {chromium} = require(process.env.DSH_TEST_PLAYWRIGHT);
       const page = await browser.newPage({viewport: {width, height: 900}, hasTouch: width < 1024});
       const errors = [];
       page.on('pageerror', error => errors.push(error.message));
-      await page.setContent(`<style>body{margin:0;background:#171b19;color:#abb1ae;font:14px system-ui;padding:16px;box-sizing:border-box}#test{max-width:760px;margin:0 auto}.card{border:1px solid #424744;border-radius:22px;padding:14px}input{box-sizing:border-box;width:100%;border:0;background:transparent;color:inherit;outline:none;margin-bottom:28px}.trailing{display:flex;align-items:center;gap:8px}button{color:inherit;background:transparent;border:0;padding:6px}.model{margin-right:auto}.send{background:#db2626;border-radius:50%;color:white;width:36px;height:36px}[data-composer-dock]{display:flex;gap:12px;flex-wrap:wrap;padding:8px;font-size:12px}svg{display:block}</style><div id="test"></div>`);
+      await page.setContent(`<style>body{margin:0;background:#171b19;color:#abb1ae;font:14px system-ui;padding:16px;box-sizing:border-box}#test{max-width:760px;margin:0 auto}.card{border:1px solid #424744;border-radius:22px;padding:14px}input{box-sizing:border-box;width:100%;border:0;background:transparent;color:inherit;outline:none;margin-bottom:28px}.trailing{display:flex;align-items:center;gap:8px}button{color:inherit;background:transparent;border:0;padding:6px}.model{margin-right:auto}.send{background:#db2626;border-radius:50%;color:white;width:36px;height:36px}[data-composer-dock]{display:flex;justify-content:center;gap:12px;flex-wrap:wrap;padding:8px;font-size:12px}svg{display:block}</style><div id="test"></div>`);
       await page.addScriptTag({path: process.env.DSH_TEST_REACT_UMD});
       await page.addScriptTag({path: process.env.DSH_TEST_REACT_DOM_UMD});
       await page.evaluate(() => {
@@ -35,14 +35,21 @@ const {chromium} = require(process.env.DSH_TEST_PLAYWRIGHT);
         eval(registration);
       }, process.argv[2]);
       await page.evaluate(() => {
+        window.terminalMounts = 0;
+        window.TerminalStub = function TerminalStub() {
+          React.useEffect(() => { window.terminalMounts++; }, []);
+          return React.createElement('section', {'data-dse-panel':'terminal'}, React.createElement('button', {type:'button',onClick:()=>window.terminalAction=true}, 'Terminal action'));
+        };
         window.root = ReactDOM.createRoot(document.querySelector('#test'));
         window.render = (session = 'a', value = 10, bot = false) => {
           const h=React.createElement;
           const dock = h('div', {'data-composer-dock': true},
             bot ? h('button', {className: 'bt-btw-dock'}, 'Queued message') :
               h('span', {'data-composer-stat': 'activity'}, `${value} turns · 35 tok/s`),
-            !bot && h('span', null, 'postmo-quant · 243M tok · Cache hit 97%'),
-            !bot && h('button', {type:'button',onClick: () => window.originalAction = true}, 'Usage details'));
+            !bot && h('span', {'data-composer-stat':'usage'}, 'postmo-quant · 243M tok · Cache hit 97%'),
+            h(TerminalStub),
+            h('button', {type:'button',className:'third-party-action','aria-label':'Plugin action'}, 'Plugin'),
+            !bot && h('button', {'data-composer-stat':'details',type:'button',onClick: () => window.originalAction = true}, 'Usage details'));
           const projection = () => ({projectedTokens:value,contextWindow:100});
           const tree = h(DshComposerFrame, {key:session},
             h('form', {onSubmit:e=>{e.preventDefault();window.submitted=true}},
@@ -57,8 +64,25 @@ const {chromium} = require(process.env.DSH_TEST_PLAYWRIGHT);
         render();
       });
       const panel = page.locator('[data-dsh-session-info]');
+      const metadata = page.locator('[data-composer-stat=activity]');
+      const terminal = page.getByRole('button',{name:'Terminal action'});
+      await terminal.waitFor({state:'visible'});
+      assert.equal(await page.getByRole('button',{name:'Plugin action',exact:true}).isVisible(),true);
+      assert.equal(await page.locator('[data-composer-dock]').evaluate(e=>getComputedStyle(e).justifyContent),'center');
+      await terminal.click();
+      assert.equal(await page.evaluate(()=>window.terminalAction),true);
+      if (width >= 1024) {
+        assert.equal(await page.locator('[data-dsh-session-info-trigger]').count(),0);
+        assert.equal(await page.locator('[data-composer-dock]').evaluate(e=>getComputedStyle(e).justifyContent),'center');
+        assert.equal(await metadata.isVisible(),true);
+        assert.equal(await panel.getAttribute('hidden'),null);
+        await page.evaluate(() => ReactDOM.flushSync(() => root.unmount()));
+        assert.deepEqual(errors, []);
+        await page.close();
+        continue;
+      }
       const trigger = page.getByRole('button', {name:'Session info',exact:true});
-      assert.equal(await panel.isVisible(),false);
+      assert.equal(await metadata.isVisible(),false);
       assert.equal(await trigger.getAttribute('aria-expanded'),'false');
       assert.equal(await trigger.getAttribute('aria-controls'),await panel.getAttribute('id'));
       assert.equal(await trigger.locator('path').getAttribute('d'),'M12 11v6');
@@ -72,26 +96,30 @@ const {chromium} = require(process.env.DSH_TEST_PLAYWRIGHT);
       assert.equal(await trigger.locator('svg').getAttribute('stroke'),'currentColor');
       assert.equal(await page.getByText('11 turns · 35 tok/s').isVisible(),true);
       await trigger.focus();await page.keyboard.press('Enter');
-      assert.equal(await panel.isVisible(),false);
-      await page.keyboard.press('Space');assert.equal(await panel.isVisible(),true);
+      assert.equal(await metadata.isVisible(),false);
+      await page.keyboard.press('Space');assert.equal(await metadata.isVisible(),true);
       assert.equal(await page.locator('input').inputValue(),'Unsent draft');
       assert.equal(await page.evaluate(()=>!!window.submitted),false);
       await page.screenshot({path:`/tmp/dsh-session-info-expanded-${width}.png`});
       // Internal controls remain usable; clicks elsewhere auto-dismiss the panel.
       await page.locator('input').click();
-      assert.equal(await panel.isVisible(),false);
-      await trigger.click();assert.equal(await panel.isVisible(),true);
+      assert.equal(await metadata.isVisible(),false);
+      await trigger.click();assert.equal(await metadata.isVisible(),true);
       await page.getByRole('button',{name:'Usage details'}).focus();
       await page.keyboard.press('Escape');
-      assert.equal(await panel.isVisible(),false);
+      assert.equal(await metadata.isVisible(),false);
       assert.equal(await trigger.evaluate(e=>e===document.activeElement),true);
-      await trigger.click();assert.equal(await panel.isVisible(),true);
-      await page.evaluate(()=>render('b'));assert.equal(await panel.isVisible(),false);
+      await trigger.click();assert.equal(await metadata.isVisible(),true);
+      assert.equal(await terminal.isVisible(),true);
+      assert.equal(await page.getByRole('button',{name:'Plugin action',exact:true}).isVisible(),true);
+      assert.equal(await page.locator('[data-composer-dock]').evaluate(e=>getComputedStyle(e).justifyContent),'center');
+      assert.equal(await page.evaluate(()=>window.terminalMounts),1);
+      await page.evaluate(()=>render('b'));assert.equal(await metadata.isVisible(),false);
       await page.evaluate(()=>render('b',10,true));
       await page.getByRole('button',{name:'Queued message'}).waitFor({state:'visible'});
       assert.equal(await trigger.count(),0);
       await page.evaluate(()=>render('b'));await trigger.waitFor({state:'visible'});
-      assert.equal(await panel.isVisible(),false);
+      assert.equal(await metadata.isVisible(),false);
       assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);
       await page.screenshot({path:`/tmp/dsh-session-info-${width}.png`});
       await page.evaluate(() => ReactDOM.flushSync(() => root.unmount()));
