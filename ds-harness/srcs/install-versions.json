@@ -15,17 +15,11 @@
     "dshmarket": {
       "version": "1.73.16"
     },
-    "dsh-ide-git": {
-      "version": "0.30.0"
-    },
     "dsh-sidebar-enhancement": {
       "version": "1.4.1"
     },
     "dsh-sidebar-plus": {
       "version": "0.4.4"
-    },
-    "@xbzbing/dsh-git-panel": {
-      "version": "1.13.2"
     },
     "@local/dsh-codex-quota": {
       "version": "1.0.0",

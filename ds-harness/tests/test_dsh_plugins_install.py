@@ -12,8 +12,8 @@ import unittest
 ROOT = Path(__file__).resolve().parent
 PLUGINS = [
     '@deepseek-ai/dsh-subagent-codex', 'ds-bot', 'dsh-web-mobile',
-    'dshmarket', 'dsh-ide-git', 'dsh-sidebar-enhancement', 'dsh-sidebar-plus',
-    '@xbzbing/dsh-git-panel', '@local/dsh-codex-quota', 'dsh-composer-plus', 'dsh-better-sidebar',
+    'dshmarket', 'dsh-sidebar-enhancement', 'dsh-sidebar-plus',
+    '@local/dsh-codex-quota', 'dsh-composer-plus', 'dsh-better-sidebar',
 ]
 VERSION = '0.2.2-rc.1'
 PINS = json.loads(source_file('install-versions.json').read_text())['plugins']
@@ -115,14 +115,14 @@ class PluginInstallerTests(unittest.TestCase):
         return {str(p.relative_to(self.root)): (p.read_bytes(), p.stat().st_mtime_ns)
                 for p in self.root.rglob('*') if p.is_file()}
 
-    def test_new_profile_installs_eleven_enables_nine(self):
+    def test_new_profile_installs_nine_enables_nine(self):
         output = self.run_script()
         self.assertIn("PATCH_BUNDLE_APPLIED", output)
         self.assertIn("TERMINAL_PATCH_APPLIED", output)
         pkg = self.package()
         self.assertEqual(set(pkg['dependencies']), set(PLUGINS))
         self.assertEqual(set(pkg['dsh']['profile']['bundles']) & set(PLUGINS),
-                         set(PLUGINS) - {'dsh-ide-git', '@xbzbing/dsh-git-panel'})
+                         set(PLUGINS))
         self.assertIn('@deepseek-ai/dsh-base', pkg['dsh']['profile']['bundles'])
         self.assertEqual(self.calls()[0][6:],
                          [name + '@' + (VERSION if name == PLUGINS[0] else
@@ -203,7 +203,7 @@ class PluginInstallerTests(unittest.TestCase):
         for parent in (False, True):
             output = self.run_script('--dry-run', parent=parent)
             self.assertIn('@deepseek-ai/dsh-subagent-codex@' + VERSION, output)
-            self.assertIn('@xbzbing/dsh-git-panel@1.13.2', output)
+            self.assertIn('dsh-better-sidebar@0.30.1', output)
         self.assertEqual(before, self.snapshot())
 
     def test_parent_dry_upgrade_uses_pinned_version(self):

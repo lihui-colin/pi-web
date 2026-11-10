@@ -17,7 +17,7 @@ SCRIPT = source_file('dsh_install.sh')
 NGINX_SCRIPT = source_file('dsh_nginx_install.sh')
 PLUGIN_SCRIPT = source_file('dsh_plugins_install.sh')
 PINS = json.loads(source_file('install-versions.json').read_text())
-NAMES = ['@deepseek-ai/dsh-subagent-codex', 'ds-bot', 'dsh-web-mobile', 'dshmarket', 'dsh-ide-git', 'dsh-sidebar-enhancement', 'dsh-sidebar-plus', '@xbzbing/dsh-git-panel', '@local/dsh-codex-quota', 'dsh-composer-plus', 'dsh-better-sidebar']
+NAMES = ['@deepseek-ai/dsh-subagent-codex', 'ds-bot', 'dsh-web-mobile', 'dshmarket', 'dsh-sidebar-enhancement', 'dsh-sidebar-plus', '@local/dsh-codex-quota', 'dsh-composer-plus', 'dsh-better-sidebar']
 
 
 NGINX_STUB = f'''#!{sys.executable}
@@ -109,7 +109,7 @@ class InstallPlanTests(unittest.TestCase):
         self.assertIn('复用项目 Nginx：', output)
         self.assertIn('+ npm install', output)
         self.assertIn('+ curl', output)
-        self.assertIn('ds-bot@0.3.1 dsh-web-mobile@github:mexiaosqwq/dsh-web-mobile#646fe837440f9939228bdba0024d407eaac01128 dshmarket@1.73.16 dsh-ide-git@0.30.0', output)
+        self.assertIn('ds-bot@0.3.1 dsh-web-mobile@github:mexiaosqwq/dsh-web-mobile#646fe837440f9939228bdba0024d407eaac01128 dshmarket@1.73.16', output)
         self.assertIn('dsh-sidebar-enhancement@1.4.1 dsh-sidebar-plus@0.4.4', output)
         self.assertNotIn('dsh-file-transfer', output)
         self.assertIn('@deepseek-ai/dsh@0.2.2-rc.1 pnpm@12.18.0', output)
@@ -238,9 +238,9 @@ class InstallPlanTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(patch.read_text(), original)
 
-    def test_upgrade_preview_includes_git_panel(self):
-        (self.profile / 'node_modules/@xbzbing/dsh-git-panel/package.json').unlink()
-        self.assertIn('@xbzbing/dsh-git-panel@1.13.2', self.run_plan('--upgrade'))
+    def test_upgrade_preview_includes_better_sidebar(self):
+        (self.profile / 'node_modules/dsh-better-sidebar/package.json').unlink()
+        self.assertIn('dsh-better-sidebar@0.30.1', self.run_plan('--upgrade'))
 
     def test_certificate_options_rejected(self):
         for option in ['--cert-only', '--config', '--tls-dir', '--tls-host']:

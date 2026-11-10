@@ -38,7 +38,7 @@ bash ds-harness/dsh_plugins_install.sh
 bash ds-harness/dsh_plugins_install.sh --upgrade
 ```
 
-脚本管理以下 11 个额外安装包：
+脚本管理以下 9 个额外安装包：
 
 | 插件 | 新 profile 默认状态 |
 | --- | --- |
@@ -46,15 +46,13 @@ bash ds-harness/dsh_plugins_install.sh --upgrade
 | `ds-bot` | 启用 |
 | `dsh-web-mobile` | 启用 |
 | `dshmarket` | 启用 |
-| `@xbzbing/dsh-git-panel` | 仅安装，不启用 |
 | `dsh-sidebar-enhancement` | 启用 |
 | `dsh-sidebar-plus` | 启用 |
 | `dsh-better-sidebar` | 启用 |
 | `@local/dsh-codex-quota` | 启用（链接本服务 `srcs/plugins/codex-quota`） |
 | `dsh-composer-plus` | 启用 |
-| `dsh-ide-git` | 仅安装，不启用 |
 
-已有 profile 保留额外插件的启用／停用状态和其他 bundle。固定版本和来源统一由 `srcs/install-versions.json` 维护：DS Bot `0.3.1`、dshmarket `1.73.16`、dsh-ide-git `0.30.0`、sidebar-enhancement `1.4.1`、sidebar-plus `0.4.4`、better-sidebar `0.30.1`、Git panel `1.13.2`；mobile `3.3.5` 固定提交 `646fe837440f9939228bdba0024d407eaac01128`，composer-plus 使用 `1.24.1` 压缩包。本地 codex-quota `1.0.0` 使用相对 profile 的 `link:../../../../srcs/plugins/codex-quota` 来源，不从 npm 下载。版本和声明来源均匹配时跳过；存在 `^` 范围、其他版本或其他来源时恢复为清单值。新 profile 默认启用 9 个，dsh-ide-git 和 Git panel 仅安装。独立插件安装器遇到其他 DSH 版本会要求先运行主安装器，避免混装。`--dry-run` 仅用当前清单预览，提示实际升级会解析最新版，不联网查询或写入；独立脚本不安装 DSH、Nginx 或 Magpie，也不启停服务。
+已有 profile 保留额外插件的启用／停用状态和其他 bundle。固定版本和来源统一由 `srcs/install-versions.json` 维护：DS Bot `0.3.1`、dshmarket `1.73.16`、sidebar-enhancement `1.4.1`、sidebar-plus `0.4.4`、better-sidebar `0.30.1`；mobile `3.3.5` 固定提交 `646fe837440f9939228bdba0024d407eaac01128`，composer-plus 使用 `1.24.1` 压缩包。本地 codex-quota `1.0.0` 使用相对 profile 的 `link:../../../../srcs/plugins/codex-quota` 来源，不从 npm 下载。版本和声明来源均匹配时跳过；存在 `^` 范围、其他版本或其他来源时恢复为清单值。新 profile 默认启用全部 9 个插件。独立插件安装器遇到其他 DSH 版本会要求先运行主安装器，避免混装。`--dry-run` 仅用当前清单预览，提示实际升级会解析最新版，不联网查询或写入；独立脚本不安装 DSH、Nginx 或 Magpie，也不启停服务。
 
 主安装器及插件安装器会在安装前检查本地补丁工具是否完整；插件安装后通过 `dsh_patches_install.sh` 统一校验并迁移全部本地补丁，同一文件的变换按顺序合并，全部校验通过后才写入，写入失败会回滚本次已替换文件。可单独运行 `bash ds-harness/dsh_patches_install.sh` 安装主服务与插件补丁；已安装的补丁打印“已安装，跳过”，不重复写入、备份或修改时间戳。加 `--check` 只读检查，支持 `--profile-dir`、`--host-dir` 指定安装目录；该入口不下载依赖、不重启服务。当前支持 DSH 0.2.2-rc.1、ds-bot 0.3.1（兼容旧 0.2.7）和 mobile 3.3.0 / 3.3.1 / 3.3.5：Bot 保留本地输入框、消息操作栏和桌面宽度布局，沿用上游历史、提示词和触屏命中区，移除旧手机工具栏覆盖；mobile 保持上游界面；撤销旧宿主历史及 Enter 注入，保留页签宽度与终端增强，并修复旧手机浏览器文件资源地址解析；mobile 使用版本清单中固定的 GitHub 提交。参见 [补丁说明](srcs/patches/README.md)。
 
