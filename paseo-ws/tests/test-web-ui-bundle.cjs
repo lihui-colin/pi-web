@@ -1,0 +1,60 @@
+const { sourceFile, fixtureFile } = require('./support.cjs');
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { spawnSync } = require('node:child_process');
+const baseline = require('../srcs/patches/service/patch-web-ui.baseline.json');
+const { serverRoot } = require('../srcs/patches/patch-utils.cjs');
+
+test('Web patch rebuilds from upstream, removes retired features and stays idempotent', t => {
+  if (!fs.existsSync(path.join(serverRoot, 'package.json')) || JSON.parse(fs.readFileSync(path.join(serverRoot, 'package.json'))).version !== baseline.version) return t.skip(`Paseo ${baseline.version} bundle not installed`);
+  const source = fs.readFileSync(path.join(serverRoot, 'dist/server/web-ui', baseline.webEntry), 'utf8');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'paseo-web-patch-'));
+  t.after(() => {
+    assert.ok(path.resolve(root).startsWith(path.join(os.tmpdir(), 'paseo-web-patch-')));
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  for (const file of ['patch-web-ui.cjs', 'patch-web-ui.baseline.json', 'patch-utils.cjs', 'mobile-sidebar-swipe.js']) fs.copyFileSync(sourceFile(file), fixtureFile(root, file));
+  const server = path.join(root, 'runtime/lib/node_modules/@getpaseo/cli/node_modules/@getpaseo/server');
+  const web = path.join(server, 'dist/server/web-ui');
+  fs.mkdirSync(path.dirname(path.join(web, baseline.webEntry)), { recursive: true });
+  fs.writeFileSync(path.join(server, 'package.json'), JSON.stringify({ version: baseline.version, gitHead: baseline.commit }));
+  fs.writeFileSync(path.join(web, baseline.webEntry), source);
+  const oldEntry = '/_expo/static/js/web/index-deadbeef.js';
+  fs.writeFileSync(path.join(web, oldEntry), 'globalThis.__paseoPickServerDirectory = () => {};');
+  const originalHtml = `<head></head><script src="${oldEntry}"></script>`;
+  fs.writeFileSync(path.join(web, 'index.html'), originalHtml);
+  const run = () => spawnSync(process.execPath, [fixtureFile(root, 'patch-web-ui.cjs')], { encoding: 'utf8', env: { ...process.env, PASEO_RUNTIME_PREFIX: path.join(root, 'runtime') } });
+  const first = run(); assert.equal(first.status, 0, first.stderr);
+  const html = fs.readFileSync(path.join(web, 'index.html'), 'utf8');
+  assert.notEqual(html, originalHtml);
+  const output = path.join(web, html.match(/src="([^"]+)"/)[1]);
+  const bundle = fs.readFileSync(output, 'utf8');
+  for (const retired of ['__paseoPickServerDirectory', '__paseoMountTerminalClipboard', '__paseoGetBulkDiffTransport']) assert.equal(bundle.includes(retired), false);
+  assert.ok(bundle.includes('timeoutMs:20000'));
+  assert.ok(bundle.includes('connectTimeoutMs:s.timeoutMs??20000'));
+  assert.ok(bundle.includes('__paseoMobileSidebarSwipeCleanup'));
+  const moduleContaining = (text, marker) => {
+    const at = text.indexOf(marker);
+    assert.ok(at > 0);
+    return text.slice(text.lastIndexOf('\n__d(', at), text.indexOf('\n__d(', at));
+  };
+  for (const marker of ['e.useOpenAgentListGesture=function', '_e.MobilePanelOverlay=function', 'observeDiff(e){return this.diffStreams.observe(e)}', '"Duplicate diff entry"', 'canBrowse:o&&(0,C.getIsElectronRuntime)()&&fe===t.serverId', 're=!A&&ie&&(N||L.isNative||U)']) {
+    assert.equal(moduleContaining(bundle, marker), moduleContaining(source, marker), 'upstream gestures, diff, project picker and message actions remain unchanged');
+  }
+  const handler = bundle.match(/oe=\(0,n\.useCallback\)\((n=>\{typeof window\.paseoDesktop\?\.menu\?\.showContextMenu==="function"&&\(n\.preventDefault\(\),te\(\)\)\}),\[te\]\)/)?.[1];
+  assert.ok(handler);
+  let prevented = 0, desktopMenus = 0;
+  const event = { preventDefault() { prevented++; } }, te = () => { desktopMenus++; };
+  const vm = require('node:vm');
+  vm.runInNewContext('(' + handler + ')(event)', { window: {}, event, te });
+  assert.equal(prevented, 0);
+  vm.runInNewContext('(' + handler + ')(event)', { window: { paseoDesktop: { menu: { showContextMenu() {} } } }, event, te });
+  assert.equal(prevented, 1); assert.equal(desktopMenus, 1);
+  const second = run(); assert.equal(second.status, 0, second.stderr);
+  assert.equal(fs.readFileSync(path.join(web, 'index.html'), 'utf8'), html);
+  assert.equal(fs.readFileSync(output, 'utf8'), bundle);
+  assert.equal(fs.readFileSync(path.join(web, baseline.webEntry), 'utf8'), source);
+});

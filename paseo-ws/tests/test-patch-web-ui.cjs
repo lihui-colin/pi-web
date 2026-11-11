@@ -36,7 +36,7 @@ test('CLI warns before patching and preserves structural failure checks', t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'paseo-patch-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   fs.mkdirSync(path.join(root, 'srcs'), { recursive: true });
-  for (const file of ['patch-web-ui.cjs', 'patch-web-ui.baseline.json']) {
+  for (const file of ['patch-web-ui.cjs', 'patch-web-ui.baseline.json', 'patch-utils.cjs']) {
     fs.copyFileSync(sourceFile(file), fixtureFile(root, file));
   }
   const server = path.join(root, 'runtime/lib/node_modules/@getpaseo/cli/node_modules/@getpaseo/server');
@@ -44,13 +44,14 @@ test('CLI warns before patching and preserves structural failure checks', t => {
   const assets = path.join(web, '_expo/static/js/web');
   fs.mkdirSync(assets, { recursive: true });
   fs.writeFileSync(path.join(server, 'package.json'), JSON.stringify({ version: baseline.version }));
-  const html = '<head></head><script src="/_expo/static/js/web/index-123.js"></script>';
+  const sourceName = path.basename(baseline.webEntry);
+  const html = `<head></head><script src="${baseline.webEntry}"></script>`;
   fs.writeFileSync(path.join(web, 'index.html'), html);
-  fs.writeFileSync(path.join(assets, 'index-123.js'), 'upstream structure changed');
-  const result = spawnSync(process.execPath, [fixtureFile(root, 'patch-web-ui.cjs')], { encoding: 'utf8' });
+  fs.writeFileSync(path.join(assets, sourceName), 'upstream structure changed');
+  const result = spawnSync(process.execPath, [fixtureFile(root, 'patch-web-ui.cjs')], { encoding: 'utf8', env: { ...process.env, PASEO_RUNTIME_PREFIX: path.join(root, 'runtime') } });
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /\[WARN\].*无法核对 commit ID/);
   assert.match(result.stderr, /Upstream bootstrap structure changed/);
   assert.equal(fs.readFileSync(path.join(web, 'index.html'), 'utf8'), html);
-  assert.deepEqual(fs.readdirSync(assets), ['index-123.js']);
+  assert.deepEqual(fs.readdirSync(assets), [sourceName]);
 });

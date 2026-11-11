@@ -4,7 +4,9 @@
 
 ## 安装与配置
 
-运行 `bash paseo-ws/install.sh` 安装本地 CLI、Nginx 并应用 Web UI 补丁；安装不启停服务。安装和服务管理均排除 Conda 环境的 Node/npm，即使它们可运行也不使用。选择顺序为显式 `PASEO_NODE_BIN`、项目 `runtime/node/bin`、PATH 中独立的 Node.js >=22/npm、本机已安装的 NVM 版本。通过 Conda 路径、环境前缀及 `conda-meta` 识别环境，并检查可执行文件符号链接的真实路径。
+运行 `bash paseo-ws/install.sh` 安装固定版本 **0.16.0-beta.1（官方测试版）** 的 CLI、后台及配套网页、Nginx 和必要的 Web UI 补丁；安装不启停服务。安装和服务管理均排除 Conda 环境的 Node/npm，即使它们可运行也不使用。选择顺序为显式 `PASEO_NODE_BIN`、项目 `runtime/node/bin`、PATH 中独立的 Node.js >=22/npm、本机已安装的 NVM 版本。通过 Conda 路径、环境前缀及 `conda-meta` 识别环境，并检查可执行文件符号链接的真实路径。
+
+升级准备可用 `PASEO_RUNTIME_PREFIX=/absolute/path` 将 CLI 依赖安装到独立目录，管理入口仍使用项目的 `runtime/`；`PASEO_UPSTREAM_ONLY=1` 仅跳过本地服务补丁。安装版本固定为 `0.16.0-beta.1`。
 
 没有可用独立运行时时，安装器自动调用 `srcs/install-node.sh`：从 `nodejs.org` 下载当前平台的 Node.js 24 LTS，核对官方 SHA-256 后安装到 `runtime/node`。此步骤需要 curl、tar、Python 3；支持 Linux/macOS 的 x64/arm64，不修改 Conda、系统动态库或全局 PATH。已有 `runtime/node` 不覆盖；服务管理只选择运行时，不自动下载。
 
@@ -80,26 +82,26 @@ bash paseo-ws/paseo_web_run.sh stop
 
 ## Web UI 补丁
 
-`srcs/patches/service/patch-web-ui.cjs` 将首次连接探测和后续 TLS 连接等待时间调整为 20 秒，修复手机慢连接超时；同时给网页版 Add projects 增加 **Browse** 服务器文件夹选择入口。补丁生成新哈希资源地址和 Brotli/Gzip 压缩副本，保留原 JS。安装时自动执行，也可运行 `node paseo-ws/srcs/patches/service/patch-web-ui.cjs` 后刷新网页，无需重启。
+`srcs/patches/service/patch-web-ui.cjs` 仅保留尚未被上游覆盖的修复：20 秒 TLS 探测预算、触摸信息卡片、Web 终端原生右键菜单，以及移动侧栏开启边缘的浏览器仲裁。每次从基准记录的官方原始资源重新构建，生成新哈希及 Brotli/Gzip 副本，确保删除的本地补丁不会残留。安装时自动执行，也可运行 `node paseo-ws/srcs/patches/service/patch-web-ui.cjs` 后刷新网页，无需重启。
 
 `srcs/patches/service/patch-workspace-git-startup.cjs` 让侧栏先收到本地 Git 状态，再异步加载远端 Forge/PR 状态，避免远端 CLI 或网络响应拖慢首次工作区加载。安装时自动执行；单独应用后需重启 Paseo 服务。
 
-触摸屏没有鼠标悬停事件，网页中的用户消息复制操作会在触摸屏上保持可见；支持触摸和鼠标的设备仍可通过鼠标悬停显示消息操作。
+修改面板使用 [官方 0.16 的 diff 协议](https://github.com/getpaseo/paseo/releases/tag/v0.16.0-beta.1)：先显示文件目录，正文分批传输、完成后提交，后续只传有变化的文件正文。旧的独立 diff 连接及 WebSocket 压缩补丁已移除。新版保留上游的大文件与总量限制，目录可先显示不代表所有文件正文都能展开。各本地补丁共用 `srcs/patches/patch-utils.cjs` 的版本检查、安装路径和源码校验。
 
-侧栏信息卡片修复 iPad 宽屏下触摸误触发与多卡片滞留：仅鼠标指针进入和键盘可见焦点可打开卡片，触摸及触控笔进入、普通点击产生的焦点不打开；页面按下指针时关闭已有卡片。依据基准 v0.14.0 安装包的 `WorkspaceHoverCard` / `HoverCard` 实现：上游仅在紧凑布局禁用卡片，宽屏的 `pointerenter` 与 `focusin` 未过滤触摸输入。补丁保留上游布局、点击导航和菜单；验证使用 `node --test paseo-ws/tests/test-hover-card-patch.cjs paseo-ws/tests/test-directory-picker-patch.cjs`。
+用户消息操作直接采用[上游紧凑布局与原生平台的常显逻辑](https://github.com/getpaseo/paseo/blob/v0.16.0-beta.1/packages/app/src/components/message.tsx#L422)，删除本地对所有宽屏触摸设备的强制常显扩展。
 
-手机侧栏修复也由该入口自动应用（`srcs/patches/service/mobile-sidebar-swipe.js`）：从屏幕左边缘 32px 内右滑打开左侧栏，在已打开的左侧栏内左滑关闭；保留原有宽度和布局，右侧栏不变。仍由上游手势负责动画和状态提交。已核对 [v0.14.0 上游侧栏手势](https://github.com/getpaseo/paseo/blob/8c6de842a3157530c26a7a94c78a3d647fb96ce9/packages/app/src/mobile-panels/gestures.ts) 和 [根布局](https://github.com/getpaseo/paseo/blob/8c6de842a3157530c26a7a94c78a3d647fb96ce9/packages/app/src/app/_layout.tsx)：原版已经支持侧滑，但 Web 的 `touch-action: auto` 允许浏览器抢占横向触摸。Chromium 手机模拟中可复现 `pointercancel` 导致打开失败。补丁只在紧凑布局下的左边缘右滑、或已打开左侧栏内的左滑时阻止浏览器默认横向移动；不拦截竖向滚动、聊天区中部横向滚动、输入区域、多指触摸、右侧栏或桌面布局，不另建侧栏状态。打开和关闭共用同一方向判定与事件清理逻辑，不注入布局样式、不改写上游手势模块。执行 `node --test paseo-ws/tests/test-mobile-sidebar-swipe.cjs paseo-ws/tests/test-patch-web-ui.cjs paseo-ws/tests/test-directory-picker-patch.cjs` 验证事件边界与资源发布幂等性。
+侧栏信息卡片修复 iPad 宽屏下触摸误触发与多卡片滞留：仅鼠标指针进入和键盘可见焦点可打开卡片，触摸及触控笔进入、普通点击产生的焦点不打开；页面按下指针时关闭已有卡片。依据基准 v0.16.0-beta.1 安装包的 `WorkspaceHoverCard` / `HoverCard` 实现：上游仅在紧凑布局禁用卡片，宽屏的 `pointerenter` 与 `focusin` 未过滤触摸输入。补丁保留上游布局、点击导航和菜单；验证使用 `node --test paseo-ws/tests/test-hover-card-patch.cjs paseo-ws/tests/test-web-ui-bundle.cjs`。
 
-目录选择器由 `srcs/patches/service/server-directory-picker.js` 实现，替换原自定义目录树，参考已安装的 `@deepseek-ai/dsh-client-ui-directory-picker-browse@0.2.2-rc.1` 的 `DirectoryBrowser`：使用双栏浏览，左栏显示同级文件夹，右栏显示选中文件夹的子目录；点击右栏文件夹向下一级移动。顶部面包屑可返回任意上级，铅笔按钮可编辑绝对路径；输入路径时按目录部分导航、按末段前缀筛选，Enter 跳转，Escape 先退出路径编辑再关闭弹窗。隐藏目录默认不显示，可用 **Show hidden files** 开关或点号前缀显示。**New folder** 在当前选中目录内新建并选中新文件夹，**Open** 确认选择；新建本身不注册项目，取消选择不会删除已建文件夹。浏览复用已连接主机的 `listDirectory(cwd, path)`，新建复用 `createFileEntry({ cwd, parentPath, name, kind })`；不依赖 DSH 运行时。支持权限错误提示和键盘；手机窄屏显示当前目录的单栏列表，使用上级按钮或面包屑返回，触控行和按钮加大，底部操作固定分行显示，桌面保留双栏；迟到响应不会覆盖新导航或重新打开已取消弹窗。默认从已有推荐绝对路径开始，没有推荐路径则从 `/` 开始。已有路径搜索和 Electron 本机原生选择器保留。
+`mobile-sidebar-swipe.js` 仅在紧凑布局的左边缘 32px 右滑时阻止浏览器抢占；动画与状态提交仍由官方手势负责。上游[根布局](https://github.com/getpaseo/paseo/blob/v0.16.0-beta.1/packages/app/src/app/_layout.tsx#L380) 开启手势仍使用 `touch-action: auto`，所以保留这一缺口修复；[侧栏关闭](https://github.com/getpaseo/paseo/blob/v0.16.0-beta.1/packages/app/src/mobile-panels/presentation.tsx#L91) 已使用 `pan-y`，本地关闭仲裁已删除。不会把整个聊天区域改成 `pan-y`，避免禁用正文中的横向滚动。
 
-上游核查：[`v0.14.0` AddProjectFlow](https://github.com/getpaseo/paseo/blob/v0.14.0/packages/app/src/components/add-project-flow.tsx#L359) 的 Browse 仅适用于 Electron 本机；main 提交 `5afa1a9f8ef4b069ff84278668c1fd030df42273` 同样如此。后端已有 [`listDirectory`](https://github.com/getpaseo/paseo/blob/v0.14.0/packages/client/src/daemon-client.ts#L5068)，本补丁只补界面接入，不新增文件访问服务。
+目录选择直接采用官方 [AddProjectFlow 的服务器目录建议](https://github.com/getpaseo/paseo/blob/v0.16.0-beta.1/packages/app/src/components/add-project-flow.tsx#L424)及[路径选项](https://github.com/getpaseo/paseo/blob/v0.16.0-beta.1/packages/app/src/components/project-picker-options.ts#L21)：输入服务器路径、选择建议目录后打开项目。自定义双栏选择器、其中的新建目录界面和 Web Browse 接入已整套删除；Electron 本机选择器保持上游行为。
 
-Web 终端使用浏览器原生右键菜单：PC 右键、手机长按的菜单和复制粘贴选项由浏览器提供，不注入自定义菜单或常驻按钮。补丁移除 Web 终端对 `contextmenu` 的默认行为拦截，Electron 继续使用原生应用菜单。具体可用选项由浏览器、选区和当前焦点决定。已应用旧自定义菜单补丁的安装会在再次运行补丁时自动移除旧实现，刷新页面后生效。
+Web 终端使用浏览器原生右键菜单：PC 右键、手机长按的菜单和复制粘贴选项由浏览器提供，不注入自定义菜单或常驻按钮。补丁移除 Web 终端对 `contextmenu` 的默认行为拦截，Electron 继续使用原生应用菜单。具体可用选项由浏览器、选区和当前焦点决定。重新发布从官方原始资源构建，刷新页面后生效。
 
-上游核查：[`v0.14.0` TerminalEmulator](https://github.com/getpaseo/paseo/blob/v0.14.0/packages/app/src/components/terminal-emulator.tsx) 的右键处理无条件调用 `preventDefault()`，但菜单实现依赖 Electron，因此浏览器默认菜单被拦截后没有替代菜单。本补丁仅在 Electron 菜单接口存在时拦截事件。
+上游核查：[`v0.16.0-beta.1` TerminalEmulator](https://github.com/getpaseo/paseo/blob/v0.16.0-beta.1/packages/app/src/components/terminal-emulator.tsx) 的右键处理无条件调用 `preventDefault()`，但菜单实现依赖 Electron，因此浏览器默认菜单被拦截后没有替代菜单。本补丁仅在 Electron 菜单接口存在时拦截事件。
 
-`srcs/patches/service/patch-web-ui.baseline.json` 记录适用版本 `v0.14.0` 及上游 commit [`8c6de842a3157530c26a7a94c78a3d647fb96ce9`](https://github.com/getpaseo/paseo/commit/8c6de842a3157530c26a7a94c78a3d647fb96ce9)。版本、commit 不匹配或缺少 `gitHead` 时输出 `[WARN]`；资源结构不匹配时退出，不自动更新基准。适配新版本后应同步更新基准。
+`srcs/patches/service/patch-web-ui.baseline.json` 记录官方原始 Web 资源、适用版本 `v0.16.0-beta.1` 及上游 commit [`5196801fdfdad4c954bd37016c57745b07aba430`](https://github.com/getpaseo/paseo/commit/5196801fdfdad4c954bd37016c57745b07aba430)。版本、commit 不匹配或缺少 `gitHead` 时输出 `[WARN]`；资源结构不匹配时退出，不自动更新基准。适配新版本后应同步更新基准。
 
-验证：`node --test paseo-ws/tests/test-*.cjs` 和 `python3 -B paseo-ws/tests/test-nginx.py`。生命周期测试需要 `cc` 与 Python 3，使用临时目录和独立测试进程，不启停线上服务。目录选择器浏览器测试需安装 Playwright/Chromium 及其运行库；可用 `PASEO_PLAYWRIGHT_MODULE=/path/to/playwright node --test paseo-ws/tests/test-server-directory-picker.cjs` 指定模块路径。未安装时该浏览器测试明确跳过，其余测试继续运行。浏览器用例覆盖桌面/手机尺寸、双栏切换、面包屑、隐藏目录、路径编辑与筛选、新建成功与失败、选择确认、取消、空目录、权限失败恢复和晚到响应。
+验证：`node --test paseo-ws/tests/test-*.cjs` 和 `python3 -B paseo-ws/tests/test-nginx.py`。生命周期测试需要 `cc` 与 Python 3，使用临时目录和独立测试进程，不启停线上服务。资源发布测试验证从官方原始资源重建、旧补丁移除及幂等，并校验目录选择、消息操作、diff 和侧栏手势的上游模块保持逐字不变。
 
 测试代码、脚本及测试夹具统一位于 `tests/`，与 `srcs/` 同级。主服务补丁及其辅助资源位于 `srcs/patches/service/`；DSH 插件补丁位于 `srcs/patches/plugins/dsh/`。安装入口使用新路径，测试夹具维持同样的目录结构。

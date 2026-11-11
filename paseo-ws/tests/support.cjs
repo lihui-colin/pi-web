@@ -1,6 +1,11 @@
 const fs = require('node:fs');
 const path = require('node:path');
-const patches = {"patch-web-ui.cjs": "patches/service/patch-web-ui.cjs", "patch-web-ui.baseline.json": "patches/service/patch-web-ui.baseline.json", "server-directory-picker.js": "patches/service/server-directory-picker.js", "mobile-sidebar-swipe.js": "patches/service/mobile-sidebar-swipe.js", "patch-dsh-catalog.cjs": "patches/plugins/dsh/patch-dsh-catalog.cjs"};
+const groups = {
+  patches: ['patch-utils.cjs'],
+  'patches/service': ['patch-workspace-git-startup.cjs', 'patch-web-ui.cjs', 'patch-web-ui.baseline.json', 'mobile-sidebar-swipe.js'],
+  'patches/plugins/dsh': ['patch-dsh-catalog.cjs'],
+};
+const patches = Object.fromEntries(Object.entries(groups).flatMap(([dir, files]) => files.map(name => [name, path.join(dir, name)])));
 function relativeFile(name) {
   return ['install.sh', 'paseo_web_run.sh', 'paseo-proxy.sh'].includes(name) ? name : path.join('srcs', patches[name] || name);
 }

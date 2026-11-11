@@ -6,8 +6,13 @@ const vm = require('node:vm');
 const { patchHoverCards } = require('../srcs/patches/service/patch-web-ui.cjs');
 
 test('upstream hover cards ignore touch and pen, preserve mouse and keyboard, and close on press', t => {
-  const file = path.join(__dirname, '../runtime/lib/node_modules/@getpaseo/cli/node_modules/@getpaseo/server/dist/server/web-ui/_expo/static/js/web/index-1ac09e1966ac6dd37f983e4daa1beff5.js');
-  if (!fs.existsSync(file)) return t.skip('Original Paseo 0.14.0 bundle not installed');
+  const { serverRoot } = require('../srcs/patches/patch-utils.cjs');
+  const baseline = require('../srcs/patches/service/patch-web-ui.baseline.json');
+  if (!fs.existsSync(path.join(serverRoot, 'package.json')) || JSON.parse(fs.readFileSync(path.join(serverRoot, 'package.json'))).version !== baseline.version) return t.skip(`Paseo ${baseline.version} bundle not installed`);
+  const web = path.join(serverRoot, 'dist/server/web-ui');
+  const entry = fs.readFileSync(path.join(web, 'index.html'), 'utf8').match(/src="(\/_expo\/static\/js\/web\/index-[a-f0-9]+\.js)"/)?.[1];
+  assert.ok(entry);
+  const file = path.join(web, entry);
   const original = fs.readFileSync(file, 'utf8');
   const patched = patchHoverCards(original);
   assert.equal(patchHoverCards(patched), patched);
@@ -16,10 +21,10 @@ test('upstream hover cards ignore touch and pen, preserve mouse and keyboard, an
   let opens = 0, closes = 0;
   const context = vm.createContext({
     s: { openNow() { opens++; } },
-    _: { current: false },
+    S: { current: false },
     e: { contains: target => target.trigger },
-    f: { current: null },
-    I() { opens++; }, L() {},
+    b: { current: null },
+    T() { opens++; }, P() {},
   });
   const enter = vm.runInContext('(' + module.match(/onPointerEnter:(e=>\{[^}]+\}),onPointerLeave/)[1] + ')', context);
   for (const pointerType of ['touch', 'pen', '']) enter({ pointerType });
@@ -31,13 +36,13 @@ test('upstream hover cards ignore touch and pen, preserve mouse and keyboard, an
   assert.equal(opens, 1, 'touch focus cannot open a card');
   focus({ target: { trigger: true, matches: () => true } });
   assert.equal(opens, 2, 'visible keyboard focus still opens a card');
-  const close = vm.runInNewContext('(' + module.match(/const t=(\(\)=>\{L\(\),y\(!1\)\})/)[1] + ')', {
-    L() {}, y(value) { assert.equal(value, false); closes++; },
+  const close = vm.runInNewContext('(' + module.match(/const t=(\(\)=>\{P\(\),v\(!1\)\})/)[1] + ')', {
+    P() {}, v(value) { assert.equal(value, false); closes++; },
   });
   assert.ok(module.includes('document.addEventListener("pointerdown",t)'));
   assert.ok(module.includes('document.removeEventListener("pointerdown",t)'));
   close();
   assert.equal(closes, 1);
   assert.equal(patched.slice(0, start), original.slice(0, start));
-  assert.throws(() => patchHoverCards(original.replace('onPointerEnter:s.openNow', 'onPointerEnter:changed')), /structure changed/);
+  assert.throws(() => patchHoverCards(original.replace('onPointerLeave:s.scheduleClose', 'onPointerLeave:changed')), /structure changed/);
 });

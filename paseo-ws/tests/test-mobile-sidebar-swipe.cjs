@@ -44,8 +44,8 @@ test('desktop, editors, dialogs and open panels are not intercepted',()=>{
     assert.equal(emit('touchmove',[point(100,100)]),false);
   }
 });
-test('open left sidebar reserves leftward swipes across its list, not rightward or vertical pans',()=>{
-  for(const [x,y,expected] of [[140,100,true],[290,100,false],[240,140,false]]){
+test('open sidebar swipes remain entirely owned by the upstream pan-y handler',()=>{
+  for(const [x,y,expected] of [[140,100,false],[290,100,false],[240,140,false]]){
     const {emit,point}=setup({open:true,leftHost:true});
     emit('touchstart',[point(240,100)]);
     assert.equal(emit('touchmove',[point(x,y)]),expected);

@@ -44,13 +44,17 @@ _paseo_node_works() {
   PATH="$bin:${PATH-}" "$bin/npm" --version >/dev/null 2>&1
 }
 
+_paseo_activate_node() {
+  _paseo_node_works "$1" || return 1
+  export PATH="$1:${PATH-}"
+}
+
 paseo_select_node() {
   local bin rest nvm_root
   if [[ ${PASEO_NODE_BIN+x} ]]; then
     if [[ -n "$PASEO_NODE_BIN" ]] &&
        bin=$(cd -- "$PASEO_NODE_BIN" 2>/dev/null && pwd -P) &&
-       _paseo_node_works "$bin"; then
-      export PATH="$bin:${PATH-}"
+       _paseo_activate_node "$bin"; then
       return 0
     fi
     printf 'Invalid PASEO_NODE_BIN=%s: use a non-Conda directory containing working Node.js >=22 and npm.\n' "$PASEO_NODE_BIN" >&2
@@ -59,10 +63,7 @@ paseo_select_node() {
 
   # A bootstrapped runtime remains stable across later shell/Conda activation changes.
   bin=$(cd -- "${BASH_SOURCE[0]%/*}/.." && pwd -P)/runtime/node/bin
-  if _paseo_node_works "$bin"; then
-    export PATH="$bin:${PATH-}"
-    return 0
-  fi
+  _paseo_activate_node "$bin" && return 0
 
   # Check complete node/npm pairs in PATH order, including empty/current entries.
   rest="${PATH-}:"
@@ -70,10 +71,7 @@ paseo_select_node() {
     bin=${rest%%:*}
     rest=${rest#*:}
     bin=$(cd -- "${bin:-.}" 2>/dev/null && pwd -P) || continue
-    if _paseo_node_works "$bin"; then
-      export PATH="$bin:${PATH-}"
-      return 0
-    fi
+    _paseo_activate_node "$bin" && return 0
   done
 
   # Inspect existing NVM installations without sourcing nvm or downloading Node.
@@ -81,10 +79,7 @@ paseo_select_node() {
   for bin in "$nvm_root"/versions/node/*/bin; do
     [[ -d "$bin" ]] || continue
     bin=$(cd -- "$bin" 2>/dev/null && pwd -P) || continue
-    if _paseo_node_works "$bin"; then
-      export PATH="$bin:${PATH-}"
-      return 0
-    fi
+    _paseo_activate_node "$bin" && return 0
   done
   printf '%s\n' \
     'No working Node.js >=22 and npm pair found in PATH or installed NVM versions.' \

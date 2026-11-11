@@ -1,7 +1,8 @@
 {
   "repository": "https://github.com/getpaseo/paseo",
-  "tag": "v0.14.0",
-  "commit": "8c6de842a3157530c26a7a94c78a3d647fb96ce9",
+  "tag": "v0.16.0-beta.1",
+  "commit": "5196801fdfdad4c954bd37016c57745b07aba430",
   "package": "@getpaseo/server",
-  "version": "0.14.0"
+  "version": "0.16.0-beta.1",
+  "webEntry": "/_expo/static/js/web/index-88b54f6124ef87c2530993b1d1f117b2.js"
 }
