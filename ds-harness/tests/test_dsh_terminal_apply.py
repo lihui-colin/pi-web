@@ -117,9 +117,9 @@ class TerminalPatchTests(unittest.TestCase):
         if not dsh:
             self.skipTest('DSH not installed')
         modules = Path(dsh).resolve().parents[1] / 'node_modules'
-        backend = p.patch_host((modules / '@deepseek-ai/dsh-api-terminal-controller/lib/index.js').read_text())
-        start = backend.index('// xterm serialize 0.14 preserves')
-        end = backend.index('//#endregion', backend.index(p.SNAPSHOT_ANCHOR, start))
+        # Isolate the reviewed class, rather than slicing a possibly patched installation
+        # away from helper declarations that live outside its original region.
+        backend = p.patch_host((Path(__file__).parent / 'fixtures/dsh_terminal_host_rc1.js').read_text())
         script = r'''
 const assert = require('node:assert/strict'), fs = require('node:fs'), vm = require('node:vm'), path = require('node:path');
 const modules = process.argv[1], sent = [], trace = [];
@@ -139,7 +139,7 @@ vm.runInNewContext(fs.readFileSync(0, 'utf8'), context);
   await host.closeProcess();
 })().catch(error => { console.error(error); process.exitCode = 1; });
 '''
-        result = subprocess.run(['node', '-e', script, str(modules)], input=backend[start:end], text=True, capture_output=True)
+        result = subprocess.run(['node', '-e', script, str(modules)], input=backend, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
     @unittest.skipUnless(os.environ.get('DSH_TEST_PLAYWRIGHT'), 'Set DSH_TEST_PLAYWRIGHT for the optional browser test')

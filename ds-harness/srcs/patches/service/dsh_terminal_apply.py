@@ -7,7 +7,9 @@ from pathlib import Path
 if not __package__:
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from patches.common import host_directory, publish, read_change, replace_once, verify_package, patch_cli
+from patches.common import (apply_replacements, host_directory, publish, read_change,
+                            replace_once, undo_replacements, verify_package, patch_cli,
+                            vendor_addon as embed_addon)
 
 HERE = Path(__file__).resolve().parent
 RUNTIME = (HERE / 'dsh_terminal_runtime.js').read_text().strip() + '\n'
@@ -19,12 +21,7 @@ TOOLS = (HERE / 'dsh_terminal_tools.js').read_text().strip() + '\n'
 
 
 def vendor_addon(filename, digest, export):
-    data = (HERE / 'vendor' / filename).read_bytes()
-    if hashlib.sha256(data).hexdigest() != digest:
-        raise ValueError(f'Unexpected terminal addon contents: {filename}')
-    source = '\n'.join(line for line in data.decode().splitlines() if not line.startswith('//# sourceMappingURL='))
-    return (f'const DshTerminal{export} = (() => {{\nconst module = {{exports: {{}}}}, exports = module.exports;\n'
-            + source + f'\nreturn module.exports.{export};\n}})();\n')
+    return embed_addon(HERE / 'vendor' / filename, digest, export)
 
 
 ADDONS = vendor_addon('addon-search-0.16.0.js',
@@ -129,14 +126,6 @@ HOST_REPLACEMENTS = [
 ]
 
 
-def undo_replacements(text, replacements):
-    for old, fixed in reversed(replacements):
-        if text.count(fixed) != 1:
-            raise ValueError('Incomplete terminal patch; inspect before applying')
-        text = text.replace(fixed, old, 1)
-    return text
-
-
 def upgrade_helpers(text, marker, signature, anchor, current, legacy_digest):
     if marker not in text:
         if signature in text:
@@ -149,12 +138,6 @@ def upgrade_helpers(text, marker, signature, anchor, current, legacy_digest):
     if previous != current and hashlib.sha256(previous.encode()).hexdigest() != legacy_digest:
         raise ValueError('Unknown terminal helper revision; inspect before applying')
     return text[:start] + current + text[end:]
-
-
-def apply_replacements(text, replacements):
-    for old, new in replacements:
-        text = replace_once(text, old, new)
-    return text
 
 
 def patch_frontend(text):

@@ -9,6 +9,7 @@ Each adjacent `*-LICENSE` contains the upstream license.
 | --- | --- | --- |
 | `@xterm/addon-search@0.16.0` | [npm archive](https://registry.npmjs.org/@xterm/addon-search/-/addon-search-0.16.0.tgz) | `7bc1b8c7b3549411f6f6f779524c4ded6ca621fd80d64b40a70ae7c78aefbf55` |
 | `@xterm/addon-web-links@0.12.0` | [npm archive](https://registry.npmjs.org/@xterm/addon-web-links/-/addon-web-links-0.12.0.tgz) | `b74864125ef3889753b94e61eb4dabb99b2a27f920f0c9a7bd53cbe6d10f032a` |
+| `@xterm/addon-webgl@0.19.0` | [npm archive](https://registry.npmjs.org/@xterm/addon-webgl/-/addon-webgl-0.19.0.tgz) | `b85f8d4b3e9756bebb757e3fe47134d70f03ea3d6b187624426d2e2b65dec06c` |
 
 The patch verifies these digests and wraps the UMD bundles in local CommonJS
 scopes; it does not add globals, evaluate remote scripts or use a runtime CDN.

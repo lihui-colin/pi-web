@@ -7,7 +7,7 @@ from pathlib import Path
 if not __package__:
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from patches.common import host_directory, publish, read_change, replace_once, verify_package, patch_cli
+from patches.common import plan_host_patch, publish, replace_once, patch_cli
 
 HELPER = Path(__file__).with_name('dsh_composer_metadata.js').read_text().strip() + '\n'
 ANCHOR = '\t\tconst InputBar = (0, react.memo)(function InputBar('
@@ -70,11 +70,8 @@ def patch(text):
 
 
 def plan_changes(host=None, *, read_text=Path.read_text):
-    package = host_directory(host) / 'dsh-client-ui-conversation'
-    if verify_package(package, '@deepseek-ai/dsh-client-ui-conversation',
-                      ('0.2.2-alpha.2', '0.2.2-rc.1')) == '0.2.2-alpha.2':
-        return []
-    return [read_change(package / 'lib/client.js', patch, read_text=read_text)]
+    return plan_host_patch(host, 'dsh-client-ui-conversation', patch,
+                           versions=('0.2.2-alpha.2', '0.2.2-rc.1'), read_text=read_text)
 
 
 if __name__ == '__main__':

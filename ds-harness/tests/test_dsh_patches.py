@@ -17,6 +17,11 @@ from patches.service import dsh_terminal_apply as terminal
 from patches.service import dsh_file_resources_apply as resources
 from patches.service import dsh_composer_metadata_apply as metadata
 from patches.service import dsh_context_details_apply as context_details
+from patches.service import dsh_sidebar_render_apply as sidebar
+from patches.service import dsh_terminal_batching_apply as batching
+from patches.service import dsh_terminal_host_batching_apply as host_batching
+from patches.service import dsh_terminal_render_apply as rendering
+from patches.service import dsh_terminal_webgl_apply as webgl
 
 
 class PatchSetTests(unittest.TestCase):
@@ -59,19 +64,20 @@ class PatchSetTests(unittest.TestCase):
         package(self.host / 'dsh-client-ui-chat', '@deepseek-ai/dsh-client-ui-chat',
                 '0.2.2-rc.1', {'lib/client.js': bot.patch_history(chat, bot.HISTORY_CHAT_REPLACEMENTS)})
         package(self.host / 'dsh-client-ui-sidebar-terminal', '@deepseek-ai/dsh-client-ui-sidebar-terminal',
-                '0.2.2-rc.1', {'lib/client.terminal.js': '\n'.join([
-                    terminal.SCREEN_REF, terminal.SETUP, terminal.CLEANUP, terminal.FONT_FIT,
-                    terminal.WRITE, terminal.VISIBLE, terminal.PHASE, terminal.RUNTIME_ANCHOR,
-                    terminal.CLIP_HELPER, terminal.CLIP_SETUP, terminal.CLIP_CLEANUP, terminal.PROPOSED,
-                ])})
+                '0.2.2-rc.1', {
+                    'lib/client.terminal.js': (Path(__file__).parent / 'fixtures/dsh_terminal_screen_rc1.js').read_text() + '\n' + webgl.ANCHOR,
+                    'lib/client.js': '// Client entry\n//# sourceMappingURL=client.js.map\n',
+                })
         package(self.host / 'dsh-api-terminal-controller', '@deepseek-ai/dsh-api-terminal-controller',
                 '0.2.2-rc.1', {
-                    'lib/client.js': terminal.FORCE_SIGNATURE + '\n' + terminal.FORCE_CHECK,
-                    'lib/index.js': '\n'.join([terminal.SNAPSHOT_ANCHOR, terminal.SERIALIZE,
-                                              terminal.HOST_SETUP, terminal.HOST_WRITE, terminal.HOST_DISPOSE]),
+                    'lib/client.js': (Path(__file__).parent / 'fixtures/dsh_terminal_model_rc1.js').read_text(),
+                    'lib/index.js': (Path(__file__).parent / 'fixtures/dsh_terminal_host_rc1.js').read_text(),
                 })
         package(self.host / 'dsh-client-resources', '@deepseek-ai/dsh-client-resources',
                 '0.2.2-rc.1', {'lib/client.js': resources.OLD})
+        package(self.host / 'dsh-client-ui-sidebar-files', '@deepseek-ai/dsh-client-ui-sidebar-files',
+                '0.2.2-rc.1', {'lib/client.js': '\n'.join((Path(__file__).parent / 'fixtures' / name).read_text()
+                    for name in ('sidebar_navigator_rc1.css', 'sidebar_navigator_ref_rc1.js'))})
         for name, version in (('headless', '6.0.0'), ('addon-serialize', '0.14.0')):
             package(self.host.parent / '@xterm' / name, '@xterm/' + name, version, {})
 
@@ -100,6 +106,20 @@ class PatchSetTests(unittest.TestCase):
         self.assertIn(metadata.REGISTER_TRIGGER, conversation)
         self.assertNotIn(bot.COMPOSER_REPLACEMENT, conversation)
         self.assertNotIn('conversation.chat.before', conversation)
+        sidebar_css = (self.host / 'dsh-client-ui-sidebar-files/lib/client.js').read_text()
+        self.assertNotIn(':has(', sidebar_css)
+        for _, scoped in sidebar.REPLACEMENTS:
+            self.assertIn(scoped, sidebar_css)
+        terminal_source = (self.host / 'dsh-client-ui-sidebar-terminal/lib/client.terminal.js').read_text()
+        self.assertNotEqual(terminal_source, self.sources[self.host / 'dsh-client-ui-sidebar-terminal/lib/client.terminal.js'])
+        self.assertIn(webgl.HELPER, terminal_source)
+        self.assertNotIn(rendering.HELPER, terminal_source)  # Keep legacy clipboard/tools semantics.
+        self.assertIn('DSH terminal lazy chunk SHA256:', (self.host / 'dsh-client-ui-sidebar-terminal/lib/client.js').read_text())
+        self.assertIn(host_batching.HELPER, (self.host / 'dsh-api-terminal-controller/lib/index.js').read_text())
+        controller = (self.host / 'dsh-api-terminal-controller/lib/client.js').read_text()
+        self.assertIn(batching.CONSUME, controller)
+        self.assertIn(batching.HELPER, controller)
+        self.assertIn(terminal.FORCE_SIGNATURE_NEW, controller)
         self.assertEqual(self.cli('--check').returncode, 0)
         before = self.snapshot()
         result = self.cli()

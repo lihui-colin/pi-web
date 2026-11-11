@@ -19,6 +19,11 @@ PATCHES = (
     ('service.dsh_file_resources_apply', None, None),
     ('service.dsh_composer_metadata_apply', None, None),
     ('service.dsh_context_details_apply', None, None),
+    ('service.dsh_sidebar_render_apply', None, None),
+    ('service.dsh_terminal_batching_apply', None, None),
+    ('service.dsh_terminal_host_batching_apply', None, None),
+    ('service.dsh_terminal_render_apply', None, None),
+    ('service.dsh_terminal_webgl_apply', None, None),
 )
 
 

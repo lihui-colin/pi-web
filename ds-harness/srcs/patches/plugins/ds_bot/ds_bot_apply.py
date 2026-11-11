@@ -11,7 +11,7 @@ from pathlib import Path
 if not __package__:
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-from patches.common import COMPONENT_ROOT, host_directory, publish, replace_once, verify_package, patch_cli
+from patches.common import COMPONENT_ROOT, host_directory, publish, read_change, replace_once, verify_package, patch_cli
 
 
 # History compatibility
@@ -376,10 +376,9 @@ def plan_changes(bot=None, host=None, *, read_text=Path.read_text):
         latest = bot_version == '0.3.1'
         react_alias = 'import_react31' if latest else 'import_react19'
         dom_alias = 'import_react_dom3' if latest else 'import_react_dom'
-        bot_client = bot / 'client.js'
-        original = read_text(bot_client)
-        fixed = patch_presentation(patch_mobile(original, react_alias, phone_layout=not latest), react_alias, dom_alias)
-        changes = [(bot_client, original, fixed)]
+        changes = [read_change(bot / 'client.js', lambda text: patch_presentation(
+            patch_mobile(text, react_alias, phone_layout=not latest), react_alias, dom_alias),
+            read_text=read_text)]
         for path, replacements in (
             (host / 'dsh-client-ui-chat/lib/client.js', HISTORY_CHAT_REPLACEMENTS),
             (host / 'dsh-client-ui-conversation/lib/client.js', HISTORY_CONVERSATION_REPLACEMENTS),
@@ -391,19 +390,14 @@ def plan_changes(bot=None, host=None, *, read_text=Path.read_text):
             changes.append((path, original, fixed))
         return changes
     transforms = [
-        (bot / 'client.js', [lambda text: patch_history(text, HISTORY_BOT_REPLACEMENTS), patch_mobile, patch_presentation]),
-        (bot / 'src/host/tools.js', [patch_prompt]),
-        (host / 'dsh-client-ui-chat/lib/client.js', [lambda text: patch_history(text, HISTORY_CHAT_REPLACEMENTS)]),
-        (host / 'dsh-client-ui-conversation/lib/client.js', [lambda text: patch_history(text, HISTORY_CONVERSATION_REPLACEMENTS), patch_composer]),
+        (bot / 'client.js', lambda text: patch_presentation(patch_mobile(
+            patch_history(text, HISTORY_BOT_REPLACEMENTS)))),
+        (bot / 'src/host/tools.js', patch_prompt),
+        (host / 'dsh-client-ui-chat/lib/client.js', lambda text: patch_history(text, HISTORY_CHAT_REPLACEMENTS)),
+        (host / 'dsh-client-ui-conversation/lib/client.js', lambda text: patch_composer(
+            patch_history(text, HISTORY_CONVERSATION_REPLACEMENTS))),
     ]
-    changes = []
-    for path, steps in transforms:
-        original = read_text(path)
-        fixed = original
-        for transform in steps:
-            fixed = transform(fixed)
-        changes.append((path, original, fixed))
-    return changes
+    return [read_change(path, transform, read_text=read_text) for path, transform in transforms]
 
 
 def main():

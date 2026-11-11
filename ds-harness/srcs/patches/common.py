@@ -1,5 +1,6 @@
 """Shared validation and atomic publication for DSH bundle patches."""
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -18,6 +19,33 @@ def replace_once(text, old, new):
     if text.count(old) != 1:
         raise ValueError('Unrecognized bundle; inspect upstream before applying')
     return text.replace(old, new, 1)
+
+def apply_replacements(text, replacements):
+    """Apply ordered, independently idempotent replacements with exact guards."""
+    for old, new in replacements:
+        text = replace_once(text, old, new)
+    return text
+
+
+def undo_replacements(text, replacements, *, error='Incomplete terminal patch; inspect before applying'):
+    """Reverse only a complete, unambiguous set of installed replacements."""
+    for old, new in reversed(replacements):
+        if text.count(new) != 1:
+            raise ValueError(error)
+        text = text.replace(new, old, 1)
+    return text
+
+
+def vendor_addon(path, digest, export, *, error=None):
+    """Verify an upstream UMD bundle and embed it without source-map requests."""
+    path = Path(path)
+    data = path.read_bytes()
+    if hashlib.sha256(data).hexdigest() != digest:
+        raise ValueError(error or f'Unexpected terminal addon contents: {path.name}')
+    source = '\n'.join(line for line in data.decode().splitlines() if not line.startswith('//# sourceMappingURL='))
+    return (f'const DshTerminal{export} = (() => {{\nconst module = {{exports: {{}}}}, exports = module.exports;\n'
+            + source + f'\nreturn module.exports.{export};\n}})();\n')
+
 
 def publish(changes, backup_root=None):
     """Stage every file, keep originals, and roll back completed replacements on failure."""
@@ -86,6 +114,19 @@ def verify_package(directory, name, versions):
 def read_change(path, transform, *, read_text=Path.read_text):
     original = read_text(path)
     return path, original, transform(original)
+
+
+def reviewed_host_package(host, name, versions=('0.2.2-rc.1', '0.2.2-alpha.2'), *, skip=('0.2.2-alpha.2',)):
+    """Resolve and verify a core package before reading its version-specific code."""
+    package = host_directory(host) / name
+    version = verify_package(package, '@deepseek-ai/' + name, versions)
+    return None if version in skip else package
+
+
+def plan_host_patch(host, name, transform, *, filename='lib/client.js', read_text=Path.read_text, **review):
+    """Plan one core bundle, preserving known-version skips and injected reads."""
+    package = reviewed_host_package(host, name, **review)
+    return [] if package is None else [read_change(package / filename, transform, read_text=read_text)]
 
 
 def check_or_publish(changes, check, message):
