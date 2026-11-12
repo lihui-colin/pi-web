@@ -9,7 +9,7 @@ const crypto = require('node:crypto');
 const zlib = require('node:zlib');
 const baseline = require('../srcs/patches/service/patch-web-ui.baseline.json');
 const { serverRoot } = require('../srcs/patches/patch-utils.cjs');
-const { patchMessageActions } = require('../srcs/patches/service/patch-web-ui.cjs');
+const { patchMessageActions, patchProjectWorkspaceMenu } = require('../srcs/patches/service/patch-web-ui.cjs');
 
 test('Web patch rebuilds from upstream, removes retired features and stays idempotent', t => {
   const installed = fs.existsSync(path.join(serverRoot, 'package.json')) && JSON.parse(fs.readFileSync(path.join(serverRoot, 'package.json'))).version === baseline.version;
@@ -57,6 +57,8 @@ test('Web patch rebuilds from upstream, removes retired features and stays idemp
   }
   const messageMarker = 'Object.defineProperty(_e,"UserMessage",';
   assert.equal(moduleContaining(bundle, messageMarker), moduleContaining(patchMessageActions(source), messageMarker));
+  const projectMarker = 'function rr({project:o,displayName:t';
+  assert.equal(moduleContaining(bundle, projectMarker), moduleContaining(patchProjectWorkspaceMenu(source), projectMarker));
   const handler = bundle.match(/oe=\(0,n\.useCallback\)\((n=>\{typeof window\.paseoDesktop\?\.menu\?\.showContextMenu==="function"&&\(n\.preventDefault\(\),te\(\)\)\}),\[te\]\)/)?.[1];
   assert.ok(handler);
   let prevented = 0, desktopMenus = 0;

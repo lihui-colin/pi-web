@@ -22,6 +22,23 @@ function patchMessageActions(source) {
   });
 }
 
+function patchProjectWorkspaceMenu(source) {
+  return patchModule(source, 'function rr({project:o,displayName:t', module => {
+    // Keep the compiled menu/actions unchanged. Context carries the existing
+    // creation callback into dropdown portals; the row passes it directly for
+    // its context menu. No hover or long-press behavior changes here.
+    const wrappers = 'const paseoProjectWorkspaceMenuContext=(0,p.createContext)(null);'
+      + 'function Ve(o){return(0,Se.jsx)(paseoProjectWorkspaceMenuContext.Provider,{value:o.worktreeTarget?o.onBeginWorkspaceSetup:null,children:(0,Se.jsx)(paseoProjectActionsBase,o)})}'
+      + 'function Qe(o){const inherited=(0,p.useContext)(paseoProjectWorkspaceMenuContext),create=o.onBeginWorkspaceSetup??inherited,{t:translate}=(0,u.useTranslation)();return(0,Se.jsxs)(Se.Fragment,{children:[create?(0,Se.jsx)(Je,{surface:o.surface,testID:`sidebar-project-menu-new-workspace-${o.projectViewKey}`,leading:(0,Se.jsx)(oe.DensityIcon,{icon:S.Plus,size:"sm",color:"foregroundMuted"}),onSelect:create,children:translate("sidebar.workspace.actions.newWorkspace")}):null,(0,Se.jsx)(paseoProjectMenuBase,o)]})}';
+    module = replaceText(module, 'function Ve(o){const t=(0,c.c)(17)',
+      wrappers + 'function paseoProjectActionsBase(o){const t=(0,c.c)(17)', 'project action wrapper');
+    module = replaceText(module, 'function Qe(o){const t=(0,c.c)(40)',
+      'function paseoProjectMenuBase(o){const t=(0,c.c)(40)', 'project menu wrapper');
+    return replaceText(module, 'surface:"context",projectViewKey:o.viewKey,settingsTarget:z',
+      'surface:"context",onBeginWorkspaceSetup:b?$:void 0,projectViewKey:o.viewKey,settingsTarget:z', 'project context creation action');
+  });
+}
+
 function patchHoverCards(source) {
   const replacements = [
     ['const t=()=>{P(),v(!1)},n=t=>',
@@ -88,6 +105,7 @@ function main() {
   const swipe = fs.readFileSync(path.join(__dirname, 'mobile-sidebar-swipe.js'), 'utf8');
   patched = patchHoverCards(patched);
   patched = patchMessageActions(patched);
+  patched = patchProjectWorkspaceMenu(patched);
   // Keep the official binary diff stream and its connection ownership unchanged.
   patched = picker + '\n' + swipe + '\n' + patched;
   // Validate syntax before publishing either the bundle or HTML.
@@ -107,4 +125,4 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { checkCompatibility, patchHoverCards, patchMessageActions };
+module.exports = { checkCompatibility, patchHoverCards, patchMessageActions, patchProjectWorkspaceMenu };

@@ -90,6 +90,8 @@ bash paseo-ws/paseo_web_run.sh stop
 
 用户消息操作复用[上游操作行和复制实现](https://github.com/getpaseo/paseo/blob/v0.16.0-beta.2/packages/app/src/components/message.tsx#L422)，补充宽屏触摸设备的常显判断：`(hover: none), (pointer: coarse)` 匹配时，无需悬停即可看到拷贝按钮及同一行的时间、回退操作。上游仅依据紧凑布局、原生平台或悬停状态判断，未覆盖 iPad 宽屏网页版。通过 React 外部订阅监听输入能力变化；普通电脑仍在悬停时显示，待发送及无正文消息保持上游行为。验证使用 `node --test paseo-ws/tests/test-message-actions-patch.cjs paseo-ws/tests/test-web-ui-bundle.cjs`。
 
+左侧项目行的弹出菜单补充“新建工作区”：右键/长按菜单与三点下拉菜单共用已有的新建工作区回调，进入与 `+` 按钮相同的设置流程。仅在项目具有可用 worktree 创建目标时显示，不改变按钮的悬停显示及菜单触发方式。依据官方 beta.2 Web entry：项目菜单 `Qe` 原本只有设置、打开目录/新窗口和移除项目，新建回调仅绑定项目行按钮。验证使用 `node --test paseo-ws/tests/test-project-workspace-menu.cjs paseo-ws/tests/test-web-ui-bundle.cjs`。
+
 侧栏信息卡片修复 iPad 宽屏下触摸误触发与多卡片滞留：仅鼠标指针进入和键盘可见焦点可打开卡片，触摸及触控笔进入、普通点击产生的焦点不打开；外部鼠标按下或触摸、触控笔按下时关闭已有卡片，卡片内部鼠标按下保留链接和按钮操作。依据基准 v0.16.0-beta.2 安装包的 `WorkspaceHoverCard` / `HoverCard` 实现：上游仅在紧凑布局禁用卡片，宽屏的 `pointerenter` 与 `focusin` 未过滤触摸输入。补丁保留上游布局、点击导航和菜单；验证使用 `node --test paseo-ws/tests/test-hover-card-patch.cjs paseo-ws/tests/test-web-ui-bundle.cjs`。
 
 `mobile-sidebar-swipe.js` 仅在紧凑布局的左边缘 32px 右滑时阻止浏览器抢占；动画与状态提交仍由官方手势负责。上游[根布局](https://github.com/getpaseo/paseo/blob/v0.16.0-beta.2/packages/app/src/app/_layout.tsx#L380) 开启手势仍使用 `touch-action: auto`，所以保留这一缺口修复；[侧栏关闭](https://github.com/getpaseo/paseo/blob/v0.16.0-beta.2/packages/app/src/mobile-panels/presentation.tsx#L91) 已使用 `pan-y`，本地关闭仲裁已删除。不会把整个聊天区域改成 `pan-y`，避免禁用正文中的横向滚动。

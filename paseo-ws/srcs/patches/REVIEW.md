@@ -8,6 +8,7 @@
 | --- | --- |
 | TLS 连接等待预算 | `runtime/host-runtime.ts` 的初次连接探测及普通连接预算未覆盖本地 TLS 场景的 20 秒预算；保留现有三处限定替换，不改变普通非 TLS 连接。 |
 | 宽屏触摸消息操作 | `components/message.tsx` 的 `showActions` 仍仅判断紧凑布局、原生平台和悬停。iPad 宽屏 Web 未覆盖；复用现有操作行及复制逻辑，增加 `(hover: none), (pointer: coarse)` 媒体查询和输入能力变化订阅。待发送、无正文及桌面鼠标行为保持上游逻辑。 |
+| 项目菜单新建工作区 | 官方 beta.2 entry 的项目菜单 `Qe` 不含新建工作区，而项目行 `rr` 已有路由回调、`Ve` 已接收按钮回调。菜单复用这两个现有回调，覆盖 context 与 dropdown 两种菜单；缺少 worktree 目标时不显示，不改变悬停和长按行为。 |
 | 触摸信息卡片 | `components/ui/hover-card.tsx` 仍直接以 `openNow` 处理 pointer enter，focus enter 不以 `:focus-visible` 阻止普通点击产生的焦点。保留鼠标/键盘过滤及 pointer dismissal，卡片内部鼠标链接与按钮操作继续可用。上游的单卡片协调不替代这些触摸规则。 |
 | Web 终端右键菜单 | `components/terminal-emulator.tsx` 仍先 `preventDefault()`，自定义菜单依赖 Electron。保留仅存在 Electron 菜单接口时拦截的补丁。beta.2 对共用 `context-menu.tsx` 的嵌套按钮调整不覆盖此缺口。 |
 | 移动侧栏开启边缘 | 保留左侧 32px 的浏览器手势仲裁；上游仍控制布局、动画和状态。关闭侧栏的原生手势及聊天正文不修改。 |
