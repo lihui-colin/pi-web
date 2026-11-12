@@ -26,9 +26,9 @@ NGINX = local_nginx()
 
 class LauncherTests(unittest.TestCase):
     def test_stop_attempts_every_service_and_reports_failures(self):
-        services = ['dsh-token-proxy', 'dsh-web', 'magpie-serve']
-        cases = [(service, 1, 3) for service in services]
-        cases += [('', 0, 3), ('', 2, 3), ('', 1, 3)]
+        services = ['magpie-web-proxy', 'dsh-token-proxy', 'dsh-web', 'magpie-serve']
+        cases = [(service, 1, len(services)) for service in services]
+        cases += [('', status, len(services)) for status in (0, 2, 1)]
         for failed, identity_status, count in cases:
             with self.subTest(failed=failed, identity=identity_status), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
@@ -270,7 +270,7 @@ main start
         with tempfile.TemporaryDirectory(prefix="dsh-launcher-binary-") as temporary:
             root = Path(temporary)
             script = root / "dsh_web_run.sh"
-            for name in ("dsh_web_run.sh", "dsh_runtime.py", "dsh_nginx.py"):
+            for name in ("dsh_web_run.sh", "dsh_runtime.py", "dsh_nginx.py", "magpie_nginx.py"):
                 shutil.copy2(source_file(name), fixture_file(root, name))
             binaries = root / "bin"
             binaries.mkdir()
@@ -367,7 +367,7 @@ main start
         public_host = f"[{address}]" if ":" in address else address
         with tempfile.TemporaryDirectory(prefix="dsh-launcher-") as temporary:
             root = Path(temporary)
-            for name in ("dsh_web_run.sh", "dsh_runtime.py", "dsh_nginx.py"):
+            for name in ("dsh_web_run.sh", "dsh_runtime.py", "dsh_nginx.py", "magpie_nginx.py"):
                 shutil.copy2(source_file(name), fixture_file(root, name))
             copy_test_nginx(root)
             binaries = root / "bin"
@@ -392,6 +392,9 @@ main start
             with socket.socket(socket.AF_INET6 if ":" in address else socket.AF_INET) as reservation:
                 reservation.bind((address, 0))
                 port = reservation.getsockname()[1]
+                with socket.socket(socket.AF_INET6 if ':' in address else socket.AF_INET) as magpie_reservation:
+                    magpie_reservation.bind((address, 0))
+                    magpie_port = magpie_reservation.getsockname()[1]
             config = root / "data/dsh.conf"
             config.parent.mkdir(exist_ok=True)
             tls = root / 'data/tls' / address.replace(':', '_')
@@ -401,7 +404,7 @@ main start
             generated_cert.rename(cert)
             generated_key.rename(key)
             config.write_text(
-                f"port={port}\nserver_ip={address}\ndsh_token=''\n"
+                f"port={port}\nserver_ip={address}\nmagpie_port={magpie_port}\ndsh_token=''\n"
                 "tls_cert=tls/stale/cert.pem\ntls_key=tls/stale/key.pem\n"
             )
             environment = {**os.environ, "PATH": f"{binaries}:{os.environ['PATH']}"}
@@ -438,7 +441,8 @@ main start
                     with context.wrap_socket(raw, server_hostname="localhost") as client:
                         self.assertTrue(client.getpeercert())
                 original = pids()
-                self.assertEqual(len(original), 3)
+                self.assertEqual(set(original), {'magpie-serve', 'magpie-web-proxy',
+                                                 'dsh-web', 'dsh-token-proxy'})
                 self.assertFalse(list(root.glob("*.pid")))
                 self.assertFalse(list(root.glob(".nginx-*")))
                 self.assertEqual((root / "log").stat().st_mode & 0o777, 0o700)
@@ -543,7 +547,9 @@ main start
                 path = bins / name
                 path.write_text('#!/bin/sh\nexit 99\n')
                 path.chmod(0o755)
-            for probe, backend in ((1, 0), (2, 0), (3, 0), (4, 0), (5, 0), (5, 1)):
+            # Discover each branch's probes, then inject failure at every one.
+            cases = [(0, backend) for backend in (0, 1)]
+            for probe, backend in cases:
                 with self.subTest(probe=probe, backend=backend):
                     (root / 'counter').write_text('0')
                     body = '''source "$1"
@@ -553,7 +559,7 @@ service_pid() {
     count=$((count + 1))
     printf '%s\n' "$count" > "$script_dir/counter"
     [[ "$count" != "$probe" ]] || return 2
-    if [[ "$count" == 4 && "$backend" == 1 ]]; then echo 12345; return 0; fi
+    if [[ "$1" == dsh-web && "$backend" == 1 ]]; then echo 12345; return 0; fi
     return 1
 }
 process_option() { case "$2" in --port) echo 12346;; --public-url) echo "$public_url";; esac; }
@@ -565,8 +571,16 @@ start
                                              str(probe), str(backend)],
                                             env={**os.environ, 'PATH': f'{bins}:{os.environ["PATH"]}'},
                                             capture_output=True, text=True, timeout=10)
-                    self.assertNotEqual(result.returncode, 0, result.stderr)
-                    self.assertFalse((root / 'started').exists())
+                    count = int((root / 'counter').read_text())
+                    if probe == 0:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertTrue((root / 'started').exists())
+                        (root / 'started').unlink()
+                        cases.extend((index, backend) for index in range(1, count + 1))
+                    else:
+                        self.assertNotEqual(result.returncode, 0, result.stderr)
+                        self.assertFalse((root / 'started').exists())
+                        self.assertEqual(count, probe)
                     self.assertEqual(config.read_text(), original)
 
     def test_stop_final_unknown_identity_preserves_ready_and_token(self):
@@ -587,6 +601,229 @@ start
             self.assertEqual(result.returncode, 2)
             self.assertIn('preserve', config.read_text())
             self.assertEqual(ready.read_text(), 'preserve')
+
+
+class MagpieWebTests(unittest.TestCase):
+    """Private launcher copies and child processes; never start installed services."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix='dsh-magpie-web-')
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        copy_test_launcher(self.root)
+        fixture_file(self.root, 'dsh_nginx.py').write_text('def require_local_nginx(): pass\n')
+        tls = self.root / 'data/tls/127.0.0.1'
+        tls.mkdir(parents=True)
+        cert, key = create_test_certificate(tls)
+        shutil.copy2(cert, tls / 'fullchain.pem')
+        shutil.copy2(key, tls / 'privkey.pem')
+        self.config = self.root / 'data/dsh.conf'
+        bins = self.root / 'bin'
+        bins.mkdir()
+        for name in ('magpie', 'dsh'):
+            executable = bins / name
+            executable.write_text('#!/bin/sh\nexit 99\n')
+            executable.chmod(0o755)
+        self.env = {**os.environ, 'PATH': f'{bins}:{os.environ["PATH"]}'}
+
+    def start(self, web_port=None, public_port='25228', live_pid=None, host_ip=None,
+              magpie_port=None, proxy_pid=None):
+        original = f"server_ip=127.0.0.1\nport={public_port}\ndsh_token='preserve'\n"
+        for name, value in [('magpie_web_port', web_port), ('host_ip', host_ip),
+                            ('magpie_port', magpie_port)]:
+            if value is not None:
+                original += f"{name}='{value}'\n"
+        self.config.write_text(original)
+        body = '''source "$1"
+service_pid() {
+    if [[ "$1" == magpie-serve && -n "$live_pid" ]]; then
+        printf '%s\\n' "$live_pid"
+    elif [[ "$1" == magpie-web-proxy && -n "$proxy_pid" ]]; then
+        printf '%s\\n' "$proxy_pid"
+    else
+        return 1
+    fi
+}
+start_service() {
+    printf 'SERVICE %s\\n' "$*"
+    if [[ "$1" == magpie-serve ]]; then
+        printf '%s\\n' "$MAGPIE_WEB_KEY" > "$script_dir/observed-key"
+        printf 'MAGPIE_URL %s\\n' "$MAGPIE_PUBLIC_URL"
+    fi
+}
+stop_service() { printf 'STOP %s\\n' "$*"; return 99; }
+live_pid=$2 proxy_pid=$3
+main start
+'''
+        result = subprocess.run(['bash', '-c', body, 'test', str(self.root / 'dsh_web_run.sh'),
+                                 str(live_pid) if live_pid is not None else '',
+                                 str(proxy_pid) if proxy_pid is not None else ''],
+                                env=self.env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(self.config.read_text(), original)
+        self.assertNotIn('STOP ', result.stdout)
+        self.assertFalse(list((self.root / 'log').glob('*.pid')))
+        return result
+
+    def assert_started(self, result, port, host='127.0.0.1', magpie_port=25226):
+        self.assertEqual(result.returncode, 0, result.stderr)
+        services = [line for line in result.stdout.splitlines() if line.startswith('SERVICE ')]
+        self.assertEqual([line.split()[1] for line in services],
+                         ['magpie-serve', 'magpie-web-proxy', 'dsh-web', 'dsh-token-proxy'])
+        self.assertEqual(services[0], f'SERVICE magpie-serve magpie serve --web=127.0.0.1:{port}')
+        public_host = f'[{host}]' if ':' in host else host
+        url = f'https://{public_host}:{magpie_port}/'
+        self.assertIn(url, result.stdout)
+        self.assertIn(f'MAGPIE_URL {url}', result.stdout)
+        self.assertIn('无需填写 token', result.stdout)
+        key_file = self.root / 'data/.magpie-web-key'
+        self.assertEqual(key_file.stat().st_mode & 0o777, 0o600)
+        self.assertEqual((self.root / 'observed-key').read_text(), key_file.read_text())
+        self.assertNotIn(key_file.read_text().strip(), result.stdout + result.stderr)
+        proxy = services[1]
+        for option in (f'--listen-host {host}', f'--listen-port {magpie_port}',
+                       '--upstream-host 127.0.0.1', f'--upstream-port {port}',
+                       f'--public-host {public_host}:{magpie_port}',
+                       f'--config {self.config}',
+                       f'--magpie-key-file {self.root}/data/.magpie-web-key',
+                       f'--tls-cert {self.root}/data/tls/{host.replace(":", "_")}/fullchain.pem',
+                       f'--tls-key {self.root}/data/tls/{host.replace(":", "_")}/privkey.pem'):
+            self.assertIn(option, proxy)
+
+    def test_default_custom_boundary_and_decimal_web_ports(self):
+        for value, expected in [(None, 3430), ('4343', 4343), ('1', 1), ('65535', 65535),
+                                ('03430', 3430), ('00008', 8)]:
+            with self.subTest(port=value):
+                self.assert_started(self.start(value), expected)
+
+    def test_custom_https_host_and_public_port_keep_backend_on_loopback(self):
+        tls = self.root / 'data/tls/127.0.0.2'
+        shutil.copytree(self.root / 'data/tls/127.0.0.1', tls)
+        self.assert_started(self.start('4343', host_ip='127.0.0.2', magpie_port='25443'),
+                            4343, '127.0.0.2', 25443)
+
+    def test_public_https_port_validation_and_collisions_precede_launch(self):
+        for value in ('', '0', '-1', '65536', 'abc', '25 226', '25228', '3430', '03430'):
+            with self.subTest(port=value):
+                result = self.start(magpie_port=value)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('magpie', result.stderr)
+                self.assertNotIn('SERVICE ', result.stdout)
+        result = self.start('25226')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn('SERVICE ', result.stdout)
+
+    def test_invalid_https_host_and_missing_host_certificate_precede_launch(self):
+        for value in ('https://127.0.0.1', '../outside', '127.0.0.1:25226', '127.0.0.2'):
+            with self.subTest(host=value):
+                result = self.start(host_ip=value)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn('SERVICE ', result.stdout)
+
+    def test_invalid_web_ports_fail_before_any_service_starts(self):
+        for value in ('', '0', '00000', '-1', '65536', '999999999999999999999999999999',
+                      'abc', '0x10', '1.5', '+3430', ' 3430', '3430 ', '34 30'):
+            with self.subTest(port=value):
+                result = self.start(value)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('magpie_web_port', result.stderr)
+                self.assertNotIn('SERVICE ', result.stdout)
+
+    def test_public_port_collision_fails_before_any_service_starts(self):
+        for web, public in [(None, '3430'), ('4343', '4343'), ('03430', '3430'),
+                            ('3430', '03430')]:
+            with self.subTest(web=web, public=public):
+                result = self.start(web, public)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('magpie_web_port', result.stderr)
+                self.assertNotIn('SERVICE ', result.stdout)
+
+    def child(self, arguments):
+        process = subprocess.Popen(
+            [sys.executable, '-c', "import signal; print('ready', flush=True); signal.pause()",
+             *arguments], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+        def cleanup():
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=5)
+
+        self.addCleanup(cleanup)
+        self.assertEqual(process.stdout.readline(), 'ready\n')
+        return process
+
+    def test_live_magpie_accepts_matching_web_option_in_both_forms(self):
+        for arguments in (['--web=127.0.0.1:4343'], ['--web', '127.0.0.1:4343']):
+            with self.subTest(arguments=arguments):
+                process = self.child(arguments)
+                self.assert_started(self.start('4343', live_pid=process.pid), 4343)
+                self.assertIsNone(process.poll())
+
+    def test_live_magpie_missing_or_mismatched_web_requires_maintenance(self):
+        for arguments in ([], ['--web=127.0.0.1:3430'], ['--web', '127.0.0.1:3430'],
+                          ['--web=0.0.0.0:4343'], ['--web=localhost:4343'],
+                          ['--web='], ['--web'], ['--web-extra=127.0.0.1:4343']):
+            with self.subTest(arguments=arguments):
+                process = self.child(arguments)
+                result = self.start('4343', live_pid=process.pid)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('Magpie', result.stderr)
+                self.assertIn('stop', result.stderr)
+                self.assertIn('start', result.stderr)
+                self.assertNotIn('SERVICE ', result.stdout)
+                self.assertIsNone(process.poll(), 'existing Magpie process must remain alive')
+
+    def test_private_key_is_reused_across_starts(self):
+        self.assert_started(self.start(), 3430)
+        key_file = self.root / 'data/.magpie-web-key'
+        original = key_file.read_bytes()
+        self.assert_started(self.start(), 3430)
+        self.assertEqual(key_file.read_bytes(), original)
+
+    def test_live_https_proxy_matches_or_refuses_drift_without_stopping_child(self):
+        expected = {'--listen-host': '127.0.0.1', '--listen-port': '25226',
+                    '--upstream-host': '127.0.0.1', '--upstream-port': '3430',
+                    '--public-host': '127.0.0.1:25226'}
+        cases = [(None, None), ('--listen-host', '127.0.0.2'),
+                 ('--listen-port', '25443'), ('--upstream-host', '127.0.0.2'),
+                 ('--upstream-port', '4343'),
+                 ('--public-host', 'localhost:25226')]
+        for option, value in cases:
+            with self.subTest(option=option):
+                options = dict(expected)
+                if option:
+                    options[option] = value
+                process = self.child([part for pair in options.items() for part in pair])
+                result = self.start(proxy_pid=process.pid)
+                if option is None:
+                    self.assert_started(result, 3430)
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn('Magpie', result.stderr)
+                    self.assertIn('stop/start', result.stderr)
+                    self.assertNotIn('SERVICE ', result.stdout)
+                self.assertIsNone(process.poll(), 'existing HTTPS proxy must remain alive')
+
+    def test_process_option_preserves_equals_spaces_and_exact_option_names(self):
+        for arguments, option, expected in [
+                (['--web=127.0.0.1:3430'], '--web', '127.0.0.1:3430'),
+                (['--web', '127.0.0.1:3430'], '--web', '127.0.0.1:3430'),
+                (['--name=value with spaces=tail'], '--name', 'value with spaces=tail'),
+                (['--name', 'value with spaces=tail'], '--name', 'value with spaces=tail'),
+                (['--web-extra=wrong', '--web=right'], '--web', 'right'),
+                (['--web-extra=wrong'], '--web', None),
+                (['--web'], '--web', None)]:
+            with self.subTest(arguments=arguments):
+                process = self.child(arguments)
+                result = subprocess.run(
+                    ['bash', '-c', 'source "$1"; process_option "$2" "$3"', 'test',
+                     str(self.root / 'dsh_web_run.sh'), str(process.pid), option],
+                    capture_output=True, text=True, timeout=5)
+                if expected is None:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(result.stdout, '')
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, expected + '\n')
 
 
 class ProcessHelperTests(unittest.TestCase):

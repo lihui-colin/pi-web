@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Launcher helpers: process ownership, token capture, migration and startup checks."""
 
-import ctypes, errno, fcntl, hashlib, ipaddress, json, os, platform, re, shlex, shutil, signal, socket, ssl, subprocess, sys, time, uuid
+import ctypes, errno, fcntl, hashlib, ipaddress, json, os, platform, re, secrets, shlex, shutil, signal, socket, ssl, stat, subprocess, sys, time, uuid
 from pathlib import Path
 from urllib.parse import urlsplit, parse_qs, unquote_plus
 
@@ -295,7 +295,7 @@ def prepare_runtime(root):
         sys.exit(f'运行目录不能是符号链接：{logs}')
     logs.mkdir(mode=0o700, exist_ok=True)
     logs.chmod(0o700)
-    names = [f'{service}.{suffix}' for service in ('magpie-serve', 'dsh-web', 'dsh-token-proxy')
+    names = [f'{service}.{suffix}' for service in ('magpie-serve', 'magpie-web-proxy', 'dsh-web', 'dsh-token-proxy')
              for suffix in ('log', 'pid', 'identity')]
     names += ['.dsh-web-token-captured']
     sources = [root / name for name in names] + sorted(root.glob('.nginx-[0-9]*')) + sorted(root.glob('.dsh.conf.*'))
@@ -317,6 +317,30 @@ def prepare_runtime(root):
         source.rename(target)  # Open log descriptors continue writing to the same inode.
         if directory:
             source.symlink_to(Path('log') / source.name, target_is_directory=True)
+
+
+def read_magpie_key(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, encoding='ascii') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+            raise ValueError('Magpie Web key must be a private regular file owned by the current user')
+        key = stream.read().removesuffix('\n')
+    if not re.fullmatch(r'[A-Za-z0-9._~-]{16,}', key):
+        raise ValueError('Invalid Magpie Web key')
+    return key
+
+
+def magpie_web_key():
+    path = root / 'data/.magpie-web-key'
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except FileExistsError:
+        pass
+    else:
+        with os.fdopen(fd, 'w') as stream:
+            stream.write(secrets.token_urlsafe(32) + '\n')
+    return read_magpie_key(path)
 
 
 def startup_config(address, tls_root, listen):
@@ -439,6 +463,8 @@ def run_operation():
             prepare_runtime(root)
         elif operation == 'config':
             startup_config(*args)
+        elif operation == 'magpie-key':
+            print(magpie_web_key())
         elif operation == 'check-nginx':
             from dsh_nginx import require_local_nginx
             require_local_nginx()

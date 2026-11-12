@@ -118,13 +118,63 @@ def endpoint(address):
     return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
 
 
+def render_proxy_config(listen, upstream, tls_cert, tls_key, runtime_dir, *,
+                        service, server_config, http_config=""):
+    """Wrap service-specific directives in the shared TLS streaming proxy."""
+    runtime_dir = Path(runtime_dir).resolve()
+    return f'''worker_processes 2;
+daemon off;
+pid {quote(runtime_dir / 'nginx.pid')};
+# Access logs stay disabled; the supervisor redacts tokens from error diagnostics.
+error_log stderr warn;
+events {{ worker_connections 1024; }}
+http {{
+    access_log off;
+    client_body_temp_path {quote(runtime_dir / 'body')};
+    proxy_temp_path {quote(runtime_dir / 'proxy')};
+    fastcgi_temp_path {quote(runtime_dir / 'fastcgi')};
+    uwsgi_temp_path {quote(runtime_dir / 'uwsgi')};
+    scgi_temp_path {quote(runtime_dir / 'scgi')};
+    map $http_upgrade ${service}_upgrade_connection {{ default upgrade; "" ""; }}
+{http_config}    upstream {service}_backend {{
+        server {endpoint(upstream)};
+        keepalive 32;
+        keepalive_requests 1000;
+        keepalive_timeout 4s;
+    }}
+    server {{
+        listen {endpoint(listen)} ssl;
+        server_name _;
+        ssl_certificate {quote(Path(tls_cert).resolve())};
+        ssl_certificate_key {quote(Path(tls_key).resolve())};
+        ssl_protocols TLSv1.2 TLSv1.3;
+        ssl_session_cache shared:{service.upper()}_TLS:10m;
+        ssl_session_timeout 1h;
+        ssl_session_tickets off;
+        keepalive_timeout 65s;
+        client_max_body_size 0;
+        client_body_buffer_size 64k;
+        client_header_timeout 15s;
+        client_body_timeout 60s;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+        proxy_next_upstream off;
+        proxy_redirect off;
+{server_config}    }}
+}}
+'''
+
+
 def render_config(listen, upstream, token, public_host, tls_cert, tls_key, runtime_dir, cookie_prefix=""):
     if not re.fullmatch(r"[A-Za-z0-9_-]+", token):
         raise ValueError("dsh token is missing or invalid")
     if cookie_prefix and not re.fullmatch(r"dsh[0-9]+_", cookie_prefix):
         raise ValueError("cookie prefix must be dsh<port>_")
     name = cookie_name(public_host)
-    runtime_dir = Path(runtime_dir).resolve()
     legacy_cookie = (
         f'        "~(?:^|;\\s*){cookie_prefix}{name}=([^;]+)" "{name}=$1";\n'
         if cookie_prefix else ""
@@ -142,21 +192,9 @@ def render_config(listen, upstream, token, public_host, tls_cert, tls_key, runti
 
     # No HTTP/2 listener yet: auto-login requires an unambiguous, bodyless GET.
     # HTTP/2 may carry DATA without Content-Length, unlike the HTTP/1.1 gate below.
-    return f'''worker_processes 2;
-daemon off;
-pid {quote(runtime_dir / 'nginx.pid')};
-# Access logs stay disabled; the supervisor redacts tokens from error diagnostics.
-error_log stderr warn;
-events {{ worker_connections 1024; }}
-http {{
-    access_log off;
-    client_body_temp_path {quote(runtime_dir / 'body')};
-    proxy_temp_path {quote(runtime_dir / 'proxy')};
-    fastcgi_temp_path {quote(runtime_dir / 'fastcgi')};
-    uwsgi_temp_path {quote(runtime_dir / 'uwsgi')};
-    scgi_temp_path {quote(runtime_dir / 'scgi')};
-    map $http_upgrade $dsh_upgrade_connection {{ default upgrade; "" ""; }}
-    map $http_cookie $dsh_request_cookie {{
+    return render_proxy_config(
+        listen, upstream, tls_cert, tls_key, runtime_dir, service="dsh",
+        http_config=f'''    map $http_cookie $dsh_request_cookie {{
         default "";
         "~(?:^|;\\s*){name}=([^;]+)" "{name}=$1";
 {legacy_cookie}    }}
@@ -191,35 +229,8 @@ http {{
         default 0;
         "~^\\./:{name}=" 1;
     }}
-    upstream dsh_backend {{
-        server {endpoint(upstream)};
-        keepalive 32;
-        keepalive_requests 1000;
-        keepalive_timeout 4s;
-    }}
-    server {{
-        listen {endpoint(listen)} ssl;
-        server_name _;
-        ssl_certificate {quote(Path(tls_cert).resolve())};
-        ssl_certificate_key {quote(Path(tls_key).resolve())};
-        ssl_protocols TLSv1.2 TLSv1.3;
-        ssl_session_cache shared:DSH_TLS:10m;
-        ssl_session_timeout 1h;
-        ssl_session_tickets off;
-        keepalive_timeout 65s;
-        client_max_body_size 0;
-        client_body_buffer_size 64k;
-        client_header_timeout 15s;
-        client_body_timeout 60s;
-        proxy_http_version 1.1;
-        proxy_buffering off;
-        proxy_request_buffering off;
-        proxy_connect_timeout 5s;
-        proxy_read_timeout 300s;
-        proxy_send_timeout 300s;
-        proxy_next_upstream off;
-        proxy_redirect off;
-        proxy_cookie_flags ~^dsh-auth- secure;
+''',
+        server_config=f'''        proxy_cookie_flags ~^dsh-auth- secure;
 {headers()}        recursive_error_pages on;
         set $dsh_launch_url "http://dsh_backend/?token={token}";
         set $dsh_root_url "http://dsh_backend/";
@@ -258,9 +269,8 @@ http {{
             if ($dsh_auto_login) {{ return 418; }}
             proxy_pass http://dsh_backend;
         }}
-    }}
-}}
-'''
+''',
+    )
 
 
 def main():
@@ -271,6 +281,7 @@ def main():
     parser.add_argument("--public-host", required=True)
     parser.add_argument("--cookie-prefix", default="")
     parser.add_argument("--config", required=True, type=Path)
+    parser.add_argument("--magpie-key-file", type=Path, default=None)
     parser.add_argument("--tls-cert", required=True, type=Path)
     parser.add_argument("--tls-key", required=True, type=Path)
     args = parser.parse_args()
@@ -288,12 +299,21 @@ def main():
         runtime.mkdir(mode=0o700, exist_ok=True)
         runtime.chmod(0o700)
         config = runtime / "nginx.conf"
-        launch_token = read_token(args.config)
-        config.write_text(render_config(
-            (args.listen_host, args.listen_port), (args.upstream_host, args.upstream_port),
-            launch_token, args.public_host, args.tls_cert, args.tls_key, runtime,
-            args.cookie_prefix,
-        ))
+        if args.magpie_key_file is not None:
+            from magpie_nginx import read_key, render_config as render_magpie_config
+            launch_token = read_key(args.magpie_key_file)
+            rendered = render_magpie_config(
+                (args.listen_host, args.listen_port), (args.upstream_host, args.upstream_port),
+                launch_token, args.public_host, args.tls_cert, args.tls_key, runtime,
+            )
+        else:
+            launch_token = read_token(args.config)
+            rendered = render_config(
+                (args.listen_host, args.listen_port), (args.upstream_host, args.upstream_port),
+                launch_token, args.public_host, args.tls_cert, args.tls_key, runtime,
+                args.cookie_prefix,
+            )
+        config.write_text(rendered)
         config.chmod(0o600)
 
         def diagnostic(line):

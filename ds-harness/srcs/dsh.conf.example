@@ -3,6 +3,15 @@
 # 访问地址为 https://<server_ip>:<port>/，例如 https://10.30.0.25:25228/。
 port=25228
 server_ip=10.30.0.25
+# Magpie HTTPS 入口：直接打开 https://<host_ip>:<magpie_port>/，无需填写 token。
+# host_ip 未配置时使用 server_ip；容器内会自动选择可绑定 IP。
+host_ip=10.30.0.25
+magpie_port=25226
+# 可选：多网卡时明确指定 Magpie HTTPS 入口的本机监听地址。
+# magpie_listen_host=172.17.0.7
+# Magpie 内部 Web 回环端口；密钥由启动器生成，HTTPS 代理自动认证。
+# 三个端口必须不同，范围均为 1–65535。
+magpie_web_port=3430
 # listen_host 未填时优先使用可本机绑定的 server_ip，否则选择唯一可用本机 IP。
 # 多网卡或检测失败时必须显式指定；显式地址无法绑定会在启动前报错。
 # listen_host=127.0.0.1

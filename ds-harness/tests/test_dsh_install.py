@@ -141,7 +141,7 @@ class InstallPlanTests(unittest.TestCase):
     def test_install_creates_config_without_certificates(self):
         result = self.install('10.30.0.25\n25228\n')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.config.read_text(), "server_ip='10.30.0.25'\nport=25228\ndsh_token=''\n")
+        self.assertEqual(self.config.read_text(), "server_ip='10.30.0.25'\nport=25228\nhost_ip='10.30.0.25'\nmagpie_port=25226\nmagpie_web_port=3430\ndsh_token=''\n")
         self.assertEqual(self.config.stat().st_mode & 0o777, 0o600)
         self.assertFalse(list(self.root.rglob('*.pem')))
         self.assertFalse(list(self.root.rglob('*.crt')))
@@ -149,7 +149,7 @@ class InstallPlanTests(unittest.TestCase):
     def test_first_input_accepts_surrounding_whitespace_and_crlf(self):
         result = self.install(' \t10.30.0.25 \t\r\n \t12345 \t\r\n')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.config.read_text(), "server_ip='10.30.0.25'\nport=12345\ndsh_token=''\n")
+        self.assertEqual(self.config.read_text(), "server_ip='10.30.0.25'\nport=12345\nhost_ip='10.30.0.25'\nmagpie_port=25226\nmagpie_web_port=3430\ndsh_token=''\n")
         self.assertNotIn('格式无效', result.stderr)
         self.assertNotIn('端口必须', result.stderr)
 
@@ -167,12 +167,14 @@ class InstallPlanTests(unittest.TestCase):
         self.assertEqual(result.stderr.count('端口必须'), 3)
 
     def test_existing_config_is_preserved_without_input(self):
-        original = "server_ip=127.0.0.1\nport=12345\ndsh_token='keep'\n"
-        self.config.write_text(original)
-        result = self.install()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.config.read_text(), original)
-        self.assertNotIn('请输入', result.stderr)
+        for web_setting in ('', 'magpie_web_port=4343\n'):
+            with self.subTest(web_setting=web_setting):
+                original = "server_ip=127.0.0.1\nport=12345\n" + web_setting + "dsh_token='keep'\n"
+                self.config.write_text(original)
+                result = self.install()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(self.config.read_text(), original)
+                self.assertNotIn('请输入', result.stderr)
 
     def test_legacy_config_is_copied_without_overwrite_or_input(self):
         legacy = self.project / 'dsh.conf'

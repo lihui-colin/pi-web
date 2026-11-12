@@ -27,8 +27,12 @@ process_option() {
     local pid="$1" option="$2" index
     local -a arguments
     mapfile -d '' -t arguments <"/proc/$pid/cmdline" || return 1
-    for ((index=0; index<${#arguments[@]}-1; index++)); do
-        if [[ "${arguments[index]}" == "$option" ]]; then
+    for ((index=0; index<${#arguments[@]}; index++)); do
+        if [[ "${arguments[index]}" == "$option="* ]]; then
+            printf '%s\n' "${arguments[index]#*=}"
+            return 0
+        fi
+        if [[ "${arguments[index]}" == "$option" ]] && (( index + 1 < ${#arguments[@]} )); then
             printf '%s\n' "${arguments[index+1]}"
             return 0
         fi
@@ -129,14 +133,22 @@ start() {
     # Share the direct supervisor's local binary and version checks before launch.
     process_state check-nginx dsh-web || return 1
     [[ -f "$config_file" ]] || { fail '请先运行 dsh_install.sh 创建 data/dsh.conf，或复制示例配置到该位置。'; return 1; }
-    local listen_host=''
+    local listen_host='' host_ip='' magpie_port=25226 magpie_web_port=3430 magpie_listen_host=''
     source "$config_file"
     # Keep state beside the launcher even when a DSH session inherits old roots.
     export DSH_HOME="$script_dir/data/.dsh"
     export DSH_AGENTS_HOME="$script_dir/data/.agents"
-    [[ "${port:-}" =~ ^[0-9]{1,5}$ ]] || { fail 'port 必须是 1–65535 之间的整数。'; return 1; }
-    port=$((10#$port))
-    (( port >= 1 && port <= 65535 )) || { fail 'port 必须是 1–65535 之间的整数。'; return 1; }
+    local field value
+    for field in port magpie_web_port magpie_port; do
+        value="${!field:-}"
+        [[ "$value" =~ ^[0-9]{1,5}$ ]] && (( 10#$value >= 1 && 10#$value <= 65535 )) || {
+            fail "$field 必须是 1–65535 之间的整数。"; return 1;
+        }
+        printf -v "$field" '%d' "$((10#$value))"
+    done
+    (( magpie_web_port != port )) || { fail 'magpie_web_port 不能与 DSH 的 port 相同。'; return 1; }
+    (( magpie_port != port && magpie_port != magpie_web_port )) || { fail 'magpie_port 不能与 DSH port 或 magpie_web_port 相同。'; return 1; }
+    local magpie_web_addr="127.0.0.1:${magpie_web_port}"
     [[ -n "${server_ip:-}" ]] || { fail 'server_ip 不能为空。'; return 1; }
     local command_name upstream_port='' pid status
     local public_host="$server_ip"
@@ -149,6 +161,12 @@ start() {
     tls_dir="${address_selection#*$'\n'}"
     tls_cert="$tls_dir/fullchain.pem"
     tls_key="$tls_dir/privkey.pem"
+    host_ip="${host_ip:-$server_ip}"
+    local magpie_selection magpie_tls_dir magpie_public_host="$host_ip"
+    magpie_selection="$(process_state config magpie-serve "$host_ip" "$script_dir/data/tls" "$magpie_listen_host")" || return 1
+    magpie_listen_host="${magpie_selection%%$'\n'*}"
+    magpie_tls_dir="${magpie_selection#*$'\n'}"
+    [[ "$host_ip" != *:* ]] || magpie_public_host="[$host_ip]"
     for command_name in node magpie dsh; do
         command -v "$command_name" >/dev/null || { fail "找不到 $command_name 命令。"; return 1; }
     done
@@ -156,14 +174,40 @@ start() {
     # expanded and IPv4-mapped IPv6). Keep server_ip intact for TLS lookup above,
     # and append the explicit port ourselves so :80 and :443 retain exact scope.
     public_host="$(node -p 'new URL(`http://${process.argv[1]}`).hostname' -- "$public_host")" || return 1
+    magpie_public_host="$(node -p 'new URL(`http://${process.argv[1]}`).hostname' -- "$magpie_public_host")" || return 1
+    local magpie_public_url="https://${magpie_public_host}:${magpie_port}/"
     local public_url="https://${public_host}:${port}/" cookie_prefix="dsh${port}_"
     prepare_runtime || return 1
     # Reject ambiguous live legacy state before starting or changing any service.
-    for command_name in magpie-serve dsh-web dsh-token-proxy; do
+    for command_name in magpie-serve magpie-web-proxy dsh-web dsh-token-proxy; do
         if service_pid "$command_name" >/dev/null; then :; else
             [[ "$?" == 1 ]] || return 1
         fi
     done
+    # A live gateway cannot acquire a Web listener without restarting. Preserve
+    # active model requests and reject drift before starting any other service.
+    if pid="$(service_pid magpie-serve)"; then
+        if [[ "$(process_option "$pid" --web || true)" != "$magpie_web_addr" ]]; then
+            fail "运行中 Magpie 的 Web 地址与 $magpie_web_addr 不一致；请在任务完成后安排 stop/start，当前进程保持运行。"
+            return 1
+        fi
+    else
+        status=$?
+        [[ "$status" == 1 ]] || return "$status"
+    fi
+    if pid="$(service_pid magpie-web-proxy)"; then
+        if [[ "$(process_option "$pid" --listen-host || true)" != "$magpie_listen_host" ||
+              "$(process_option "$pid" --listen-port || true)" != "$magpie_port" ||
+              "$(process_option "$pid" --upstream-host || true)" != 127.0.0.1 ||
+              "$(process_option "$pid" --upstream-port || true)" != "$magpie_web_port" ||
+              "$(process_option "$pid" --public-host || true)" != "${magpie_public_host}:${magpie_port}" ]]; then
+            fail '运行中 Magpie HTTPS 入口与配置不一致；请在任务完成后安排 stop/start，当前进程保持运行。'
+            return 1
+        fi
+    else
+        status=$?
+        [[ "$status" == 1 ]] || return "$status"
+    fi
     # Reuse a running backend's actual port when starting a missing proxy.
     if pid="$(service_pid dsh-web)"; then
         upstream_port="$(process_option "$pid" --port)" || { fail '无法读取运行中 dsh 的端口。'; return 1; }
@@ -223,7 +267,17 @@ start() {
         source "$script_dir/dsh_proxy.sh"
         printf '出站代理：%s\n' "$(redact_proxy_url "${HTTPS_PROXY:-${ALL_PROXY:-}}")"
     fi
-    start_service magpie-serve magpie serve || return 1
+    local magpie_key
+    magpie_key="$(process_state magpie-key magpie-serve)" || return 1
+    MAGPIE_WEB_KEY="$magpie_key" MAGPIE_PUBLIC_URL="$magpie_public_url" \
+        start_service magpie-serve magpie serve "--web=$magpie_web_addr" || return 1
+    unset magpie_key
+    start_service magpie-web-proxy python3 "$proxy_script" \
+        --listen-host "$magpie_listen_host" --listen-port "$magpie_port" \
+        --upstream-host 127.0.0.1 --upstream-port "$magpie_web_port" \
+        --public-host "${magpie_public_host}:${magpie_port}" --config "$config_file" \
+        --magpie-key-file "$script_dir/data/.magpie-web-key" \
+        --tls-cert "$magpie_tls_dir/fullchain.pem" --tls-key "$magpie_tls_dir/privkey.pem" || return 1
     start_service dsh-web dsh web --port "$upstream_port" --host 127.0.0.1 \
         --trusted-host "${public_host}:${port}" --trusted-host "127.0.0.1:${upstream_port}" \
         --public-url "$public_url" --no-open || return 1
@@ -233,6 +287,7 @@ start() {
         --public-host "${public_host}:${port}" --cookie-prefix "$cookie_prefix" --config "$config_file" \
         --tls-cert "$tls_cert" --tls-key "$tls_key" || return 1
     printf '访问地址：%s\n' "$public_url"
+    printf 'Magpie Web：%s（自动认证，无需填写 token）\n' "$magpie_public_url"
 }
 
 stop() {
@@ -240,7 +295,7 @@ stop() {
     local -a failures=()
     prepare_runtime || return 1
     # Explicit stop attempts every component even if an earlier one fails.
-    for service in dsh-token-proxy dsh-web magpie-serve; do
+    for service in magpie-web-proxy dsh-token-proxy dsh-web magpie-serve; do
         if stop_service "$service"; then :; else
             stop_failed=1
             failures+=("$service")

@@ -102,14 +102,29 @@ bash ds-harness/dsh_cert.sh --config /path/to/dsh.conf --tls-dir /path/to/tls --
 Magpie 管理模型来源，DSH 保持项目文件和工具执行。账号/API Key 需单独配置；服务商可在 Magpie 的 **Providers → Add provider** 添加，也可以登录支持的订阅：
 
 ```bash
-magpie web --no-open
+# DSH 启动时会同步提供 Magpie Web，无需另起进程。
 magpie accounts add codex
 magpie models dsh
 magpie dsh <provider/model>
 magpie dsh effort high
 ```
 
-远程访问 Magpie 的回环管理入口时使用 SSH 端口转发，不公开带凭据的管理链接。`<provider/model>` 必须替换为模型列表中的实际标识，推理强度取值取决于模型。
+`dsh_web_run.sh start` 同时启动 Magpie 网关、内部 Web 页面与独立 Nginx HTTPS 入口，`stop` 时一并停止。访问地址在 `data/dsh.conf` 中设置：
+
+```bash
+host_ip=10.30.0.25
+magpie_port=25226
+# 内部回环 Web 端口，一般无需修改。
+magpie_web_port=3430
+```
+
+直接打开 `https://10.30.0.25:25226/` 即可使用，无需填写 token 或携带登录参数。HTTPS 入口自动注入 Magpie 的认证 Cookie，登录密钥不会下发到浏览器；此入口允许能访问该地址的客户端使用管理页面。证书复用 `data/tls/<host_ip>/fullchain.pem` 和 `privkey.pem`，客户端需信任该 CA。Magpie 原生的 `/api/` 同源检查仍保留，插件 WebSocket 和流式响应正常代理。
+
+`host_ip` 未填时使用 `server_ip`；`magpie_port` 默认 `25226`，内部 `magpie_web_port` 默认 `3430`，与 DSH `port` 三者必须不同且在 `1–65535` 范围。Magpie Web 后端只绑定 `127.0.0.1`。宿主机地址不能在容器内绑定时，HTTPS 入口自动选择唯一可用的本机 IP；多网卡可显式配置 `magpie_listen_host`。宿主机必须将该端口映射到容器。入口由 `magpie-web-proxy` 管理，不共用 DSH 的 Nginx 进程。
+
+稳定密钥自动生成在 `data/.magpie-web-key`（权限 `600`），通过 `MAGPIE_WEB_KEY` 提供给 Magpie，HTTPS 代理从同一私有文件读取。实现依据 [Magpie 原生 Web 认证](https://github.com/yetone/magpie/blob/v0.1.3257/internal/gui/web.go)，使用 Cookie 注入，不把 `?k=` 登录重定向用于每个请求。修改地址或端口后，或旧 Magpie 尚未启用 Web 时，重复 `start` 会提示安排 `stop/start`，保留当前进程和请求；请在活跃任务结束后执行维护。
+
+`<provider/model>` 必须替换为模型列表中的实际标识，推理强度取值取决于模型。
 
 `magpie dsh`、`magpie dsh model`、`magpie dsh effort` 查看当前配置；`magpie dsh effort default` 恢复原推理强度，`magpie dsh default` 取消接管并恢复此前配置。已有会话和 DS Bot 各自可能保留模型设置，切换后需分别核对。跨机器迁移账号可使用 `magpie backup` / `magpie restore` 加密备份。
 

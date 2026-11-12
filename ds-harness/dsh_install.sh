@@ -281,7 +281,7 @@ const fs = require('node:fs'), path = require('node:path');
 const [target, legacy, address, port] = process.argv.slice(2);
 fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
 const content = address
-  ? `server_ip='${address}'\nport=${Number(port)}\ndsh_token=''\n`
+  ? `server_ip='${address}'\nport=${Number(port)}\nhost_ip='${address}'\nmagpie_port=25226\nmagpie_web_port=3430\ndsh_token=''\n`
   : fs.readFileSync(legacy);
 fs.writeFileSync(target, content, { flag: 'wx', mode: 0o600 });
 console.log(`${address ? '已创建配置' : '已保留旧配置副本'}：${target}`);
