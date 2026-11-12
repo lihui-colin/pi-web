@@ -20,7 +20,7 @@ node "$ROOT/srcs/paseo-config.cjs" init "$ROOT/data"
 # 仅安装环境，不启动或停止服务；已有配置保持不变。
 bash "$ROOT/srcs/paseo_nginx_install.sh"
 mkdir -p -- "$PREFIX"
-npm install --global --prefix "$PREFIX" --cache "$ROOT/.npm-cache" --engine-strict --allow-scripts=esbuild,node-pty,msgpackr-extract '@getpaseo/cli@0.16.0-beta.1'
+npm install --global --prefix "$PREFIX" --cache "$ROOT/.npm-cache" --engine-strict --allow-scripts=esbuild,node-pty,msgpackr-extract '@getpaseo/cli@0.16.0-beta.2'
 if [[ ${PASEO_UPSTREAM_ONLY:-0} != 1 ]]; then
   node "$ROOT/srcs/patches/service/patch-web-ui.cjs"
   node "$ROOT/srcs/patches/service/patch-workspace-git-startup.cjs"

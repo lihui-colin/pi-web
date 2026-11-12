@@ -41,6 +41,44 @@ test('readiness patch is idempotent and rejects unknown source structures', () =
   assert.equal(Buffer.from(patched.match(/: "([^"]+)"/)[1], 'base64').toString(), patchSource(original));
 });
 
+test('installed paseo-dsh 0.2.17 assets and bridge are canonical, idempotent and reject drift (read only)', t => {
+  const fs = require('node:fs'), path = require('node:path');
+  const plugins = path.resolve(__dirname, '../data/.paseo/plugins/dsh-paseo');
+  if (!fs.existsSync(plugins)) return t.skip('paseo-dsh plugin not installed');
+  const roots = fs.readdirSync(plugins).map(version => path.join(plugins, version, 'node_modules/paseo-dsh'))
+    .filter(root => fs.existsSync(path.join(root, 'package.json')));
+  if (!roots.length) return t.skip('paseo-dsh package not installed');
+  const before = "if (method === 'initialize') await ctx.get('loader')?.await();";
+  const after = "if (method === 'initialize' || method === 'paseo/catalog') await ctx.get('loader')?.await();";
+  const home = process.env.DSH_HOME ?? path.resolve(__dirname, '../../ds-harness/data/.dsh');
+  for (const root of roots) {
+    assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version, '0.2.17');
+    const assets = fs.readFileSync(path.join(root, 'server/bridge-assets.ts'), 'utf8');
+    const entry = fs.readFileSync(path.join(root, 'index.server.ts'), 'utf8');
+    const embedded = [...assets.matchAll(/("lib\/index\.js":\s*")([A-Za-z0-9+/=]+)(")/g)];
+    assert.equal(embedded.length, 1);
+    const bridge = Buffer.from(embedded[0][2], 'base64').toString('utf8');
+    const upstream = bridge.replace(after, before);
+    assert.ok(upstream.includes(before));
+    const canonical = patchSource(upstream);
+    assert.equal(patchSource(canonical), canonical);
+    assert.equal(canonical, upstream.replace(before, after));
+    const canonicalAssets = patchAssets(assets);
+    assert.equal(patchAssets(canonicalAssets), canonicalAssets);
+    assert.equal(Buffer.from(canonicalAssets.match(/"lib\/index\.js":\s*"([A-Za-z0-9+/=]+)"/)[1], 'base64').toString(), canonical);
+    assert.throws(() => patchSource(upstream.replace(before, "if (method === 'initialize') await unknown();")), /Unsupported/);
+    assert.throws(() => patchAssets(assets.replace(embedded[0][2], Buffer.from('unknown bridge').toString('base64'))), /Unsupported/);
+    assert.throws(() => patchAssets(assets + embedded[0][0]), /exactly one/);
+    assert.equal(patchHome(patchHome(entry, home), home), patchHome(entry, home));
+    assert.throws(() => patchHome(entry.replace('export default function contribute', 'export default function unknown'), home), /Unsupported/);
+    const file = path.join(home, 'profiles', process.env.DSH_PASEO_PROFILE ?? 'paseo', 'node_modules/dsh-paseo-bridge/lib/index.js');
+    if (fs.existsSync(file)) {
+      const actual = fs.readFileSync(file, 'utf8');
+      assert.equal(patchSource(actual), canonical, 'provisioned bridge matches embedded bridge');
+    }
+  }
+});
+
 test('CLI defaults to repository DSH home regardless of cwd and honors explicit override', t => {
   const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
   const { spawnSync } = require('node:child_process');

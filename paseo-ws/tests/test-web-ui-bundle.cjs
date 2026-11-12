@@ -5,11 +5,15 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const crypto = require('node:crypto');
+const zlib = require('node:zlib');
 const baseline = require('../srcs/patches/service/patch-web-ui.baseline.json');
 const { serverRoot } = require('../srcs/patches/patch-utils.cjs');
 
 test('Web patch rebuilds from upstream, removes retired features and stays idempotent', t => {
-  if (!fs.existsSync(path.join(serverRoot, 'package.json')) || JSON.parse(fs.readFileSync(path.join(serverRoot, 'package.json'))).version !== baseline.version) return t.skip(`Paseo ${baseline.version} bundle not installed`);
+  const installed = fs.existsSync(path.join(serverRoot, 'package.json')) && JSON.parse(fs.readFileSync(path.join(serverRoot, 'package.json'))).version === baseline.version;
+  if (process.env.PASEO_RUNTIME_PREFIX) assert.ok(installed, `Explicit PASEO_RUNTIME_PREFIX must contain Paseo ${baseline.version}: ${serverRoot}`);
+  if (!installed) return t.skip(`Paseo ${baseline.version} bundle not installed`);
   const source = fs.readFileSync(path.join(serverRoot, 'dist/server/web-ui', baseline.webEntry), 'utf8');
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'paseo-web-patch-'));
   t.after(() => {
@@ -32,16 +36,20 @@ test('Web patch rebuilds from upstream, removes retired features and stays idemp
   assert.notEqual(html, originalHtml);
   const output = path.join(web, html.match(/src="([^"]+)"/)[1]);
   const bundle = fs.readFileSync(output, 'utf8');
+  assert.equal(path.basename(output), `index-${crypto.createHash('sha256').update(bundle).digest('hex').slice(0, 32)}.js`);
+  assert.equal(zlib.brotliDecompressSync(fs.readFileSync(output + '.br')).toString(), bundle);
+  assert.equal(zlib.gunzipSync(fs.readFileSync(output + '.gz')).toString(), bundle);
   for (const retired of ['__paseoPickServerDirectory', '__paseoMountTerminalClipboard', '__paseoGetBulkDiffTransport']) assert.equal(bundle.includes(retired), false);
   assert.ok(bundle.includes('timeoutMs:20000'));
   assert.ok(bundle.includes('connectTimeoutMs:s.timeoutMs??20000'));
   assert.ok(bundle.includes('__paseoMobileSidebarSwipeCleanup'));
   const moduleContaining = (text, marker) => {
     const at = text.indexOf(marker);
-    assert.ok(at > 0);
+    assert.ok(at > 0, `Missing upstream module marker: ${marker}`);
+    assert.equal(at, text.lastIndexOf(marker), `Ambiguous upstream module marker: ${marker}`);
     return text.slice(text.lastIndexOf('\n__d(', at), text.indexOf('\n__d(', at));
   };
-  for (const marker of ['e.useOpenAgentListGesture=function', '_e.MobilePanelOverlay=function', 'observeDiff(e){return this.diffStreams.observe(e)}', '"Duplicate diff entry"', 'canBrowse:o&&(0,C.getIsElectronRuntime)()&&fe===t.serverId', 're=!A&&ie&&(N||L.isNative||U)']) {
+  for (const marker of ['e.useOpenAgentListGesture=function', '_e.MobilePanelOverlay=function', 'observeDiff(e){return this.diffStreams.observe(e)}', '"Duplicate diff entry"', 'canBrowse:o&&(0,C.getIsElectronRuntime)()&&fe===t.serverId', 'Object.defineProperty(_e,"UserMessage",']) {
     assert.equal(moduleContaining(bundle, marker), moduleContaining(source, marker), 'upstream gestures, diff, project picker and message actions remain unchanged');
   }
   const handler = bundle.match(/oe=\(0,n\.useCallback\)\((n=>\{typeof window\.paseoDesktop\?\.menu\?\.showContextMenu==="function"&&\(n\.preventDefault\(\),te\(\)\)\}),\[te\]\)/)?.[1];
@@ -57,4 +65,20 @@ test('Web patch rebuilds from upstream, removes retired features and stays idemp
   assert.equal(fs.readFileSync(path.join(web, 'index.html'), 'utf8'), html);
   assert.equal(fs.readFileSync(output, 'utf8'), bundle);
   assert.equal(fs.readFileSync(path.join(web, baseline.webEntry), 'utf8'), source);
+  const published = fs.readdirSync(path.dirname(output)).sort();
+  for (const changed of [source + '\nasync bootstrapInitialConnectionHint(', source.replace('connection:n,timeoutMs:fe', 'connection:n,timeoutMs:unknown')]) {
+    fs.writeFileSync(path.join(web, baseline.webEntry), changed);
+    const rejected = run();
+    assert.notEqual(rejected.status, 0, 'unknown or duplicate bootstrap must fail closed');
+    assert.match(rejected.stderr, /structure changed/);
+    assert.equal(fs.readFileSync(path.join(web, 'index.html'), 'utf8'), html);
+    assert.deepEqual(fs.readdirSync(path.dirname(output)).sort(), published);
+  }
+  fs.writeFileSync(path.join(web, baseline.webEntry), source);
+  fs.writeFileSync(path.join(web, 'index.html'), html + html);
+  const duplicateEntry = run();
+  assert.notEqual(duplicateEntry.status, 0);
+  assert.match(duplicateEntry.stderr, /unique Paseo entry asset/);
+  assert.equal(fs.readFileSync(path.join(web, 'index.html'), 'utf8'), html + html);
+  assert.deepEqual(fs.readdirSync(path.dirname(output)).sort(), published);
 });

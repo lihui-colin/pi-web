@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 // Publish local Git status before waiting for remote forge/PR status.
+// Still needed in 0.16.0-beta.2 (23bae61535542a45ade7196a7b3c152705f16de3):
+// scheduleInitialWorkspaceRefresh still includes Forge in the first refresh.
 const fs = require('node:fs');
 const path = require('node:path');
 const { serverRoot, checkCompatibility, replaceOnce } = require('../patch-utils.cjs');

@@ -8,7 +8,9 @@ const { patchHoverCards } = require('../srcs/patches/service/patch-web-ui.cjs');
 test('upstream hover cards ignore touch and pen, preserve mouse and keyboard, and close on press', t => {
   const { serverRoot } = require('../srcs/patches/patch-utils.cjs');
   const baseline = require('../srcs/patches/service/patch-web-ui.baseline.json');
-  if (!fs.existsSync(path.join(serverRoot, 'package.json')) || JSON.parse(fs.readFileSync(path.join(serverRoot, 'package.json'))).version !== baseline.version) return t.skip(`Paseo ${baseline.version} bundle not installed`);
+  const installed = fs.existsSync(path.join(serverRoot, 'package.json')) && JSON.parse(fs.readFileSync(path.join(serverRoot, 'package.json'))).version === baseline.version;
+  if (process.env.PASEO_RUNTIME_PREFIX) assert.ok(installed, `Explicit PASEO_RUNTIME_PREFIX must contain Paseo ${baseline.version}: ${serverRoot}`);
+  if (!installed) return t.skip(`Paseo ${baseline.version} bundle not installed`);
   const web = path.join(serverRoot, 'dist/server/web-ui');
   const original = fs.readFileSync(path.join(web, baseline.webEntry), 'utf8');
   const patched = patchHoverCards(original);
@@ -51,4 +53,8 @@ test('upstream hover cards ignore touch and pen, preserve mouse and keyboard, an
   assert.equal(closes, 3, 'touch and pen dismiss lingering hover cards');
   assert.equal(patched.slice(0, start), original.slice(0, start));
   assert.throws(() => patchHoverCards(original.replace('onPointerLeave:s.scheduleClose', 'onPointerLeave:changed')), /structure changed/);
+  assert.throws(() => patchHoverCards(original + module), /structure changed/, 'duplicate modules fail closed');
+  const before = 'onPointerEnter:s.openNow,onPointerLeave:s.scheduleClose';
+  const after = 'onPointerEnter:e=>{"mouse"===e.pointerType&&s.openNow()},onPointerLeave:s.scheduleClose';
+  assert.throws(() => patchHoverCards(original.replace(before, before + ',' + after)), /structure changed/, 'mixed old and new handlers fail closed');
 });

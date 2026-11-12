@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Paseo 0.16.0-beta.1 Web UX compatibility patch.
+// Paseo 0.16.0-beta.2 Web UX compatibility patch.
 // Publish new content-addressed assets; retain originals for rollback.
 const fs = require('node:fs');
 const path = require('node:path');
@@ -31,14 +31,17 @@ function main() {
   const root = path.join(serverRoot, 'dist/server/web-ui');
   const indexPath = path.join(root, 'index.html');
   const html = fs.readFileSync(indexPath, 'utf8');
-  const match = html.match(/src="(\/_expo\/static\/js\/web\/index-[a-f0-9]+\.js)"/);
-  if (!match) throw new Error('Cannot find Paseo entry asset; review upstream build.');
+  const entries = [...html.matchAll(/src="(\/_expo\/static\/js\/web\/index-[a-f0-9]+\.js)"/g)];
+  if (entries.length !== 1) throw new Error('Cannot find unique Paseo entry asset; review upstream build.');
+  const match = entries[0];
   // Rebuild from the official asset so removed patches disappear on republish.
   let patched = fs.readFileSync(path.join(root, baseline.webEntry), 'utf8');
   function replaceOnce(before, after) { patched = replaceText(patched, before, after); }
   const start = patched.indexOf('async bootstrapInitialConnectionHint(');
   const end = patched.indexOf('}reconcileServerId(', start);
-  if (start < 0 || end < 0) throw new Error('Upstream bootstrap structure changed; review patch.');
+  const nextModule = patched.indexOf('\n__d(', start);
+  if (start < 0 || end < 0 || start !== patched.lastIndexOf('async bootstrapInitialConnectionHint(') ||
+      (nextModule >= 0 && end >= nextModule)) throw new Error('Upstream bootstrap structure changed; review patch.');
   const method = patched.slice(start, end);
   if (!method.includes('timeoutMs:20000') && !patched.includes('fe=2500,Ce="__PASEO_INITIAL_DAEMON_CONNECTION__"')) {
     throw new Error('Upstream initial timeout changed; review patch.');

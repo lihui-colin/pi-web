@@ -63,7 +63,7 @@ test('installer creates both configurations and preserves custom configuration o
   });
   let result = run('10.30.0.25\n25027\n');
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(fs.readFileSync(path.join(root, 'npm-args'), 'utf8').trim().split('\n').at(-1), '@getpaseo/cli@0.16.0-beta.1');
+  assert.equal(fs.readFileSync(path.join(root, 'npm-args'), 'utf8').trim().split('\n').at(-1), '@getpaseo/cli@0.16.0-beta.2');
   const accessFile = path.join(root, 'data/paseo.conf');
   assert.deepEqual(JSON.parse(fs.readFileSync(accessFile)), {ip: '10.30.0.25', port: 25027, networkProxy: ''});
   const file = path.join(root, 'data/.paseo/config.json');
