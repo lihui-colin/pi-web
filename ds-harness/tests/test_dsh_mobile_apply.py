@@ -104,20 +104,22 @@ for (const [matches, enabled] of [[false, false], [false, true], [true, false]])
 class CurrentMobileTests(unittest.TestCase):
     run_cli = MobilePatchTests.run_cli
     mobile_version = '3.3.0'
+    focus_guard = ''
+    patched_guard = ''
 
     def setUp(self):
         MobilePatchTests.setUp(self)
         (self.mobile / 'package.json').write_text(json.dumps({'name': 'dsh-web-mobile', 'version': self.mobile_version}))
         (self.host / 'dsh-client-ui-conversation/package.json').write_text(json.dumps({
             'name': '@deepseek-ai/dsh-client-ui-conversation', 'version': '0.2.2-rc.1'}))
-        self.plugin.write_text(p.COMPOSER_FILE_BUTTON)
+        self.plugin.write_text(p.COMPOSER_FILE_BUTTON + self.focus_guard)
         self.conversation.write_text(bot.COMPOSER_ANCHOR + '\n' + p.VIEW_LIMIT_OLD)
 
     def test_removes_file_button_and_migrates_host_atomically(self):
         self.conversation.write_text(bot.patch_composer(self.conversation.read_text()))
         self.assertNotEqual(self.run_cli('--check').returncode, 0)
         p.publish(p.plan_changes(self.mobile, self.host), self.mobile / 'backups')
-        self.assertEqual(self.plugin.read_text(), p.COMPOSER_FILE_BUTTON_REMOVED)
+        self.assertEqual(self.plugin.read_text(), p.COMPOSER_FILE_BUTTON_REMOVED + self.patched_guard)
         self.assertEqual(self.conversation.read_text(), bot.COMPOSER_ANCHOR + '\n' + p.VIEW_LIMIT_NEW)
         self.assertEqual(self.run_cli('--check').returncode, 0)
         self.assertTrue(all(old == new for _, old, new in p.plan_changes(self.mobile, self.host)))
@@ -127,7 +129,7 @@ class CurrentMobileTests(unittest.TestCase):
         self.assertNotEqual(self.run_cli('--check').returncode, 0)
         p.publish(p.plan_changes(self.mobile, self.host), self.mobile / 'backups')
         self.assertEqual(self.conversation.read_text(), bot.COMPOSER_ANCHOR + '\n' + p.VIEW_LIMIT_NEW)
-        self.assertEqual(self.plugin.read_text(), p.COMPOSER_FILE_BUTTON_REMOVED)
+        self.assertEqual(self.plugin.read_text(), p.COMPOSER_FILE_BUTTON_REMOVED + self.patched_guard)
         self.assertEqual(self.run_cli('--check').returncode, 0)
 
     def test_unknown_source_and_mixed_version_do_not_write(self):
@@ -142,9 +144,19 @@ class CurrentMobileTests(unittest.TestCase):
             self.assertEqual([self.plugin.read_bytes(), self.conversation.read_bytes()], originals)
 
     def test_absent_button_is_skipped(self):
-        self.plugin.write_text('plugin without the extra button')
+        self.plugin.write_text('plugin without the extra button' + self.focus_guard)
         changes = p.plan_changes(self.mobile, self.host)
-        self.assertEqual(changes[0][1], changes[0][2])
+        self.assertEqual(changes[0][2], 'plugin without the extra button' + self.patched_guard)
+
+    def test_terminal_focus_guard_version_scope(self):
+        source = p.COMPOSER_FILE_BUTTON_REMOVED + '\nunknown focus guard'
+        self.plugin.write_text(source)
+        if self.mobile_version == '3.3.5':
+            with self.assertRaises(ValueError):
+                p.plan_changes(self.mobile, self.host)
+        else:
+            changes = p.plan_changes(self.mobile, self.host)
+            self.assertEqual(changes[0][2], source)
 
     def test_unknown_or_mixed_button_registration_is_rejected(self):
         for source in ('unknown mobile-nav-file-upload registration', p.COMPOSER_FILE_BUTTON * 2,
@@ -161,6 +173,48 @@ class Mobile331Tests(CurrentMobileTests):
 
 class Mobile335Tests(CurrentMobileTests):
     mobile_version = '3.3.5'
+    focus_guard = (Path(__file__).parent / 'fixtures/mobile_focus_guard_3_3_5.cjs').read_text()
+    patched_guard = p.patch_terminal_focus_guard(focus_guard)
+
+    def test_existing_button_removal_migrates_guard_without_writing_during_plan(self):
+        self.plugin.write_text(p.COMPOSER_FILE_BUTTON_REMOVED + self.focus_guard)
+        originals = [self.plugin.read_bytes(), self.conversation.read_bytes()]
+        changes = p.plan_changes(self.mobile, self.host)
+        self.assertEqual([self.plugin.read_bytes(), self.conversation.read_bytes()], originals)
+        self.assertEqual(changes[0][2], p.COMPOSER_FILE_BUTTON_REMOVED + self.patched_guard)
+        p.publish(changes, self.mobile / 'backups')
+        self.assertTrue(all(old == new for _, old, new in p.plan_changes(self.mobile, self.host)))
+        self.assertEqual(p.patch_terminal_focus_guard(self.patched_guard), self.patched_guard)
+
+    def test_partial_guard_is_rejected_before_any_publication(self):
+        replacements = p.TERMINAL_FOCUS_REPLACEMENTS
+        for mask in range(1, (1 << len(replacements)) - 1):
+            with self.subTest(mask=mask):
+                partial = self.focus_guard
+                for index, (old, new) in enumerate(replacements):
+                    if mask & (1 << index):
+                        partial = partial.replace(old, new, 1)
+                self.plugin.write_text(p.COMPOSER_FILE_BUTTON + partial)
+                originals = [self.plugin.read_bytes(), self.conversation.read_bytes()]
+                result = self.run_cli()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('Incomplete mobile terminal focus patch', result.stderr)
+                self.assertEqual([self.plugin.read_bytes(), self.conversation.read_bytes()], originals)
+
+    def test_unknown_duplicate_and_mixed_guard_are_rejected(self):
+        sources = (
+            self.focus_guard.replace('sinceGestureMs > GESTURE_WINDOW_MS', 'sinceGestureMs >= GESTURE_WINDOW_MS'),
+            self.patched_guard.replace("element.closest('.xterm')", "element.closest('.unknown')"),
+            self.focus_guard + self.focus_guard,
+            self.patched_guard + self.patched_guard,
+            self.patched_guard + p.TERMINAL_FOCUS_HELPER,
+            self.focus_guard + self.patched_guard,
+            'function dshSameInputSurface() { /* unknown helper revision */ }',
+        )
+        for source in sources:
+            with self.subTest(source=source[:90]):
+                with self.assertRaises(ValueError):
+                    p.patch_terminal_focus_guard(source)
 
 
 if __name__ == '__main__':

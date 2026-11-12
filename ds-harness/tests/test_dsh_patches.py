@@ -44,8 +44,9 @@ class PatchSetTests(unittest.TestCase):
 
         bot_source = (Path(__file__).parent / 'fixtures/ds_bot_031.js').read_text()
         package(self.profile / 'node_modules/ds-bot', 'ds-bot', '0.3.1', {'client.js': bot_source})
-        package(self.profile / 'node_modules/dsh-web-mobile', 'dsh-web-mobile', '3.3.1',
-                {'lib/client.js': mobile.COMPOSER_FILE_BUTTON})
+        focus_guard = (Path(__file__).parent / 'fixtures/mobile_focus_guard_3_3_5.cjs').read_text()
+        package(self.profile / 'node_modules/dsh-web-mobile', 'dsh-web-mobile', '3.3.5',
+                {'lib/client.js': mobile.COMPOSER_FILE_BUTTON + focus_guard})
         package(self.profile / 'node_modules/@xbzbing/dsh-git-panel', '@xbzbing/dsh-git-panel',
                 '1.11.2', {'lib/client.js': git.PILL})
         conversation = '\n'.join([
@@ -103,6 +104,9 @@ class PatchSetTests(unittest.TestCase):
         common.publish(changes, self.backups)
         conversation = (self.host / 'dsh-client-ui-conversation/lib/client.js').read_text()
         self.assertIn(mobile.VIEW_LIMIT_NEW, conversation)
+        mobile_source = (self.profile / 'node_modules/dsh-web-mobile/lib/client.js').read_text()
+        self.assertIn(mobile.TERMINAL_FOCUS_HELPER, mobile_source)
+        self.assertNotIn(mobile.TERMINAL_BLUR_OLD, mobile_source)
         self.assertIn(metadata.REGISTER_TRIGGER, conversation)
         self.assertNotIn(bot.COMPOSER_REPLACEMENT, conversation)
         self.assertNotIn('conversation.chat.before', conversation)

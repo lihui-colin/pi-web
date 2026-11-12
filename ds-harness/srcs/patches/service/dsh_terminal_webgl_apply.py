@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Enable an optional vendored WebGL renderer for the reviewed rc.1 terminal."""
+import hashlib
 from pathlib import Path
 
 if not __package__:
@@ -15,6 +16,8 @@ ADDON = vendor_addon(VENDOR, VENDOR_SHA256, 'WebglAddon',
                      error='Unexpected WebGL addon; review the pinned upstream bundle')
 RUNTIME = (HERE / 'dsh_terminal_webgl.js').read_text().strip() + '\n'
 HELPER = ADDON + RUNTIME
+HELPER_PREFIX = 'const DshTerminalWebglAddon = (() => {\n'
+LEGACY_HELPER_SHA256 = 'b09c0e9c8f752031c84db3c0da3ae51e3e86524448094991b4da79dd5aedc3f1'
 ANCHOR = '\t\texports.TerminalBody = TerminalBody;'
 OPEN = '\t\t\t\txterm.open(node);'
 CLEANUP = '\t\t\t\t\txterm.dispose();'
@@ -26,6 +29,16 @@ REPLACEMENTS = (
 
 
 def patch(text):
+    if 'DshTerminalWebglAddon' in text:
+        if text.count(HELPER_PREFIX) != 1 or text.count(ANCHOR) != 1:
+            raise ValueError('Unknown or mixed WebGL helper placement')
+        start = text.index(HELPER_PREFIX)
+        end = text.find(ANCHOR, start)
+        previous = text[start:end] if end >= 0 else ''
+        if previous != HELPER:
+            if hashlib.sha256(previous.encode()).hexdigest() != LEGACY_HELPER_SHA256:
+                raise ValueError('Unknown WebGL helper revision; inspect upstream')
+            text = text[:start] + HELPER + text[end:]
     installed = [new in text for _, new in REPLACEMENTS]
     if any(installed) and not all(installed):
         raise ValueError('Incomplete WebGL renderer patch; inspect before applying')

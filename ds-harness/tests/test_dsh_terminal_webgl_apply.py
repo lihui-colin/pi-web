@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import unittest
 from patches.service import dsh_terminal_webgl_apply as p
+from patches.plugins.mobile import dsh_mobile_apply as mobile
 from patches.service.dsh_terminal_assets import refresh_terminal_entry, MARKER
 
 
@@ -21,6 +22,17 @@ class WebglPatchTests(unittest.TestCase):
         for invalid in (original + original, fixed + fixed, original + fixed,
                         fixed.replace("mark('webgl');", "mark('unknown');"),
                         original.replace(p.OPEN, p.REPLACEMENTS[1][1])):
+            with self.assertRaises(ValueError):
+                p.patch(invalid)
+
+    def test_exact_deployed_helper_upgrade(self):
+        old_runtime = (Path(__file__).parent / 'fixtures/dsh_terminal_webgl_v1.js').read_text().strip() + '\n'
+        fixed = p.patch(self.original())
+        deployed = fixed.replace(p.HELPER, p.ADDON + old_runtime, 1)
+        self.assertNotEqual(deployed, fixed)
+        self.assertEqual(p.patch(deployed), fixed)
+        for invalid in (deployed.replace("mark('webgl');", "mark('unknown');"),
+                        deployed + p.HELPER, deployed.replace(p.OPEN, '')):
             with self.assertRaises(ValueError):
                 p.patch(invalid)
 
@@ -61,6 +73,14 @@ class WebglPatchTests(unittest.TestCase):
 
     def test_renderer_lifecycle(self):
         result = subprocess.run(['node', '--test', str(Path(__file__).with_name('test_dsh_terminal_webgl.cjs'))], capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @unittest.skipUnless(os.environ.get('DSH_TEST_PLAYWRIGHT') and os.environ.get('DSH_TEST_FRONTEND'), 'Set browser module and pristine DSH_TEST_FRONTEND')
+    def test_mobile_touch_focus_with_original_plugin_guard(self):
+        source = Path(os.environ['DSH_TEST_FRONTEND']).read_text()
+        guard = (Path(__file__).parent / 'fixtures/mobile_focus_guard_3_3_5.cjs').read_text()
+        result = subprocess.run(['node', str(Path(__file__).with_name('test_dsh_terminal_touch_browser.cjs'))],
+                                input=json.dumps({'bundle': p.patch(source), 'guard': mobile.patch_terminal_focus_guard(guard)}), capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     @unittest.skipUnless(os.environ.get('DSH_TEST_PLAYWRIGHT') and os.environ.get('DSH_TEST_FRONTEND'), 'Set browser module and pristine DSH_TEST_FRONTEND')

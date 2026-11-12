@@ -2,6 +2,15 @@
 function createDshTerminalWebgl(xterm, node) {
     let disposed = false, addon, contextLoss, scheduled;
     const mark = value => node.setAttribute('data-dsh-terminal-renderer', value);
+    // The outer content padding is outside xterm's own mouse listener.
+    const focusPadding = event => {
+        if (event.target === node && event.button === 0 && !xterm.options.disableStdin) {
+            // Like xterm's mousedown handler, prevent the default blur after focus.
+            event.preventDefault();
+            xterm.focus();
+        }
+    };
+    node.addEventListener('mousedown', focusPadding);
     const release = () => {
         const previous = addon;
         addon = undefined;
@@ -22,6 +31,9 @@ function createDshTerminalWebgl(xterm, node) {
             addon = new DshTerminalWebglAddon();
             contextLoss = addon.onContextLoss(fallback);
             xterm.loadAddon(addon);
+            // Match the upstream DOM rows: painting must not intercept the tap.
+            // xterm's screen owns both mouse handling and the hidden input.
+            for (const canvas of xterm.element.querySelectorAll('.xterm-screen > canvas')) canvas.style.pointerEvents = 'none';
             if (!disposed && addon !== undefined) mark('webgl');
         } catch (_) {
             fallback();
@@ -35,6 +47,7 @@ function createDshTerminalWebgl(xterm, node) {
         dispose() {
             if (disposed) return;
             disposed = true;
+            node.removeEventListener('mousedown', focusPadding);
             if (scheduled !== undefined && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(scheduled);
             scheduled = undefined;
             release();

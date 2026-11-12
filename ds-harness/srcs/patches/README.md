@@ -14,7 +14,7 @@ DS Bot 输入框的蓝色语音对话按钮与发送按钮共用最右侧位置�
 | 入口 | 当前版本的处理 |
 | --- | --- |
 | `plugins/ds_bot/ds_bot_apply.py` | 适配 Bot 0.3.1 的本地输入框、消息操作栏与桌面宽度布局；移除旧手机工具栏覆盖，沿用上游历史、提示词和触屏命中区；撤销宿主旧历史及 Enter 注入。 |
-| `plugins/mobile/dsh_mobile_apply.py` | 移除 mobile 3.3.0 / 3.3.1 / 3.3.5 额外注册的 `ComposerFileButton`；撤销旧宿主 Enter 注入，保留仅在 mobile 布局生效的页签实际宽度测量。 |
+| `plugins/mobile/dsh_mobile_apply.py` | 移除 mobile 3.3.0 / 3.3.1 / 3.3.5 额外注册的 `ComposerFileButton`；撤销旧宿主 Enter 注入，保留移动布局的页签实际宽度测量；3.3.5 焦点守卫识别同一 xterm 输入面。 |
 | `plugins/git_panel/dsh_git_panel_apply.py` | 按已核验版本省略额外输入按钮，保留 Git 视图、侧栏和菜单。 |
 | `service/dsh_context_details_apply.py` | 在原生上下文详情内增加会话作用域插槽，供本地额度面板扩展。 |
 | `service/dsh_composer_metadata_apply.py` | 普通 DSH 输入框工具栏内增加会话信息 info 按钮，按需展开原生会话元信息；DS Bot 队列保持可见。 |
@@ -139,6 +139,14 @@ python3 -B -m unittest discover -s ds-harness/tests -p 'test_dsh_terminal_batchi
 全插件隔离对比：同一套 23 bundles，240fps 目标持续输出 8 秒，旧路径记录 1592 次 xterm write 和 1592 次 render store 更新，新路径记录 1815 次 write、0 次 render store 更新、仅 2 次 metadata 通知，并确认 WebGL 启用；两次均收齐 20 个字符，最终进程退出、无浏览器异常。此项证明路径切换与减少 React 通知，不证明用户实际环境的卡顿已消失。数据和浏览器探针位于不入库的 `data/terminal-paseo-*`。
 
 运行前端已单独原子发布三个文件，备份 `log/patch-backups/ds-bot-1kgs3cvu/`。不改写候选源码的正常加载复测确认 entry/lazy 新 revision、direct sink 与 WebGL 已生效，23 bundles（含 Composer Plus）保持启用。240fps 目标的 8 秒复测得到最后第 1895 帧、20 字符完整、0 次 render store 更新和正常退出；一次输入到 PTY 延迟尖峰约 134ms，中位数约 1.82ms，不能宣称没有抖动。相同输出目标加 40ms 解析确认延迟时，最后第 1894 帧仍完整，完整回显在打完后约 211ms；真实 Codex CLI 0.167.0 配本地模拟 provider 的 Working 测试在约 1.274s 完整显示 20 字符（含预设约 1s 打字间隔），此时仍为 Working。248 项 Python 回归通过、5 项可选跳过；额外真实 WebGL 浏览器检查通过。宿主合并完成 11 项真实变换 class 行为测试与生产 index 语法校验后，经用户明确选择现在重启，已备份至 `log/patch-backups/ds-bot-jmogwlw0/` 并发布；独立维护进程先停再启动 DSH，确认新 Host PID 和 HTTPS 200。重启后正常加载的全插件复测（240fps 目标、8 秒、40ms 人为解析确认延迟）收到第 1897 末帧和全部 20 字符，打完后约 90ms 完整回显；按键到 PTY 中位约 2.23ms、最大约 5.76ms，render store 更新为 0，输入待确认最多 1，Composer Plus 的 5 个样式标记仍加载。真实 Codex CLI Working 复测约 1.215s 完整显示 20 字符（含预设约 1s 打字间隔），输入待确认最多 2；两项均无浏览器异常。四个独立入口 `--check` 均通过。实际浏览器仍需重新加载并重新打开终端验收，不把受控结果表述为任意负载下零延迟。
+
+## 手机终端内容区点击聚焦
+
+已核对官方 rc.1 DOM 渲染和 mobile 3.3.5 的 `focus-gesture-guard`：原生文字层不参与命中，点击落在包含隐藏 textarea 的 `.xterm-screen`；WebGL 新增的绘制及链接 canvas 会成为触点目标，与 textarea 不互为祖先后代，导致手机插件拒绝 xterm 的原生 focus。WebGL 初始化后将其直属 canvas 设为 `pointer-events: none`，恢复原生命中与鼠标/链接处理。终端外侧留白仅在主键点击自身且可写时委托 xterm 聚焦，销毁时移除监听。
+
+手机浏览器还可能将极窄留白的触点归入 `.xterm-viewport`。仅为 mobile 3.3.5 的既有守卫补充“隐藏 xterm textarea 与触点属于同一 `.xterm`”的输入面判断，并在聚焦及点击失焦两条路径共用；保留文本类型、1200ms 手势窗口、跨终端隔离与只读控制。没有伪造触摸或输入事件，也不自动抢焦点。WebGL 升级只接受完整摘要匹配的上一版 helper，未知和残缺版本继续拒绝。
+
+`test_dsh_terminal_touch_browser.cjs` 使用真实打包 xterm、WebGL 和未修改的 mobile 3.3.5 守卫夹具作原始/修复对照，覆盖文字、中下部空白、外侧留白、输入、滚动、顶部按钮、只读及销毁；同时检查跨终端、无手势和过期手势仍拒绝聚焦。全插件触屏检查使用正常终端并仅关闭探针自己创建的终端。浏览器自动化验证 DOM 聚焦和输入，不将其等同于真机软键盘可见性。
 
 ## rc.1 侧栏 navigator 的显式布局状态
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Remove mobile's extra composer file button and apply the host tab-width fix.
+"""Remove mobile's extra file button, fit host tabs and recognize xterm input surfaces.
 
 The old plugin UI transforms only apply to the separate 3.2.1 / alpha.2 pair.
 """
@@ -7,7 +7,7 @@ from pathlib import Path
 if not __package__:
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-from patches.common import COMPONENT_ROOT, host_directory, publish, read_change, replace_once, verify_package, patch_cli
+from patches.common import COMPONENT_ROOT, apply_replacements, host_directory, publish, read_change, replace_once, verify_package, patch_cli
 from patches.plugins.ds_bot.ds_bot_apply import retire_composer
 
 # Preserve native pin/menu behavior; fit tabs using their rendered widths.
@@ -127,6 +127,52 @@ def patch_composer_file_button(text):
     return replace_once(text, COMPOSER_FILE_BUTTON, COMPOSER_FILE_BUTTON_REMOVED)
 
 
+# Reviewed 3.3.5's global focus guard treats the hidden xterm textarea and
+# its sibling viewport/canvas as different inputs. Keep its gesture gate, but
+# recognize the terminal screen as the textarea's input surface in both paths.
+TERMINAL_FOCUS_OLD = '''function shouldBlockProgrammaticFocus(element, gestureTarget, sinceGestureMs) {
+    if (!isTextEntry(element))
+        return false;
+    if (gestureTarget === null)
+        return true;
+    if (sinceGestureMs > GESTURE_WINDOW_MS)
+        return true;
+    // 手势落在输入面上、或落在这颗输入框包着的子节点里 → 放行。
+    return !(element === gestureTarget || element.contains(gestureTarget) || gestureTarget.contains(element));
+}'''
+TERMINAL_FOCUS_NEW = TERMINAL_FOCUS_OLD.replace(
+    '!(element === gestureTarget || element.contains(gestureTarget) || gestureTarget.contains(element))',
+    '!dshSameInputSurface(element, gestureTarget)')
+TERMINAL_BLUR_OLD = '''            if (active === target || active.contains(target) || target.contains(active))
+                return;'''
+TERMINAL_BLUR_NEW = '''            if (dshSameInputSurface(active, target))
+                return;'''
+TERMINAL_FOCUS_ANCHOR = 'function installFocusGestureGuard(ctx) {'
+TERMINAL_FOCUS_HELPER = '''function dshSameInputSurface(element, target) {
+    if (element === target || element.contains(target) || target.contains(element))
+        return true;
+    if (!element.matches('textarea.xterm-helper-textarea'))
+        return false;
+    const terminal = element.closest('.xterm');
+    return terminal !== null && target.closest('.xterm') === terminal;
+}
+'''
+TERMINAL_FOCUS_REPLACEMENTS = (
+    (TERMINAL_FOCUS_OLD, TERMINAL_FOCUS_NEW),
+    (TERMINAL_BLUR_OLD, TERMINAL_BLUR_NEW),
+    (TERMINAL_FOCUS_ANCHOR, TERMINAL_FOCUS_HELPER + TERMINAL_FOCUS_ANCHOR),
+)
+
+
+def patch_terminal_focus_guard(text):
+    installed = [new in text for _, new in TERMINAL_FOCUS_REPLACEMENTS]
+    if any(installed) and not all(installed):
+        raise ValueError('Incomplete mobile terminal focus patch; inspect before applying')
+    if 'dshSameInputSurface' in text and (not all(installed) or text.count('dshSameInputSurface') != 3):
+        raise ValueError('Unknown mobile terminal focus helper; inspect before applying')
+    return apply_replacements(text, TERMINAL_FOCUS_REPLACEMENTS)
+
+
 def plan_changes(package=None, host=None, *, read_text=Path.read_text):
     package = Path(package) if package is not None else COMPONENT_ROOT / 'data/.dsh/profiles/web/node_modules/dsh-web-mobile'
     host = host_directory(host)
@@ -153,7 +199,10 @@ def plan_changes(package=None, host=None, *, read_text=Path.read_text):
         # Omit the extra file button; retire the conflicting host Enter hook
         # and retain measured tab fitting, which is still absent upstream.
         fixed = patch_view_tabs(retire_composer(original))
-        return [(plugin_path, plugin, patch_composer_file_button(plugin)), (path, original, fixed)]
+        fixed_plugin = patch_composer_file_button(plugin)
+        if mobile_version == '3.3.5':
+            fixed_plugin = patch_terminal_focus_guard(fixed_plugin)
+        return [(plugin_path, plugin, fixed_plugin), (path, original, fixed)]
     # Legacy 3.2.1 only: it predates those upstream fixes.
     # Load old UI transforms only for the reviewed legacy version pair.
     from patches.plugins.mobile.dsh_mobile_legacy import patch
