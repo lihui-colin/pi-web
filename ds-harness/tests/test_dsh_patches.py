@@ -135,7 +135,8 @@ class PatchSetTests(unittest.TestCase):
             self.assertIn(scoped, sidebar_css)
         terminal_source = (self.host / 'dsh-client-ui-sidebar-terminal/lib/client.terminal.js').read_text()
         self.assertNotEqual(terminal_source, self.sources[self.host / 'dsh-client-ui-sidebar-terminal/lib/client.terminal.js'])
-        self.assertIn(webgl.HELPER, terminal_source)
+        for marker in webgl.MARKERS:
+            self.assertNotIn(marker, terminal_source)
         self.assertNotIn(rendering.HELPER, terminal_source)  # Keep legacy clipboard/tools semantics.
         self.assertIn('DSH terminal lazy chunk SHA256:', (self.host / 'dsh-client-ui-sidebar-terminal/lib/client.js').read_text())
         self.assertIn(host_batching.HELPER, (self.host / 'dsh-api-terminal-controller/lib/index.js').read_text())

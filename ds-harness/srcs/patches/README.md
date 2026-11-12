@@ -24,7 +24,7 @@ DS Bot 输入框的蓝色语音对话按钮与发送按钮共用最右侧位置�
 | `service/dsh_terminal_batching_apply.py` | rc.1 输入确认独立消费，输出按解析进度合并；保留顺序、快照及尺寸状态屏障，限制渲染队列；提供 opt-in 独占渲染 sink，未注册时保留原 store 路径。alpha.2 跳过。 |
 | `service/dsh_terminal_host_batching_apply.py` | 宿主 headless 解析后合并短时间输出，空闲首块立即发送；快照、状态、ACK 与退出前排空。alpha.2 跳过。 |
 | `service/dsh_terminal_render_apply.py` | 原版官方侧栏接入独占直写 sink，绕过逐帧 React 更新；完整旧终端增强经验证后保留其渲染路径。同步更新懒加载资源版本。alpha.2 跳过。 |
-| `service/dsh_terminal_webgl_apply.py` | 为官方侧栏加载固定版本 WebGL addon，不可用或 context 丢失时回退 DOM；原版和完整旧增强均可组合。同步资源版本。alpha.2 跳过。 |
+| `service/dsh_terminal_webgl_apply.py` | 保留安装器兼容入口，仅撤销已识别的 WebGL helper 及创建/销毁注入，恢复上游 xterm 默认 DOM renderer；不再安装 addon，并同步资源版本。alpha.2 跳过。 |
 
 历史组合 **Bot 0.2.7 + DSH rc.1**、**Bot 0.2.6 + DSH alpha.2**、**mobile 3.2.1 + DSH alpha.2** 仍走独立旧版路径；不会把旧版 UI 补丁套到新包上。终端也支持原有 alpha.2，但前端与控制器必须同版。
 
@@ -44,7 +44,7 @@ DS Bot 输入框的蓝色语音对话按钮与发送按钮共用最右侧位置�
 
 ## 安装与检查
 
-主安装器 `dsh_install.sh` 调用插件安装器 `dsh_plugins_install.sh`；后者在下载插件前通过 `dsh_patches_install.sh --validate-tools` 检查本地补丁模块及导入时读取的辅助文件；主安装器也会在安装依赖前执行该检查。插件安装成功后，通过 `dsh_patches_install.sh` 按 DS Bot、mobile、Git panel、terminal、文件资源、会话信息、上下文详情、侧栏 CSS、浏览器终端输出合并、宿主输出合并、官方终端直写、可选 WebGL 的顺序规划全部补丁。首次安装、`--upgrade`、插件已安装而跳过下载时都会执行。依赖版本与来源由 `srcs/install-versions.json` 固定，mobile 使用已核验提交，Codex 插件与 DSH 同版。补丁失败会使安装返回非零退出码；`--dry-run` 只打印计划，不修改文件。
+主安装器 `dsh_install.sh` 调用插件安装器 `dsh_plugins_install.sh`；后者在下载插件前通过 `dsh_patches_install.sh --validate-tools` 检查本地补丁模块及导入时读取的辅助文件；主安装器也会在安装依赖前执行该检查。插件安装成功后，通过 `dsh_patches_install.sh` 按 DS Bot、mobile、Git panel、terminal、文件资源、会话信息、上下文详情、侧栏 CSS、浏览器终端输出合并、宿主输出合并、官方终端直写、旧 WebGL 清理的顺序规划全部补丁。首次安装、`--upgrade`、插件已安装而跳过下载时都会执行。依赖版本与来源由 `srcs/install-versions.json` 固定，mobile 使用已核验提交，Codex 插件与 DSH 同版。补丁失败会使安装返回非零退出码；`--dry-run` 只打印计划，不修改文件。
 
 ```sh
 bash ds-harness/dsh_install.sh
@@ -94,7 +94,7 @@ Paseo 终端增强：参考 [Paseo 运行时](https://github.com/getpaseo/paseo/
 
 查询应答：宿主收集 headless xterm 自带的设备属性、状态、光标位置、模式和 DCS 状态查询响应，并在输出解析后直接写回 PTY；Kitty 状态查询也由宿主应答。无需浏览器连接，浏览器同时吞掉这些查询，避免多个视图重复回包；应答有 64 KiB 上限，进程退出或关闭后不再写入。OSC 颜色查询继续由现有浏览器主题实现处理，不使用固定颜色替代 DSH 实际配色。
 
-搜索和链接：终端右上角 `Find` 或 `Ctrl+Shift+F` / `Cmd+F` 打开搜索，支持上下匹配、`Enter` / `Shift+Enter` 和 `Escape` 关闭；只读视图也可搜索。HTTP(S) 文本链接通过 `Ctrl` / `Cmd` + 点击打开。复用官方 `@xterm/addon-search@0.16.0` 和 `@xterm/addon-web-links@0.12.0`，文件、MIT 许可和校验摘要保存在 [vendor](vendor/README.md)，安装无需联网。
+搜索和链接：终端右上角 `Find` 或 `Ctrl+Shift+F` / `Cmd+F` 打开搜索，支持上下匹配、`Enter` / `Shift+Enter` 和 `Escape` 关闭；只读视图也可搜索。HTTP(S) 文本链接通过 `Ctrl` / `Cmd` + 点击打开。复用官方 `@xterm/addon-search@0.16.0` 和 `@xterm/addon-web-links@0.12.0`，文件、MIT 许可和校验摘要保存在 [vendor](service/vendor/README.md)，安装无需联网。
 
 上游复核：对照 DSH 提交 `8bd073392eef6f54e921a093b95076248eb08cbb` 的[终端前端](https://github.com/deepseek-ai/deepseek-harness/blob/8bd073392eef6f54e921a093b95076248eb08cbb/packages/client/ui-sidebar-terminal/src/client/terminal.tsx)和[宿主控制器](https://github.com/deepseek-ai/deepseek-harness/blob/8bd073392eef6f54e921a093b95076248eb08cbb/packages/api/terminal-controller/src/terminal.ts)，上述生命周期监听、键盘协商、宿主应答转发和搜索/链接插件尚未接入。继续复用上游已有的快照、输入控制、流控和主题实现。补丁可从原版或上一版终端补丁升级；未知或不完整的辅助代码拒绝覆盖。前后端需要配套部署，应在安排好的服务维护窗口应用并重启后刷新页面，避免新版前端抑制查询而旧宿主尚未应答。
 
@@ -122,33 +122,31 @@ python3 -B -m unittest discover -s ds-harness/tests -p 'test_dsh_terminal_batchi
 
 补丁先核验包名、版本及原 `consume()` 的 SHA-256；完整已安装状态幂等，未知和混合代码拒绝。已知 alpha.2 跳过。以上上游依据来自本机 rc.1 发布代码，未核查远端更高版本。部署后强制刷新浏览器生效，无需重启服务；统一入口仍会应用保留的其他补丁，排查时应使用此独立入口。
 
-## rc.1 参考 Paseo 的终端直写、宿主合并与 WebGL
+## rc.1 参考 Paseo 的终端直写、宿主合并与渲染器回退
 
 核查依据为本机运行的 Paseo 0.14.0：`terminal-output-coalescer.js` 的 leading/trailing 输出合并，以及前端 `TerminalPane` 的 ref 直写和 `TerminalEmulatorRuntime` 的普通输出/快照屏障。DSH rc.1 发布代码已有 headless、完整快照、控制权和输入 ACK，但官方 `TerminalScreen` 逐帧经 React `state.render` 调用 xterm，未接入独占直写 sink、WebGL 或宿主短窗口合并。本次复用其既有终端协议，不更换为 Paseo 的恢复协议；未核查更高版本 DSH/Paseo 的远端源码。
 
 `dsh_terminal_batching_apply.py` 在保留有界单批解析门闩的同时，为每个 `TerminalView` 增加独占 `bindRenderer()` / `offerFrame()`。`dsh_terminal_render_apply.py` 让官方侧栏直接向 xterm 提交输出，只有真实解析 callback 才确认 revision；普通 output 不再发布 React render 状态。state 的远端尺寸及 stdin 权限先同步进入 renderer，再发布 metadata。快照先用空 write 等待旧解析完成，检查当前 revision/lifetime 后 reset、resize 和写屏；隐藏时仍解析，字体、visibility 和 ResizeObserver 的 fit 在快照期间延期，并检查最新写权限，避免过期 React 状态覆盖只读/退出尺寸。新 renderer 挂载（包括已退出终端）从 Host 获取 fresh baseline，不把最后一条 output 当作完整屏幕。
 
-官方侧栏与 Better Sidebar 底部终端共用控制器，但各有自己的 xterm。未注册 sink 的底部终端保持原 `state.render`/ACK 行为；本次直写和 WebGL 仅适配官方侧栏。统一安装时，原版和旧增强继续保留 `dsh_terminal_apply.py` 的重绘、剪贴板、查询和工具功能；已经完整采用 direct 的 UI 经精确校验后跳过旧增强，避免在升级时叠加成混合模式。direct patch 对经过旧 patcher 完整验证的增强 UI 继续跳过，避免绕过它的 callback。WebGL 可与该旧路径组合。本次排查中的运行部署使用原版 UI 加新直写路径，不会重新启用被撤销的旧增强。
+官方侧栏与 Better Sidebar 底部终端共用控制器，但各有自己的 xterm。未注册 sink 的底部终端保持原 `state.render`/ACK 行为；直写仅适配官方侧栏。统一安装时，原版和旧增强继续保留 `dsh_terminal_apply.py` 的重绘、剪贴板、查询和工具功能；已经完整采用 direct 的 UI 经精确校验后跳过旧增强，避免在升级时叠加成混合模式。direct patch 对经过旧 patcher 完整验证的增强 UI 继续跳过，避免绕过它的 callback。取消 WebGL 不改变这些输出路径、终端工具或 mobile 焦点守卫。
 
 `dsh_terminal_host_batching_apply.py` 在 headless 真实解析后同步接收输出，不等待定时器，允许 provider 继续读取。空闲首块立即广播，burst 用 5ms trailing timer；pending 最多 64KiB/128 chunks，超过时立即排空，单个大块保留原帧行为。只有 flush 才递增 output sequence；attach 基线、状态/尺寸、输入成功及拒绝 ACK、终态和关闭都是排空屏障。timer 在 operations 队列内执行，避免越过尚未解析的内容；发布故障仍传播，但 provider 已终止后必须清理 followers、uplink、timer 和 screen，重复 close 不重复释放资源。
 
-可选渲染器使用官方 MIT `@xterm/addon-webgl@0.19.0`，与已核对的 DSH xterm 6.0.0 配套。下载时验证 npm SHA-512，安装时验证 [vendor](vendor/README.md) 中的 bundle SHA-256，不使用运行时 CDN。初始化失败及 context loss 回退默认 DOM renderer；输出 ACK 不依赖动画帧，也不伪造本地回显。真实 xterm 浏览器回归覆盖 GPU、不可用 GPU、context loss、键盘输入、中文/ANSI 输出和销毁。
+按用户要求取消 WebGL，恢复上游 xterm 默认 DOM renderer。`dsh_terminal_webgl_apply.py` 保留模块名供现有安装器调用，仅清理已识别的 WebGL helper 及创建/销毁注入，不再加载或安装 `@xterm/addon-webgl`。随 helper 注入的 canvas 命中透传及外侧留白聚焦处理一并撤销；运行 helper、vendored WebGL addon 和对应测试产物退出维护。搜索和链接 addon 继续保留。
 
 `dsh_terminal_assets.py` 同时规划 `lib/client.terminal.js` 和 `lib/client.js`。DSH `client-hmr` 只监视主入口，终端 lazy chunk 的 URL 绑定主入口 revision，响应为一年 immutable；仅改 lazy 文件不足以可靠刷新缓存。入口在末尾 sourcemap 之前记录最终 lazy 内容 SHA-256，确保主入口发布新 revision；多组 UI 变换组合后使用最终内容的摘要。两文件经共享 publisher 一起校验、备份和替换，重复执行不改时间戳。
 
-这些新入口均仅适配 rc.1，已知 alpha.2 明确跳过，未知/混合/残缺代码拒绝。浏览器消费补丁仅接受已核验的原 consume、当前完整版本或固定 SHA-256 的上一版 helper；生产入口无需读取测试夹具。单独部署新路径应依次规划 `dsh_terminal_batching_apply.py`、`dsh_terminal_host_batching_apply.py`、`dsh_terminal_render_apply.py`、`dsh_terminal_webgl_apply.py`，用共同事务发布四个目标文件，避免调用仍包含旧终端增强的完整安装器。宿主变更需在确认活跃会话和 PTY 任务后安排先停再启动；纯客户端检查与隔离浏览器验证不需要重启。
+这些新入口均仅适配 rc.1，已知 alpha.2 明确跳过，未知/混合/残缺代码拒绝。浏览器消费补丁仅接受已核验的原 consume、当前完整版本或固定 SHA-256 的上一版 helper；生产入口无需读取测试夹具。单独部署直写路径可依次规划 `dsh_terminal_batching_apply.py`、`dsh_terminal_host_batching_apply.py`、`dsh_terminal_render_apply.py` 和兼容清理入口 `dsh_terminal_webgl_apply.py`，用共同事务发布需要修改的目标文件。最后一步撤销旧 WebGL，不安装新渲染器；统一安装器仍会保留适用的旧终端增强。宿主变更需在确认活跃会话和 PTY 任务后安排先停再启动；纯客户端检查与隔离浏览器验证不需要重启。
 
-全插件隔离对比：同一套 23 bundles，240fps 目标持续输出 8 秒，旧路径记录 1592 次 xterm write 和 1592 次 render store 更新，新路径记录 1815 次 write、0 次 render store 更新、仅 2 次 metadata 通知，并确认 WebGL 启用；两次均收齐 20 个字符，最终进程退出、无浏览器异常。此项证明路径切换与减少 React 通知，不证明用户实际环境的卡顿已消失。数据和浏览器探针位于不入库的 `data/terminal-paseo-*`。
-
-运行前端已单独原子发布三个文件，备份 `log/patch-backups/ds-bot-1kgs3cvu/`。不改写候选源码的正常加载复测确认 entry/lazy 新 revision、direct sink 与 WebGL 已生效，23 bundles（含 Composer Plus）保持启用。240fps 目标的 8 秒复测得到最后第 1895 帧、20 字符完整、0 次 render store 更新和正常退出；一次输入到 PTY 延迟尖峰约 134ms，中位数约 1.82ms，不能宣称没有抖动。相同输出目标加 40ms 解析确认延迟时，最后第 1894 帧仍完整，完整回显在打完后约 211ms；真实 Codex CLI 0.167.0 配本地模拟 provider 的 Working 测试在约 1.274s 完整显示 20 字符（含预设约 1s 打字间隔），此时仍为 Working。248 项 Python 回归通过、5 项可选跳过；额外真实 WebGL 浏览器检查通过。宿主合并完成 11 项真实变换 class 行为测试与生产 index 语法校验后，经用户明确选择现在重启，已备份至 `log/patch-backups/ds-bot-jmogwlw0/` 并发布；独立维护进程先停再启动 DSH，确认新 Host PID 和 HTTPS 200。重启后正常加载的全插件复测（240fps 目标、8 秒、40ms 人为解析确认延迟）收到第 1897 末帧和全部 20 字符，打完后约 90ms 完整回显；按键到 PTY 中位约 2.23ms、最大约 5.76ms，render store 更新为 0，输入待确认最多 1，Composer Plus 的 5 个样式标记仍加载。真实 Codex CLI Working 复测约 1.215s 完整显示 20 字符（含预设约 1s 打字间隔），输入待确认最多 2；两项均无浏览器异常。四个独立入口 `--check` 均通过。实际浏览器仍需重新加载并重新打开终端验收，不把受控结果表述为任意负载下零延迟。
+历史性能验证曾在启用 WebGL 的配置下比较直写路径，确认持续输出时减少 React render store 通知、保持输入和末帧完整。这些结果仅描述当时的受控配置，不代表当前 DOM renderer 的性能，也不作为手机软键盘已修复的证据；旧部署的 GPU 启用状态不再适用。
 
 ## 手机终端内容区点击聚焦
 
-已核对官方 rc.1 DOM 渲染和 mobile 3.3.5 的 `focus-gesture-guard`：原生文字层不参与命中，点击落在包含隐藏 textarea 的 `.xterm-screen`；WebGL 新增的绘制及链接 canvas 会成为触点目标，与 textarea 不互为祖先后代，导致手机插件拒绝 xterm 的原生 focus。WebGL 初始化后将其直属 canvas 设为 `pointer-events: none`，恢复原生命中与鼠标/链接处理。终端外侧留白仅在主键点击自身且可写时委托 xterm 聚焦，销毁时移除监听。
+此前排查发现 WebGL canvas 会改变触点目标，影响 mobile 3.3.5 的 `focus-gesture-guard`。现已取消 WebGL，并随其 helper 撤销 canvas 的 `pointer-events` 改写和外侧留白聚焦监听，恢复上游 DOM 渲染和原生终端点击行为。
 
-手机浏览器还可能将极窄留白的触点归入 `.xterm-viewport`。仅为 mobile 3.3.5 的既有守卫补充“隐藏 xterm textarea 与触点属于同一 `.xterm`”的输入面判断，并在聚焦及点击失焦两条路径共用；保留文本类型、1200ms 手势窗口、跨终端隔离与只读控制。没有伪造触摸或输入事件，也不自动抢焦点。WebGL 升级只接受完整摘要匹配的上一版 helper，未知和残缺版本继续拒绝。
+mobile 3.3.5 的同一 xterm 输入面判断继续保留：隐藏 textarea 与触点属于同一 `.xterm` 时，聚焦及点击失焦两条路径共用此判断；文本类型、1200ms 手势窗口、跨终端隔离与只读控制保持不变。没有伪造触摸或输入事件，也不自动抢焦点。
 
-`test_dsh_terminal_touch_browser.cjs` 使用真实打包 xterm、WebGL 和未修改的 mobile 3.3.5 守卫夹具作原始/修复对照，覆盖文字、中下部空白、外侧留白、输入、滚动、顶部按钮、只读及销毁；同时检查跨终端、无手势和过期手势仍拒绝聚焦。全插件触屏检查使用正常终端并仅关闭探针自己创建的终端。浏览器自动化验证 DOM 聚焦和输入，不将其等同于真机软键盘可见性。
+历史浏览器自动化只验证 DOM 聚焦和输入。无头浏览器不能确证手机操作系统软键盘是否弹出；取消 WebGL 后仍需在真机重新加载页面、打开终端并点击输入区验收。
 
 ## rc.1 侧栏 navigator 的显式布局状态
 
@@ -212,7 +210,7 @@ python3 -B -m unittest discover -s ds-harness/tests -p 'test_dsh_composer_metada
 
 ## 执行器与核查范围
 
-`common.py` 统一独立入口的参数解析、`--check`、发布和结果输出；`reviewed_host_package` / `plan_host_patch` 共用宿主包名、版本、已知版本跳过和单文件规划，具体模块保留原版本顺序与适配范围。有序替换及完整补丁的反向撤销统一到 `apply_replacements` / `undo_replacements`，各迁移路径仍保留自己的错误诊断与额外校验。`vendor_addon` 统一三个官方 addon 的 SHA-256、sourcemap 注释剥离和 CommonJS 包装；终端主入口及 WebGL 继续使用各自固定摘要。`dsh_terminal_assets.py` 共用官方终端的双文件版本规划，Bot 通过已有 `read_change` 复用读取及文件计划。独立入口名称和参数不变，既有旧版功能与迁移保留。
+`common.py` 统一独立入口的参数解析、`--check`、发布和结果输出；`reviewed_host_package` / `plan_host_patch` 共用宿主包名、版本、已知版本跳过和单文件规划，具体模块保留原版本顺序与适配范围。有序替换及完整补丁的反向撤销统一到 `apply_replacements` / `undo_replacements`，各迁移路径仍保留自己的错误诊断与额外校验。`vendor_addon` 统一搜索和链接两个官方 addon 的 SHA-256、sourcemap 注释剥离和 CommonJS 包装；WebGL 兼容入口仅负责撤销已识别的旧注入。`dsh_terminal_assets.py` 共用官方终端的双文件版本规划，Bot 通过已有 `read_change` 复用读取及文件计划。独立入口名称和参数不变，既有旧版功能与迁移保留。
 
 精简前后比较 11 个统一规划目标、6 个终端独立/组合变换和当前运行的 4 个目标文件，生成内容 SHA-256 全部相同；另比较 Bot 的 30 组版本、迁移、幂等及拒绝案例，保留读取顺序、输出和异常。记录位于不入库的 `data/patch-simplify-*`。本次只精简 Python 补丁执行层，不修改运行中的 bundle，也无需重启服务。宿主输出合并、浏览器序号/ACK 队列和 xterm 解析屏障承担不同协议职责，继续分开维护。
 

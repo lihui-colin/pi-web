@@ -1,6 +1,8 @@
 # DSH 补丁审查
 
-审查基线：`7873e8070`。范围包括 12 个入口、`apply.py` / `common.py`、所有 JS helper、资产版本规划及三个固定版本 addon。对照本机及已缓存发布源码：DSH `0.2.2-rc.1`、xterm/headless `6.0.0`、serialize `0.14.0`、Bot `0.3.1`、mobile `3.3.5`；历史 alpha.2、Bot 0.2.6/0.2.7、mobile 3.2.1/3.3.0/3.3.1 通过对应兼容夹具核查。Git panel 当前未安装，核查了缓存的 1.13.1 发布包及 1.11.2/1.13.2 已有夹具和锚点。没有联网核查更高版本，结论不外推到未来版本。
+历史审查基线：`7873e8070`。当时范围包括 12 个入口、`apply.py` / `common.py`、所有 JS helper、资产版本规划及三个固定版本 addon。对照本机及已缓存发布源码：DSH `0.2.2-rc.1`、xterm/headless `6.0.0`、serialize `0.14.0`、Bot `0.3.1`、mobile `3.3.5`；历史 alpha.2、Bot 0.2.6/0.2.7、mobile 3.2.1/3.3.0/3.3.1 通过对应兼容夹具核查。Git panel 当前未安装，核查了缓存的 1.13.1 发布包及 1.11.2/1.13.2 已有夹具和锚点。没有联网核查更高版本，结论不外推到未来版本。
+
+当前变更：按用户要求取消 WebGL，沿用上游 xterm 默认 DOM renderer。`service/dsh_terminal_webgl_apply.py` 保留安装器兼容入口，仅撤销已识别的旧 WebGL helper 及创建/销毁注入，不再安装 addon；随附 canvas 命中改写和外侧留白聚焦处理同时移除。输出合并、直写 sink、终端工具和 mobile 同一 xterm 输入面焦点守卫继续保留。以下修复与部署数据为历史审查记录，其中 WebGL 检查不代表当前配置；手机软键盘能否弹出仍需真机验证，无头浏览器不能给出确定结论。
 
 ## 已落实的两项修复
 
@@ -64,7 +66,7 @@
 | 终端三层队列 | 宿主在 headless 解析后合帧，浏览器维护代际/序号/ACK/预算，sink 维护 xterm parse 屏障；职责不同，分别保留。 |
 | 终端两种 UI | 可共享快照屏障设计，继续保留旧增强功能；此次先修安装模式冲突，不删除旧分支。 |
 | keyboard / queries / snapshot | 复用 headless 查询解析和 serialize；serialize 仍缺鼠标编码、光标隐藏和同步输出，补充 helper 不可整体删除。 |
-| WebGL / search / links | 使用固定摘要的官方 addon，无需重写或手工压缩；WebGL 命中透传、DOM fallback 和 context-loss 清理仍必要。 |
+| renderer / search / links | 当前恢复上游默认 DOM renderer，撤销 WebGL helper 及其 canvas/留白处理；保留固定摘要的官方 search / web-links addon。WebGL 入口仅用于兼容清理。 |
 | Bot | 0.3.1 已有历史/安全 prompt/touch 操作栏，补丁已正确退役重复部分；表现偏好及历史版本迁移仍有效。 |
 | mobile | 3.3.5 已有 Enter/IME 仲裁，继续复用；xterm 隐藏输入面的兼容尚未原生覆盖。 |
 | Git panel | 可选包缺失跳过，保留 pill 移除及已核验版本锚点；无新增确定问题。 |
@@ -72,7 +74,7 @@
 | sidebar navigator | 显式父状态、多个 navigator 聚合、stale cleanup 及 specificity 保留正确；现有验证证明行为等价，未证明实际终端延迟改善。 |
 | composer disclosure | 已去掉输入树祖先 key，并明确 portal 归属及 owner 隐藏时的清理，减少无用重建和生命周期分叉。 |
 
-## 验证与生效边界
+## 历史验证与生效边界（取消 WebGL 前）
 
 修复后完整运行 264 项 Python 回归，2 项旧 UMD 浏览器测试因未提供对应依赖跳过，其余通过。运行时启用了真实 native composer 生命周期、rc.1 旧增强浏览器、WebGL/DOM fallback、触屏焦点及 headless 屏障检查；alpha.2 旧增强浏览器另行通过。结果在不入库的 `ds-harness/data/patch-review/`。
 
