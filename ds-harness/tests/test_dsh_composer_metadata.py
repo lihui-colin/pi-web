@@ -38,11 +38,22 @@ class ComposerMetadataTests(unittest.TestCase):
             self.assertNotIn(patcher.TRAILING_NEW, current)
             previous = current.replace(patcher.REGISTER_TRIGGER, '').replace(patcher.TRAILING, patcher.TRAILING_NEW)
             self.assertEqual(patcher.patch(previous), current)
-            legacy = (Path(__file__).parent / 'fixtures/composer_metadata_v1.js').read_text()
-            previous = current.replace(patcher.HELPER, legacy).replace(patcher.NEW, patcher.DOCK)
-            self.assertEqual(patcher.patch(previous), current)
-            with self.assertRaises(ValueError):
-                patcher.patch(previous.replace('const dshSessionInfoCss', 'const unknownCss'))
+            for name in ('composer_metadata_v1.js', 'composer_metadata_v2.js'):
+                legacy = (Path(__file__).parent / 'fixtures' / name).read_text()
+                previous = (current.replace(patcher.HELPER, legacy)
+                            .replace(patcher.WRAPPER, patcher.LEGACY_WRAPPER)
+                            .replace(patcher.NEW, patcher.DOCK))
+                self.assertEqual(patcher.patch(previous), current)
+                for broken in (
+                    previous.replace('const dshSessionInfoCss', 'const unknownCss'),
+                    previous.replace('}, props.sessionId);', '}, unknownKey);'),
+                    previous.replace(patcher.LEGACY_WRAPPER, patcher.WRAPPER),
+                    previous + patcher.LEGACY_WRAPPER,
+                    previous + legacy,
+                    current.replace(patcher.WRAPPER, patcher.LEGACY_WRAPPER),
+                ):
+                    with self.assertRaises(ValueError):
+                        patcher.patch(broken)
             version('0.2.3')
             with self.assertRaises(ValueError): patcher.plan_changes(root)
             version('0.2.2-alpha.2')
@@ -52,6 +63,22 @@ class ComposerMetadataTests(unittest.TestCase):
     def test_missing_and_mixed_anchors_are_rejected(self):
         for source in ('unknown', patcher.ANCHOR * 2):
             with self.assertRaises(ValueError): patcher.patch(source)
+
+    @unittest.skipUnless(all(os.environ.get(name) for name in
+        ('DSH_TEST_PLAYWRIGHT', 'DSH_TEST_FRONTEND_ASSETS')),
+        'Set browser dependencies and native frontend assets for lifecycle regression')
+    def test_native_browser_lifecycle(self):
+        from patches.service import dsh_context_details_apply as context_patcher
+        with tempfile.TemporaryDirectory() as temp:
+            config = Path(temp) / 'lifecycle.json'
+            meter = context_patcher.patch(
+                (Path(__file__).parent / 'fixtures/context_meter_rc1.js').read_text()
+                + '\n' + context_patcher.DECLARE).removesuffix('\n' + context_patcher.DECLARE_NEW)
+            config.write_text(json.dumps({'wrapper': patcher.WRAPPER, 'meter': meter}))
+            result = subprocess.run(['node', str(Path(__file__).with_name('test_dsh_composer_metadata_lifecycle.cjs')), str(config)],
+                                    capture_output=True, text=True, timeout=90)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            print(result.stdout.strip())
 
     @unittest.skipUnless(all(os.environ.get(name) for name in
         ('DSH_TEST_PLAYWRIGHT','DSH_TEST_REACT_UMD','DSH_TEST_REACT_DOM_UMD')),

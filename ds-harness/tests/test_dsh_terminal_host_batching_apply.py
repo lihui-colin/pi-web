@@ -27,6 +27,16 @@ class HostBatchingPatchTests(unittest.TestCase):
             with self.subTest(candidate=bad[:70]), self.assertRaises(ValueError):
                 p.patch(bad)
 
+    def test_only_exact_previous_helper_is_upgraded(self):
+        fixed = p.patch(FIXTURE.read_text())
+        previous = (Path(__file__).parent / 'fixtures/dsh_terminal_host_batching_v1.js').read_text()
+        installed = fixed.replace(p.HELPER, previous, 1)
+        self.assertEqual(p.patch(installed), fixed)
+        for invalid in (installed.replace('>= 65536', '>= 65535'), installed + previous,
+                        installed.replace('this.hostOutputBatcher.flush();', '', 1)):
+            with self.assertRaises(ValueError):
+                p.patch(invalid)
+
     def test_old_terminal_patch_compatible_in_both_orders_and_repeat(self):
         original = FIXTURE.read_text()
         batch_first = terminal.patch_host(p.patch(original))

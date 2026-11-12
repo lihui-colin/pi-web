@@ -15,6 +15,23 @@ class ContextDetailsTests(unittest.TestCase):
         fixed = patcher.patch(source)
         self.assertEqual(patcher.patch(fixed), fixed)
         self.assertIn('renderSlot?.("conversation.context.details"', fixed)
+        self.assertIn('"data-dsh-session-info-owner": dshSessionInfoOwner', fixed)
+        legacy = (fixed.replace(patcher.SIGNATURE_NEW, patcher.SIGNATURE_LEGACY)
+                  .replace(patcher.PANEL_NEW, patcher.PANEL)
+                  .replace(patcher.VISIBILITY_NEW, patcher.VISIBILITY)
+                  .replace(patcher.PORTAL_NEW, patcher.PORTAL))
+        self.assertEqual(patcher.patch(legacy), fixed)
+        for broken in (
+            legacy.replace(patcher.PANEL_END_NEW, patcher.PANEL_END),
+            legacy.replace(patcher.DECLARE_NEW, patcher.DECLARE),
+            legacy + patcher.SIGNATURE_LEGACY,
+            fixed.replace(patcher.PANEL_NEW, patcher.PANEL),
+            fixed + patcher.PANEL_NEW,
+            fixed.replace(patcher.VISIBILITY_NEW, patcher.VISIBILITY),
+            fixed.replace(patcher.PORTAL_NEW, patcher.PORTAL),
+        ):
+            with self.assertRaises(ValueError):
+                patcher.patch(broken)
         with self.assertRaises(ValueError):
             patcher.patch(source.replace(patcher.PANEL_END, 'unknown upstream'))
 

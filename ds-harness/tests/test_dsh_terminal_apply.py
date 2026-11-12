@@ -29,7 +29,7 @@ class TerminalPatchTests(unittest.TestCase):
         self.front = self.host / 'dsh-client-ui-sidebar-terminal/lib/client.terminal.js'
         self.model = self.host / 'dsh-api-terminal-controller/lib/client.js'
         self.backend = self.host / 'dsh-api-terminal-controller/lib/index.js'
-        self.front.write_text('\n'.join([p.SCREEN_REF, p.SETUP, p.CLEANUP, p.FONT_FIT, p.WRITE, p.VISIBLE, p.PHASE, p.RUNTIME_ANCHOR, p.CLIP_HELPER, p.CLIP_SETUP, p.CLIP_CLEANUP, p.PROPOSED]))
+        self.front.write_text((Path(__file__).parent / 'fixtures/dsh_terminal_screen_rc1.js').read_text())
         self.model.write_text('\n'.join([p.FORCE_SIGNATURE, p.FORCE_CHECK]))
         self.backend.write_text('\n'.join([p.SNAPSHOT_ANCHOR, p.SERIALIZE, p.HOST_SETUP, p.HOST_WRITE, p.HOST_DISPOSE]))
 
@@ -68,11 +68,40 @@ class TerminalPatchTests(unittest.TestCase):
         self.assertNotEqual(self.cli().returncode, 0)
         self.assertEqual([path.read_bytes() for path in (self.front, self.model, self.backend)], before)
 
+    def direct_frontend(self):
+        from patches.service import dsh_terminal_render_apply as direct
+        for directory in ('dsh-client-ui-sidebar-terminal', 'dsh-api-terminal-controller'):
+            (self.host / directory / 'package.json').write_text(json.dumps({
+                'name': '@deepseek-ai/' + directory, 'version': '0.2.2-rc.1'}))
+        return direct.patch((Path(__file__).parent / 'fixtures/dsh_terminal_screen_rc1.js').read_text())
+
+    def test_complete_direct_mode_is_preserved_with_version_guards(self):
+        self.front.write_text(self.direct_frontend())
+        before = [path.read_bytes() for path in (self.front, self.model, self.backend)]
+        self.assertEqual(p.plan_changes(self.host), [])
+        self.assertEqual(self.cli('--check').returncode, 0)
+        self.assertEqual([path.read_bytes() for path in (self.front, self.model, self.backend)], before)
+        package = self.host / 'dsh-api-terminal-controller/package.json'
+        package.write_text(json.dumps({'name': '@deepseek-ai/dsh-api-terminal-controller', 'version': '0.2.2-alpha.2'}))
+        with self.assertRaises(ValueError):
+            p.plan_changes(self.host)
+
+    def test_partial_or_mixed_direct_mode_is_not_silently_skipped(self):
+        original = self.direct_frontend()
+        for text in (original.replace('renderSink.dispose()', 'renderSink.broken()'),
+                     original + '\n// createTerminalClipboard', original + original):
+            self.front.write_text(text)
+            before = [path.read_bytes() for path in (self.front, self.model, self.backend)]
+            with self.assertRaises(ValueError):
+                p.plan_changes(self.host)
+            self.assertEqual([path.read_bytes() for path in (self.front, self.model, self.backend)], before)
+
     def test_upgrade_previous_patch_and_reject_unknown_helpers(self):
         # Preserve an actual released helper, rather than reconstructing the
         # old behavior from the new implementation.
         legacy = (Path(__file__).parent / 'fixtures/dsh_terminal_redraw_v1.js').read_text()
         front = p.patch_frontend(self.front.read_text())
+        front = p.undo_replacements(front, p.FENCE_REPLACEMENTS)
         front = p.undo_replacements(front, p.TOOLS_REPLACEMENTS)
         front = front.replace(p.FRONT_HELPERS, legacy)
         backend = p.patch_host(self.backend.read_text())
@@ -90,6 +119,47 @@ class TerminalPatchTests(unittest.TestCase):
         self.assertNotEqual(self.cli().returncode, 0)
         self.assertEqual([path.read_bytes() for path in (self.front, self.model, self.backend)], originals)
 
+    def test_complete_released_legacy_tools_and_clipboard_migrate(self):
+        fixed = p.patch_frontend(self.front.read_text())
+        old = p.undo_replacements(fixed, p.FENCE_REPLACEMENTS)
+        runtime = (Path(__file__).parent / 'fixtures/dsh_terminal_runtime_v2.js').read_text()
+        old = old.replace(p.RUNTIME, runtime)
+        self.assertEqual(p.patch_frontend(old), fixed)
+        clipboard_only = p.undo_replacements(old, p.TOOLS_REPLACEMENTS)
+        self.assertEqual(p.patch_frontend(clipboard_only), fixed)
+        redraw_only = p.undo_replacements(clipboard_only, [
+            (p.CLIP_HELPER, p.CLIP_HELPER_NEW), (p.CLIP_REF, p.CLIP_REF_NEW),
+            (p.CLIP_SETUP, p.CLIP_SETUP_NEW), (p.CLIP_CLEANUP, p.CLIP_CLEANUP_NEW),
+            (p.CLIP_CAPTURE, p.CLIP_CAPTURE_NEW), (p.CLIP_FINISH, p.CLIP_FINISH_NEW)])
+        self.assertEqual(p.patch_frontend(redraw_only), fixed)
+        self.assertEqual(p.patch_frontend(fixed), fixed)
+        for changed in (fixed.replace(p.RUNTIME, runtime, 1),
+                        p.undo_replacements(fixed, p.FENCE_REPLACEMENTS),
+                        old.replace('let ready = false;', 'let ready = true;'),
+                        old.replace('pending = undefined;', 'pending = null;', 1),
+                        old.replace('terminalTools.current?.reset();', 'terminalTools.current?.broken();'),
+                        fixed.replace('redraw.current?.resizeReadonly(state);', 'redraw.current?.unknown(state);')):
+            with self.assertRaises(ValueError):
+                p.patch_frontend(changed)
+        # Read-only sizing and frame invalidation are part of a complete migration.
+        self.assertIn('redraw.current?.resizeReadonly(state);', fixed)
+        self.assertIn('[state.render, state.phase, model]', fixed)
+        for cleanup in ('observer.disconnect();', 'input.dispose();', 'palette.dispose();'):
+            self.assertIn(cleanup, fixed)
+
+    def test_legacy_parser_fence_with_real_headless(self):
+        dsh = shutil.which('dsh')
+        if not dsh:
+            self.skipTest('DSH not installed')
+        modules = Path(dsh).resolve().parents[1] / 'node_modules'
+        frontend = p.patch_frontend(self.front.read_text())
+        start = frontend.index('\t\t\t\tlet active = true;')
+        end = frontend.index('\n\t\t\t}, [state.render, state.phase, model]);', start)
+        result = subprocess.run(['node', str(Path(__file__).with_name('test_dsh_terminal_legacy_fence.cjs'))],
+            input=json.dumps({'write': frontend[start:end], 'clipboard': p.CLIPBOARD}),
+            env={**os.environ, 'DSH_TEST_MODULES': str(modules)}, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_protocol_and_tools(self):
         dsh = shutil.which('dsh')
         if not dsh:
@@ -104,12 +174,20 @@ class TerminalPatchTests(unittest.TestCase):
     def test_installed_bundles_in_isolation(self):
         if not shutil.which('dsh'):
             self.skipTest('DSH not installed')
-        for path, old, fixed in p.plan_changes():
+        changes = p.plan_changes()
+        direct_transform = None
+        if not changes:
+            from patches.common import host_directory
+            from patches.service.dsh_terminal_render_apply import patch as direct_transform
+            path = host_directory() / 'dsh-client-ui-sidebar-terminal/lib/client.terminal.js'
+            source = path.read_text()
+            changes = [(path, source, direct_transform(source))]
+        for path, old, fixed in changes:
             isolated = self.root / (path.parent.parent.name + '-' + path.name)
             isolated.write_text(fixed)
             result = subprocess.run(['node', '--check', str(isolated)], text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
-            transform = p.patch_frontend if path.name == 'client.terminal.js' else p.patch_model if path.name == 'client.js' else p.patch_host
+            transform = direct_transform or (p.patch_frontend if path.name == 'client.terminal.js' else p.patch_model if path.name == 'client.js' else p.patch_host)
             self.assertEqual(transform(fixed), fixed)
 
     def test_host_controller_replies_without_attachment(self):
@@ -144,9 +222,12 @@ vm.runInNewContext(fs.readFileSync(0, 'utf8'), context);
 
     @unittest.skipUnless(os.environ.get('DSH_TEST_PLAYWRIGHT'), 'Set DSH_TEST_PLAYWRIGHT for the optional browser test')
     def test_real_browser(self):
-        changes = p.plan_changes()
+        source = os.environ.get('DSH_TEST_LEGACY_SOURCE')
+        changes = p.plan_changes() if source is None else []
+        if source is None and not changes:
+            self.skipTest('Installed direct mode; set DSH_TEST_LEGACY_SOURCE to a reviewed legacy bundle')
         frontend = self.root / 'client.terminal.js'
-        frontend.write_text(changes[0][2])
+        frontend.write_text(p.patch_frontend(Path(source).read_text()) if source else changes[0][2])
         result = subprocess.run(['node', str(Path(__file__).with_name('test_dsh_terminal_browser.cjs'))],
             env={**os.environ, 'DSH_TEST_FRONTEND': str(frontend)}, capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -185,6 +266,16 @@ assert.deepEqual(calls.slice(-2), [['local',99,30],['host',99,30,true]]);
 // Disposal restores the original dimensions even if the host has not acknowledged the pulse.
 redraw.dispose(); assert.deepEqual(calls.slice(-2), [['local',100,30],['host',100,30,true]]);
 assert.ok(cancelled >= 1); assert.equal(scheduled, undefined);
+// A read-only follower must also wait until its snapshot has parsed.
+const readonlyCalls = [];
+live = {visible:true, state:{phase:'connected', writable:false, info:{cols:70,rows:20}}};
+const follower = context.createTerminalRedraw({resize:(...size)=>readonlyCalls.push(size)}, {}, node, model, () => live);
+const pending = follower.prepare(); follower.resizeReadonly(live.state); assert.deepEqual(readonlyCalls, []);
+follower.parsed(pending); assert.deepEqual(readonlyCalls, [[70,20]]);
+live.state.info={cols:72,rows:21}; follower.resizeReadonly(live.state); assert.deepEqual(readonlyCalls, [[70,20],[72,21]]);
+live.state.phase='disconnected'; follower.update(); live.state.phase='connected';
+follower.resizeReadonly(live.state); assert.equal(readonlyCalls.length, 2);
+follower.dispose(); follower.parsed(pending); follower.resizeReadonly(live.state); assert.equal(readonlyCalls.length, 2);
 '''
         result = subprocess.run(['node', '-e', script, str(p.HERE / 'dsh_terminal_runtime.js')], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)

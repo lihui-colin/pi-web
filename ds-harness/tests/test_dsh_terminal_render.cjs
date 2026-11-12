@@ -61,10 +61,21 @@ test('aborted write is fenced before a fresh snapshot; stale callbacks cannot ac
 test('fit is deferred across snapshot parsing and lifetime cleanup ignores late writes',async()=>{
  const h=setup();let fits=0;h.stream.push(snap());await until(()=>h.callbacks.length);
  h.xterm.dshRenderGate.visibility(true,()=>fits++);assert.equal(fits,0);h.parse();assert.equal(fits,0);h.parse();await tick();assert.equal(fits,1);
- h.xterm.dshRenderGate.visibility(true,()=>fits++);assert.equal(fits,1); // metadata dimensions must not refit between a state barrier and output
- h.xterm.dshRenderGate.visibility(false,()=>fits++);h.xterm.dshRenderGate.visibility(true,()=>fits++);assert.equal(fits,2);
+ h.xterm.dshRenderGate.visibility(true,()=>fits++);assert.equal(fits,2); // writable/size effects refit even while visibility stays true
+ h.xterm.dshRenderGate.visibility(false,()=>fits++);h.xterm.dshRenderGate.visibility(true,()=>fits++);assert.equal(fits,3);
  h.stream.push({type:'output',sequence:1,data:'late'});await until(()=>h.callbacks.length);h.cleanup();h.parse();await h.done;
  assert.equal(h.model.pendingRender,undefined);assert.equal(h.model.renderer,undefined);
+});
+test('still-visible reconnect refits a viewport resized while input was unavailable',async()=>{
+ const h=setup();let fits=0,width=120;const fit=()=>{fits++;h.xterm.resize(width,30)};
+ h.stream.push(snap());await until(()=>h.callbacks.length);h.xterm.dshRenderGate.visibility(true,fit);
+ h.parse();h.parse();await tick();assert.equal(h.xterm.cols,120);
+ h.model.patch({writable:false});width=132;h.xterm.dshRenderGate.visibility(true,fit);assert.equal(fits,1);
+ h.controller.abort();const next=new AbortController();h.stream.push(snap('reconnected'),2,next.signal);
+ await until(()=>h.callbacks.length);h.xterm.dshRenderGate.visibility(true,fit);
+ h.parse();assert.equal(h.xterm.cols,80);assert.equal(fits,1);h.parse();await tick();
+ assert.equal(fits,2);assert.equal(h.xterm.cols,132);assert.equal(h.xterm.rows,30);
+ await h.stream.dispose();await h.done;h.cleanup();
 });
 test('exclusive owner, child-before-parent mount, StrictMode and remount obtain a fresh attachment once',async()=>{
  const h=setup();await h.stream.dispose();await h.done;h.model.detach();let connects=0;

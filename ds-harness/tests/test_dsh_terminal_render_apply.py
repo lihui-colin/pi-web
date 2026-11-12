@@ -23,6 +23,16 @@ class TerminalRenderTests(unittest.TestCase):
             with self.subTest(source=source[:50]), self.assertRaises(ValueError):
                 p.patch(source)
 
+    def test_exact_previous_direct_helper_is_upgraded(self):
+        fixed = p.patch(self.original())
+        previous = (Path(__file__).parent / 'fixtures/dsh_terminal_render_v1.js').read_text()
+        installed = fixed.replace(p.HELPER, previous, 1)
+        self.assertEqual(p.patch(installed), fixed)
+        for invalid in (installed.replace('shown !== visible', 'shown === visible'),
+                        installed + previous, installed.replace('renderSink.dispose();', 'renderSink.broken();')):
+            with self.assertRaises(ValueError):
+                p.patch(invalid)
+
     def test_exact_legacy_ui_skips_sink_and_mixed_legacy_rejects(self):
         enhanced = legacy.patch_frontend(self.original())
         self.assertEqual(p.patch(enhanced), enhanced)

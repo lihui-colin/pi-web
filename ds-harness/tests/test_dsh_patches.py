@@ -95,6 +95,25 @@ class PatchSetTests(unittest.TestCase):
     def snapshot(self):
         return {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in self.sources}
 
+    def test_full_plan_preserves_existing_direct_terminal_mode(self):
+        for module in (batching, host_batching, rendering, webgl):
+            for path, before, after in module.plan_changes(self.host):
+                path.write_text(after)
+        frontend_path = self.host / 'dsh-client-ui-sidebar-terminal/lib/client.terminal.js'
+        previous = (Path(__file__).parent / 'fixtures/dsh_terminal_render_v1.js').read_text()
+        frontend_path.write_text(frontend_path.read_text().replace(rendering.HELPER, previous, 1))
+        before = self.snapshot()
+        changes = apply.plan_changes(self.profile, self.host)
+        self.assertEqual(self.snapshot(), before)
+        common.publish(changes, self.backups)
+        frontend = frontend_path.read_text()
+        backend = (self.host / 'dsh-api-terminal-controller/lib/index.js').read_text()
+        self.assertIn(rendering.HELPER, frontend)
+        self.assertNotIn('createTerminalRedraw', frontend)
+        self.assertNotIn('createTerminalHostProtocol', backend)
+        self.assertTrue(all(old == new for _, old, new in apply.plan_changes(self.profile, self.host)))
+        self.assertEqual(self.cli('--check').returncode, 0)
+
     def test_shared_file_migrations_publish_once_and_are_idempotent(self):
         before = self.snapshot()
         self.assertNotEqual(self.cli('--check').returncode, 0)

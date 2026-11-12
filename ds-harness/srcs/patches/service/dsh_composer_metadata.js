@@ -37,22 +37,25 @@ function subscribeDshSessionInfoMobile(listener) {
   return () => dshSessionInfoMobile?.removeEventListener("change", listener);
 }
 function isDshSessionInfoMobile() { return dshSessionInfoMobile?.matches ?? false; }
-function DshComposerFrame({ children }) {
+function DshComposerFrame({ children, sessionId }) {
   const mobile = (0, react.useSyncExternalStore)(subscribeDshSessionInfoMobile, isDshSessionInfoMobile, () => false);
   const [open, setOpen] = (0, react.useState)(false);
   const [bypass, setBypass] = (0, react.useState)(false);
   const id = (0, react.useId)();
+  // Adoption must preserve the editor (including focus and an active IME).
+  // Reset only disclosure state when the session changes.
+  (0, react.useLayoutEffect)(() => { setOpen(false); }, [sessionId]);
   (0, react.useEffect)(() => {
     if (!open || !mobile) return;
     const dismissOutside = event => {
-      if (event.composedPath().some(node => node.id === id || node.getAttribute?.("aria-controls") === id)) return;
+      if (event.composedPath().some(node => node.id === id || node.getAttribute?.("aria-controls") === id || node.getAttribute?.("data-dsh-session-info-owner") === id)) return;
       setOpen(false);
     };
     const dismissEscape = event => {
       if (event.key !== "Escape" || event.defaultPrevented) return;
       setOpen(false);
       event.preventDefault();
-      if (document.getElementById(id)?.contains(document.activeElement)) {
+      if (document.getElementById(id)?.contains(document.activeElement) || document.activeElement?.closest('[data-dsh-session-info-owner]')?.getAttribute('data-dsh-session-info-owner') === id) {
         document.querySelector(`[data-dsh-session-info-trigger][aria-controls="${id}"]`)?.focus();
       }
     };
@@ -109,10 +112,11 @@ function DshComposerMetadata({ children }) {
   });
 }
 function DshContextMeter(props) {
-  const {mobile} = (0, react.useContext)(DshSessionInfoContext);
-  if (!mobile) return (0, react_jsx_runtime.jsx)(ContextMeter, props);
+  const {mobile, id, open, bypass} = (0, react.useContext)(DshSessionInfoContext);
+  const ownedProps = { ...props, dshSessionInfoOwner: id, dshSessionInfoVisible: !mobile || open || bypass };
+  if (!mobile) return (0, react_jsx_runtime.jsx)(ContextMeter, ownedProps);
   return (0, react_jsx_runtime.jsx)("span", {
     "data-dsh-session-info-value": true,
-    children: (0, react_jsx_runtime.jsx)(ContextMeter, props)
+    children: (0, react_jsx_runtime.jsx)(ContextMeter, ownedProps)
   });
 }

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Offer official rc.1 TerminalScreen frames directly to its exclusive xterm sink."""
+import hashlib
 from pathlib import Path
 if not __package__:
     import sys
@@ -10,6 +11,8 @@ from patches.service.dsh_terminal_assets import plan_terminal_frontend
 
 HERE = Path(__file__).resolve().parent
 HELPER = (HERE / 'dsh_terminal_render.js').read_text().strip() + '\n'
+HELPER_PREFIX = '// Exclusive official TerminalScreen renderer; no frame history or input replay.\n'
+LEGACY_HELPER_SHA256 = '01f1b4ac6eae7c4d0be460d8b8bf929d61f3d3a16c087201158e45963ad72ed1'
 ANCHOR = legacy.CLIP_HELPER
 REGISTER = '\t\t\t\tlastRevision.current = 0;'
 REGISTER_NEW = REGISTER + '\n\t\t\t\tconst renderSink = dshBindTerminalRenderSink(model, xterm);'
@@ -44,8 +47,15 @@ def patch(text):
             raise ValueError('Mixed legacy terminal render candidate')
         return text
     if 'dshBindTerminalRenderSink' in text:
-        if text.count(HELPER) != 1 or text.count('dshBindTerminalRenderSink') != 2:
+        if text.count(HELPER_PREFIX) != 1 or text.count('dshBindTerminalRenderSink') != 2:
             raise ValueError('Mixed direct terminal render helper')
+        start = text.index(HELPER_PREFIX)
+        end = text.find(ANCHOR, start)
+        installed = text[start:end] if end >= 0 else ''
+        if installed != HELPER:
+            if hashlib.sha256(installed.encode()).hexdigest() != LEGACY_HELPER_SHA256:
+                raise ValueError('Unknown direct terminal render helper')
+            text = text[:start] + HELPER + text[end:]
         base = undo_replacements(text.replace(HELPER, '', 1), EDITS,
                                  error='Mixed direct terminal render anchors')
         if patch(base) != text:

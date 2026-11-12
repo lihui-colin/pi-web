@@ -126,6 +126,48 @@ HOST_REPLACEMENTS = [
 ]
 
 
+# Normalize the complete published clipboard/tools write before upgrading it.
+# Keep these exact anchors so partial or locally modified installations fail closed.
+FENCE_WRITE_OLD = apply_replacements(WRITE_NEW, [(CLIP_CAPTURE, CLIP_CAPTURE_NEW),
+    (CLIP_FINISH, CLIP_FINISH_NEW), (TOOLS_RESET, TOOLS_RESET_NEW)])
+FENCE_WRITE = '''\t\t\t\tlet active = true;
+\t\t\t\tconst redrawForFrame = redraw.current;
+\t\t\t\tconst clipboardForFrame = clipboard.current;
+\t\t\t\tconst isCurrentFrame = () => active && terminal.current === xterm
+\t\t\t\t\t&& redraw.current === redrawForFrame && clipboard.current === clipboardForFrame
+\t\t\t\t\t&& current.current.state.phase === "connected"
+\t\t\t\t\t&& current.current.state.render === render && lastRevision.current === render.revision
+\t\t\t\t\t&& model.pendingRender?.revision === render.revision;
+\t\t\t\tconst snapshotToken = isCurrentFrame() && render.frame.type === "snapshot" ? redrawForFrame?.prepare() : void 0;
+\t\t\t\tconst writeFrame = () => {
+\t\t\t\t\tif (!isCurrentFrame()) return;
+\t\t\t\t\tif (render.frame.type === "snapshot") {
+\t\t\t\t\t\tterminalTools.current?.reset();
+\t\t\t\t\t\txterm.reset();
+\t\t\t\t\t\txterm.resize(render.frame.info.cols, render.frame.info.rows);
+\t\t\t\t\t\tclipboardForFrame?.finish(false);
+\t\t\t\t\t}
+\t\t\t\t\txterm.write(render.frame.type === "snapshot" ? render.frame.screen : render.frame.data, () => {
+\t\t\t\t\t\tif (!isCurrentFrame()) { clipboardForFrame?.finish(false); return; }
+\t\t\t\t\t\tif (snapshotToken !== void 0) redrawForFrame?.parsed(snapshotToken);
+\t\t\t\t\t\tconst live = current.current;
+\t\t\t\t\t\tclipboardForFrame?.finish(render.frame.type === "output" && live.visible && live.state.writable);
+\t\t\t\t\t\tmodel.acknowledge(render.revision);
+\t\t\t\t\t});
+\t\t\t\t};
+\t\t\t\t// Drain writes from cancelled generations before resetting the parser.
+\t\t\t\tif (isCurrentFrame()) {
+\t\t\t\t\tif (render.frame.type === "snapshot") xterm.write("", writeFrame);
+\t\t\t\t\telse writeFrame();
+\t\t\t\t}
+\t\t\t\treturn () => { active = false; };'''
+FENCE_REPLACEMENTS = [
+    (FENCE_WRITE_OLD, FENCE_WRITE),
+    ('\t\t\t}, [state.render, model]);', '\t\t\t}, [state.render, state.phase, model]);'),
+    (VISIBLE_NEW, '\t\t\t\tredraw.current?.update();\n\t\t\t\tredraw.current?.resizeReadonly(state);'),
+]
+
+
 def upgrade_helpers(text, marker, signature, anchor, current, legacy_digest):
     if marker not in text:
         if signature in text:
@@ -135,14 +177,20 @@ def upgrade_helpers(text, marker, signature, anchor, current, legacy_digest):
         raise ValueError('Ambiguous terminal helper block')
     start, end = text.index(marker), text.index(anchor)
     previous = text[start:end]
-    if previous != current and hashlib.sha256(previous.encode()).hexdigest() != legacy_digest:
+    accepted = (legacy_digest,) if isinstance(legacy_digest, str) else legacy_digest
+    if previous != current and hashlib.sha256(previous.encode()).hexdigest() not in accepted:
         raise ValueError('Unknown terminal helper revision; inspect before applying')
     return text[:start] + current + text[end:]
 
 
 def patch_frontend(text):
+    if (FENCE_WRITE in text) != (FRONT_HELPERS in text):
+        raise ValueError('Mixed terminal parser fence and helper revisions')
+    if FENCE_WRITE in text:
+        text = undo_replacements(text, FENCE_REPLACEMENTS)
     text = upgrade_helpers(text, '// Snapshot parsing must finish before', 'function createTerminalRedraw(', RUNTIME_ANCHOR,
-        FRONT_HELPERS, 'b28e1ca4c854859cb7c1243cca162265f73704c683923255c401d5169a2a5ce6')
+        FRONT_HELPERS, ('b28e1ca4c854859cb7c1243cca162265f73704c683923255c401d5169a2a5ce6',
+                        'db4e98d7e4f70c108b951226de4808cd8d02f9aeeb288e205a9f3a634a7255a7'))
     if TOOLS_RESET_NEW in text:
         text = undo_replacements(text, TOOLS_REPLACEMENTS)
     # Normalize a previously installed clipboard fix back to the redraw-only
@@ -157,7 +205,8 @@ def patch_frontend(text):
     text = apply_replacements(text, [(CLIP_HELPER, CLIP_HELPER_NEW), (CLIP_REF, CLIP_REF_NEW),
         (CLIP_SETUP, CLIP_SETUP_NEW), (CLIP_CLEANUP, CLIP_CLEANUP_NEW),
         (CLIP_CAPTURE, CLIP_CAPTURE_NEW), (CLIP_FINISH, CLIP_FINISH_NEW)])
-    return apply_replacements(text, TOOLS_REPLACEMENTS)
+    text = apply_replacements(text, TOOLS_REPLACEMENTS)
+    return apply_replacements(text, FENCE_REPLACEMENTS)
 
 
 def patch_model(text):
@@ -184,12 +233,21 @@ def plan_changes(host=None, *, read_text=Path.read_text):
         (host.parent / '@xterm/headless', '@xterm/headless', '6.0.0'),
         (host.parent / '@xterm/addon-serialize', '@xterm/addon-serialize', '0.14.0'),
     ]
-    for directory, name, version in packages:
-        verify_package(directory, name, (version,))
-    paths = [(host / 'dsh-client-ui-sidebar-terminal/lib/client.terminal.js', patch_frontend),
-             (host / 'dsh-api-terminal-controller/lib/client.js', patch_model),
-             (host / 'dsh-api-terminal-controller/lib/index.js', patch_host)]
-    return [read_change(path, transform, read_text=read_text) for path, transform in paths]
+    for directory, name, required_version in packages:
+        verify_package(directory, name, (required_version,))
+    frontend = host / 'dsh-client-ui-sidebar-terminal/lib/client.terminal.js'
+    original = read_text(frontend)
+    if 'dshBindTerminalRenderSink' in original:
+        # Preserve the explicitly deployed direct mode. Adding the older tools
+        # here would create a mixed UI that the later renderer planner rejects.
+        from patches.service import dsh_terminal_render_apply as direct
+        if version != '0.2.2-rc.1':
+            raise ValueError('Direct terminal renderer requires reviewed rc.1 packages')
+        direct.patch(original)  # Validate current or exactly reviewed older helper.
+        return []
+    return [(frontend, original, patch_frontend(original)),
+            read_change(host / 'dsh-api-terminal-controller/lib/client.js', patch_model, read_text=read_text),
+            read_change(host / 'dsh-api-terminal-controller/lib/index.js', patch_host, read_text=read_text)]
 
 
 def main():

@@ -31,14 +31,20 @@ const {chromium} = require(process.env.DSH_TEST_PLAYWRIGHT);
       window.__ModuleLoader__ = {load({factory}) {
         window.bundle = factory(name => name === 'react' ? react : name === 'react/jsx-runtime' ? {jsx, jsxs: jsx} : {});
       }};
-      window.sent = []; window.sizes = []; window.acks = []; window.opened = [];
+      window.sent = []; window.sizes = []; window.acks = []; window.opened = []; window.copied = [];
+      Object.defineProperty(navigator, 'clipboard', {configurable: true, value: {writeText: async text => copied.push(text)}});
       window.open = (...args) => { opened.push(args); return null; };
-      window.model = {write: data => sent.push(data), resize: (...size) => sizes.push(size), acknowledge: revision => acks.push(revision)};
+      window.model = {write: data => sent.push(data), resize: (...size) => sizes.push(size),
+        acknowledge(revision) { acks.push(revision); this.pendingRender = undefined; }};
       window.state = {phase: 'connected', writable: true, environment: {scrollback: 1000, maxCols: 300, maxRows: 100},
         info: {cols: 80, rows: 24}, render: {revision: 1, frame: {type: 'snapshot', info: {cols: 80, rows: 24}, screen: ''}}};
       window.theme = {fontFamilies: {terminal: 'monospace'}, fontSizes: {terminal: 14}};
       window.render = () => {
         cursor = 0;
+        if (state.render && model.publishedRender !== state.render) {
+          model.publishedRender = state.render;
+          model.pendingRender = {revision: state.render.revision};
+        }
         const node = bundle.__test.TerminalScreen({state, model, visible: true, label: 'Terminal', theme});
         node.style.width = '800px'; node.style.height = '450px';
         if (!node.isConnected) document.body.appendChild(node);
@@ -53,8 +59,10 @@ const {chromium} = require(process.env.DSH_TEST_PLAYWRIGHT);
     await page.addScriptTag({content: bundle});
     await page.evaluate(() => render());
     await page.waitForFunction(() => acks.includes(1) && sizes.filter(size => size[2]).length >= 2);
+    const baselineResizes = await page.evaluate(() => sizes.length);
     await page.evaluate(() => output('https://example.com/path\r\nfirst needle\r\n中文 needle\r\n'));
     await page.waitForFunction(() => acks.includes(2));
+    assert.equal(await page.evaluate(() => sizes.length), baselineResizes, 'ordinary output must not refit the writable terminal');
     await page.keyboard.press('Control+Shift+F');
     const search = page.getByRole('searchbox', {name: 'Find in terminal'});
     await search.fill('needle');
@@ -106,7 +114,42 @@ const {chromium} = require(process.env.DSH_TEST_PLAYWRIGHT);
     await page.mouse.click(point.x, point.y); assert.deepEqual(await page.evaluate(() => opened), []);
     await page.keyboard.down('Control'); await page.mouse.click(point.x, point.y); await page.keyboard.up('Control');
     assert.deepEqual(await page.evaluate(() => opened), [['https://example.com/path', '_blank', 'noopener,noreferrer']]);
-    await page.evaluate(() => cleanup());
+    // Real xterm parsing: pending output is cancelled before the replacement snapshot.
+    const freshRevision = await page.evaluate(() => {
+      const revision = state.render.revision;
+      // Consume xterm's immediate echo after recent keyboard input; the next
+      // write then follows its normal asynchronous parser queue.
+      term.write('\x1b[0m');
+      output('OLD\x1b]52;c;b2xk\x07');
+      model.pendingRender = undefined;
+      state = {...state, phase: 'disconnected', render: undefined}; render();
+      state = {...state, phase: 'connected', writable: false,
+        render: {revision: revision + 2, frame: {type: 'snapshot', info: {cols: 80, rows: 24},
+          screen: 'FRESH\x1b]52;c;c25hcHNob3Q=\x07'}}}; render();
+      return revision + 2;
+    });
+    await page.waitForFunction(revision => acks.includes(revision), freshRevision);
+    assert.equal(await page.evaluate(() => term.buffer.active.getLine(0).translateToString(true)), 'FRESH');
+    assert.equal(await page.evaluate(revision => acks.includes(revision - 1), freshRevision), false);
+    await page.evaluate(() => { state = {...state, writable: true}; render(); output('!'); });
+    await page.waitForFunction(revision => acks.includes(revision + 1), freshRevision);
+    assert.deepEqual(await page.evaluate(() => copied), []);
+    // Hold a genuinely parsed empty-write callback, unmount, then release it.
+    await page.evaluate(async () => {
+      const originalWrite = term.write.bind(term), originalReset = term.reset.bind(term);
+      window.heldFence = []; window.lateResets = 0;
+      term.reset = () => { lateResets++; originalReset(); };
+      term.write = (data, callback) => originalWrite(data, () => heldFence.push(callback));
+      const revision = state.render.revision + 1;
+      state = {...state, render: {revision, frame: {type: 'snapshot', info: {cols: 80, rows: 24}, screen: 'STALE'}}};
+      render();
+    });
+    await page.waitForFunction(() => heldFence.length === 1);
+    const beforeUnmount = await page.evaluate(() => ({acks: acks.slice(), sizes: sizes.length}));
+    await page.evaluate(() => { cleanup(); heldFence.shift()(); });
+    assert.equal(await page.evaluate(() => lateResets), 0);
+    assert.deepEqual(await page.evaluate(() => acks), beforeUnmount.acks);
+    assert.deepEqual(await page.evaluate(() => copied), []);
     assert.equal(await page.locator('[role=search]').count(), 0);
     assert.deepEqual(errors, []);
     console.log('Browser: component mount/cleanup, search, links, negotiated keys, copy/paste, IME and read-only view passed.');

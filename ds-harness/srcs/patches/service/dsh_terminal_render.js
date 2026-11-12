@@ -1,6 +1,6 @@
 // Exclusive official TerminalScreen renderer; no frame history or input replay.
 function dshBindTerminalRenderSink(model, xterm) {
-    let alive = true, revision = 0, token = 0, ready = false, busy = false, deferredFit, shown;
+    let alive = true, revision = 0, token = 0, ready = false, busy = false, deferredFit;
     let writable = false;
 
     const current = (next, stamp) => alive && token === stamp
@@ -12,9 +12,9 @@ function dshBindTerminalRenderSink(model, xterm) {
     };
     const gate = {
         visibility(visible, action) {
-            const changed = shown !== visible;
-            shown = visible;
-            if (changed && visible) gate.fit(action);
+            // The React effect also runs when control or baseline dimensions change.
+            // A still-visible reconnect must refit after its snapshot parses.
+            if (visible) gate.fit(action);
         },
         fit(action) {
             if (!alive) return;

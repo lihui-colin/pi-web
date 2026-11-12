@@ -26,7 +26,8 @@ NEW = DOCK.replace('(ContextMeter, {', '(DshContextMeter, {').replace(
 TRANSLATIONS = {'运行中…': '会话信息', 'Running…': 'Session info', '実行中…': 'セッション情報', 'Corriendo…': 'Información de sesión', 'Courir…': 'Informations de session', 'Laufen…': 'Sitzungsinformationen', 'Бег…': 'Сведения о сеансе', 'Correndo…': 'Informações da sessão'}
 
 
-WRAPPER = 'const InputBar = (0, react.memo)(function InputBar(props) {\n  return (0, react_jsx_runtime.jsx)(DshComposerFrame, {\n    children: (0, react_jsx_runtime.jsx)(DshInputBar, props)\n  }, props.sessionId);\n});\n'
+LEGACY_WRAPPER = 'const InputBar = (0, react.memo)(function InputBar(props) {\n  return (0, react_jsx_runtime.jsx)(DshComposerFrame, {\n    children: (0, react_jsx_runtime.jsx)(DshInputBar, props)\n  }, props.sessionId);\n});\n'
+WRAPPER = LEGACY_WRAPPER.replace('    children:', '    sessionId: props.sessionId,\n    children:').replace('  }, props.sessionId);', '  });')
 TRAILING = '\t\t\t\t\t\t\t\t\tclassName: clsx(InputBar_module_css_default.trailing, activity && InputBar_module_css_default.trailingActive),\n\t\t\t\t\t\t\t\t\tchildren: ['
 TRAILING_NEW = TRAILING + '\n\t\t\t\t\t\t\t\t\t\t(0, react_jsx_runtime.jsx)(DshSessionInfoTrigger, { useProjection, t }),'
 REGISTER_ANCHOR = '\t\t\tconst registerComposerBar = () => slots.register({'
@@ -38,20 +39,29 @@ REGISTER_TRIGGER = '''\t\t\tslots.inject("conversation.input.right", () => slots
             }, DshSessionInfoTrigger));
 '''
 
-# Only the last published helper is upgraded in place; experimental intermediate
-# layouts are retired. The complete digest rejects partial or unknown edits.
+# Only complete published helpers are upgraded; reject partial or unknown edits.
 LEGACY_HELPER_SHA256 = '356384b545827b166da2623b3e630659e3dd4fc22a2304b8c6e836ceb929e13d'
+PUBLISHED_HELPER_SHA256 = '17e1353f31211012bcf0316a3c9fc6486cfbb59de7a40bf382d97ede9ae20280'
 HELPER_PREFIX = HELPER.split('const DshSessionInfoContext =', 1)[0]
 
 
 def patch(text):
     if 'const DshSessionInfoContext =' in text:
+        if text.count('const DshSessionInfoContext =') != 1:
+            raise ValueError('Duplicate composer metadata helper')
         start = text.index(HELPER_PREFIX)
-        end = text.index(WRAPPER, start)
+        wrapper_prefix = 'const InputBar = (0, react.memo)(function InputBar(props)'
+        if text.count(wrapper_prefix) != 1:
+            raise ValueError('Duplicate or missing composer metadata wrapper')
+        end = text.index(wrapper_prefix, start)
         installed = text[start:end]
-        if installed != HELPER and hashlib.sha256(installed.encode()).hexdigest() != LEGACY_HELPER_SHA256:
+        digest = hashlib.sha256(installed.encode()).hexdigest()
+        if installed != HELPER and digest not in (LEGACY_HELPER_SHA256, PUBLISHED_HELPER_SHA256):
             raise ValueError('Unknown composer metadata helper; restore the reviewed release before patching')
-        text = replace_once(text, installed, HELPER)
+        expected_wrapper = WRAPPER if installed == HELPER else LEGACY_WRAPPER
+        if not text.startswith(expected_wrapper, end):
+            raise ValueError('Unknown or partial composer metadata wrapper')
+        text = replace_once(text, installed + expected_wrapper, HELPER + WRAPPER)
     text = replace_once(text, ANCHOR, HELPER + WRAPPER + ANCHOR.replace('const InputBar =', 'const DshInputBar ='))
     for previous in (DOCK, DOCK.replace('(ContextMeter, {', '(DshContextMeter, {')):
         if previous in text:

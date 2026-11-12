@@ -28,6 +28,8 @@ DS Bot 输入框的蓝色语音对话按钮与发送按钮共用最右侧位置�
 
 历史组合 **Bot 0.2.7 + DSH rc.1**、**Bot 0.2.6 + DSH alpha.2**、**mobile 3.2.1 + DSH alpha.2** 仍走独立旧版路径；不会把旧版 UI 补丁套到新包上。终端也支持原有 alpha.2，但前端与控制器必须同版。
 
+完整审查、已修复问题、待处理问题及上游复用边界见 [REVIEW.md](REVIEW.md)。
+
 ## 新版上游核查与迁移
 
 2026-11-06 对照 npm 官方发布的四个 DSH rc.1 组件包（按注册表 SHA-512 验证），以及 mobile 3.3.0 提交 [`522db94`](https://github.com/mexiaosqwq/dsh-web-mobile/tree/522db94f552d89934f814853ad10c96f31eba6da)：
@@ -126,7 +128,7 @@ python3 -B -m unittest discover -s ds-harness/tests -p 'test_dsh_terminal_batchi
 
 `dsh_terminal_batching_apply.py` 在保留有界单批解析门闩的同时，为每个 `TerminalView` 增加独占 `bindRenderer()` / `offerFrame()`。`dsh_terminal_render_apply.py` 让官方侧栏直接向 xterm 提交输出，只有真实解析 callback 才确认 revision；普通 output 不再发布 React render 状态。state 的远端尺寸及 stdin 权限先同步进入 renderer，再发布 metadata。快照先用空 write 等待旧解析完成，检查当前 revision/lifetime 后 reset、resize 和写屏；隐藏时仍解析，字体、visibility 和 ResizeObserver 的 fit 在快照期间延期，并检查最新写权限，避免过期 React 状态覆盖只读/退出尺寸。新 renderer 挂载（包括已退出终端）从 Host 获取 fresh baseline，不把最后一条 output 当作完整屏幕。
 
-官方侧栏与 Better Sidebar 底部终端共用控制器，但各有自己的 xterm。未注册 sink 的底部终端保持原 `state.render`/ACK 行为；本次直写和 WebGL 仅适配官方侧栏。统一安装时，旧 `dsh_terminal_apply.py` 的重绘、剪贴板、查询和工具增强继续保留；direct patch 对经过旧 patcher 完整验证的增强 UI 明确跳过，避免绕过它的 callback。WebGL 可与该旧路径组合。本次排查中的运行部署使用原版 UI 加新直写路径，不会重新启用被撤销的旧增强。
+官方侧栏与 Better Sidebar 底部终端共用控制器，但各有自己的 xterm。未注册 sink 的底部终端保持原 `state.render`/ACK 行为；本次直写和 WebGL 仅适配官方侧栏。统一安装时，原版和旧增强继续保留 `dsh_terminal_apply.py` 的重绘、剪贴板、查询和工具功能；已经完整采用 direct 的 UI 经精确校验后跳过旧增强，避免在升级时叠加成混合模式。direct patch 对经过旧 patcher 完整验证的增强 UI 继续跳过，避免绕过它的 callback。WebGL 可与该旧路径组合。本次排查中的运行部署使用原版 UI 加新直写路径，不会重新启用被撤销的旧增强。
 
 `dsh_terminal_host_batching_apply.py` 在 headless 真实解析后同步接收输出，不等待定时器，允许 provider 继续读取。空闲首块立即广播，burst 用 5ms trailing timer；pending 最多 64KiB/128 chunks，超过时立即排空，单个大块保留原帧行为。只有 flush 才递增 output sequence；attach 基线、状态/尺寸、输入成功及拒绝 ACK、终态和关闭都是排空屏障。timer 在 operations 队列内执行，避免越过尚未解析的内容；发布故障仍传播，但 provider 已终止后必须清理 followers、uplink、timer 和 screen，重复 close 不重复释放资源。
 
@@ -202,7 +204,7 @@ python3 -B ds-harness/srcs/patches/service/dsh_composer_metadata_apply.py --chec
 python3 -B -m unittest discover -s ds-harness/tests -p 'test_dsh_composer_metadata.py'
 ```
 
-插件安装器自动应用。浏览器交互回归位于 `tests/test_dsh_composer_metadata.cjs`，依赖通过 `DSH_TEST_PLAYWRIGHT`、`DSH_TEST_REACT_UMD`、`DSH_TEST_REACT_DOM_UMD` 指定已有 Playwright 与 React 18 / ReactDOM 18 的 UMD 文件；Python 测试在缺少这些变量时跳过浏览器项。独立浏览器覆盖 390/820/1600px、默认收起、实时用量、原详情按钮、草稿和输入焦点、键盘切换、会话重置及 Bot 队列，不连接线上服务、不发送消息。
+插件安装器自动应用。浏览器交互回归位于 `tests/test_dsh_composer_metadata.cjs`，依赖通过 `DSH_TEST_PLAYWRIGHT`、`DSH_TEST_REACT_UMD`、`DSH_TEST_REACT_DOM_UMD` 指定已有 Playwright 与 React 18 / ReactDOM 18 的 UMD 文件；Python 测试在缺少这些变量时跳过浏览器项。独立浏览器覆盖 390/820/1600px、默认收起、实时用量、原详情按钮、草稿和输入焦点、键盘切换、会话重置及 Bot 队列，不连接线上服务、不发送消息。新增原生生命周期回归 `tests/test_dsh_composer_metadata_lifecycle.cjs` 使用 `DSH_TEST_PLAYWRIGHT` 与 `DSH_TEST_FRONTEND_ASSETS` 指定已安装的前端资源，验证首次会话接管保持输入节点/焦点、owned portal 的点击和定位，以及会话切换、响应式隐藏与卸载清理；组合事件检查不等同于操作系统 IME 自动化。
 
 输入工具栏间距修复：mobile 3.3.1 对上传按钮保留 `margin-left:-9px!important`，权限按钮的 18px 图标与 14px 箭头合计 32px，而 modes 分组允许收缩。390px 页面实测上传按钮与权限点击区重叠约 3px。元信息补丁的 CSS 现固定左侧工具分组及权限组的完整宽度，撤销上传负边距，保留 8px 间隔，并限制上传按钮伪元素只向纵向扩展，避免横向盖住箭头。350px 以下右侧控制组换行；规则仅作用于启用了原生元信息圆环的移动主聊天输入框，未改上传或权限处理器。支持从上一版元信息补丁精确迁移，未知修改拒绝覆盖。
 

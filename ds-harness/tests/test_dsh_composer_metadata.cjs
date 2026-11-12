@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const {chromium} = require(process.env.DSH_TEST_PLAYWRIGHT);
 (async () => {
-  const browser = await chromium.launch({headless: true, args: ['--no-sandbox']});
+  const browser = await chromium.launch({headless: true, args: ['--no-sandbox', '--use-angle=swiftshader', '--enable-unsafe-swiftshader']});
   try {
     for (const width of [390, 820, 1600]) {
       const page = await browser.newPage({viewport: {width, height: 900}, hasTouch: width < 1024});
@@ -51,7 +51,7 @@ const {chromium} = require(process.env.DSH_TEST_PLAYWRIGHT);
             h('button', {type:'button',className:'third-party-action','aria-label':'Plugin action'}, 'Plugin'),
             !bot && h('button', {'data-composer-stat':'details',type:'button',onClick: () => window.originalAction = true}, 'Usage details'));
           const projection = () => ({projectedTokens:value,contextWindow:100});
-          const tree = h(DshComposerFrame, {key:session},
+          const tree = h(DshComposerFrame, {sessionId:session},
             h('form', {onSubmit:e=>{e.preventDefault();window.submitted=true}},
               h('div',{className:'card'},h('input',{placeholder:'Message or run a task…'}),
                 h('div',{className:'trailing'},h('span',{className:'model'},'GPT-6.1 · High'),

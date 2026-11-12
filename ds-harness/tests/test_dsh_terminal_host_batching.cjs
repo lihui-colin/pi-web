@@ -2,6 +2,7 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
+const fs = require('node:fs');
 const vm = require('node:vm');
 const {spawnSync} = require('node:child_process');
 const transformed = spawnSync('python3', ['-B', '-c', `
@@ -24,7 +25,7 @@ function channel() {
         return() { this.end(); return Promise.resolve({done:true}); }
     };
 }
-function setup({manual=false}={}) {
+function setup({manual=false,maxBufferedBytes=1000000}={}) {
     let now=0, next=0;
     const timers=new Map(), callbacks=[], events=[];
     const done=deferred(), output=channel();
@@ -52,7 +53,7 @@ function setup({manual=false}={}) {
         requireHeadless:()=>({Terminal:Screen}),requireSerialize:()=>({SerializeAddon:Serializer}),
         RemoteError,remoteErrorOf:e=>e,TerminalFollower:Follower,assertNever(){throw new Error('unexpected command');}
     });
-    const terminal=new BrowserTerminal(handle,{state:'running',cols:80,rows:24,title:'test'},100,1000000);
+    const terminal=new BrowserTerminal(handle,{state:'running',cols:80,rows:24,title:'test'},100,maxBufferedBytes);
     const follower=new Follower();terminal.followers.add(follower);terminal.controller=follower;
     return {terminal,handle,output,done,follower,timers,callbacks,events,Follower,
         async advance(ms){now+=ms;const due=[...timers].filter(([,t])=>t.at<=now);for(const [id,t]of due){timers.delete(id);t.fn();}await tick();},
@@ -60,6 +61,64 @@ function setup({manual=false}={}) {
         frames(){return follower.frames.filter(f=>f.type==='output');}
     };
 }
+function budgetCase(parts,{limit=1024,sequence=0}={}) {
+ const frames=[],timers=new Map();let nextTimer=0,stringEncodes=0;
+ const context={Buffer,JSON:{stringify(value){if(typeof value==='string')stringEncodes++;return JSON.stringify(value)}},Date:{now:()=>0},setTimeout(fn){const id=++nextTimer;timers.set(id,fn);return id},clearTimeout:id=>timers.delete(id),
+  Deque:class {items=[];pushBack(value){this.items.push(value)}popFront(){return this.items.shift()}clear(){this.items=[]}}};
+ vm.createContext(context);
+ vm.runInContext(fs.readFileSync(path.join(__dirname,'fixtures/dsh_terminal_follower_rc1.js'),'utf8')+'\n'+fs.readFileSync(path.join(__dirname,'../srcs/patches/service/dsh_terminal_host_batching.js'),'utf8'),context);
+ const follower=new context.TerminalFollower(limit);
+ const host={sequence,maxBufferedBytes:limit,followers:new Set([follower]),enqueue:fn=>Promise.resolve().then(fn),broadcast(frame){
+  frames.push(frame);follower.push(frame);
+  // Match the native iterator's accounting while consuming every frame immediately.
+  let item;while((item=follower.queue.popFront())!==undefined)follower.bytes-=item.bytes;
+ }};
+ const batch=context.createDshHostOutputBatcher(host);for(const part of parts)batch.handle(part);batch.dispose();
+ assert.equal(timers.size,0);return {frames,follower,stringEncodes};
+}
+test('real class initializer reads the budget after constructor assignment',async()=>{
+ const h=setup({maxBufferedBytes:1024}),parts=['prime',...Array(4).fill('x'.repeat(300))];
+ for(const part of parts)await h.terminal.output(part);await h.advance(5);
+ assert.equal(h.frames().map(f=>f.data).join(''),parts.join(''));
+ assert.ok(h.frames().every(f=>Buffer.byteLength(JSON.stringify(f))<=1024));
+ assert.deepEqual(h.frames().map(f=>f.sequence),[1,2,3]);await h.close();
+});
+test('minimum legal follower budget permits fast consumers of several individually valid chunks',()=>{
+ const parts=['prime',...Array(4).fill('x'.repeat(300))];const {frames,follower}=budgetCase(parts);
+ assert.equal(follower.failure,undefined);assert.equal(frames.map(f=>f.data).join(''),parts.join(''));
+ assert.ok(frames.every(frame=>Buffer.byteLength(JSON.stringify(frame),'utf8')<=1024));
+ assert.deepEqual(frames.map(f=>f.sequence),[1,2,3]);assert.ok(frames.length<parts.length);
+});
+test('transport budget includes JSON escaping, UTF-8 and split surrogate boundaries',()=>{
+ const parts=['prime',...Array(4).fill('\x00\x1b"\\\\中😀'.repeat(30)),'\ud83d'.repeat(50),'\ude00'.repeat(50)];
+ const {frames,follower}=budgetCase(parts);assert.equal(follower.failure,undefined);
+ assert.equal(frames.map(f=>f.data).join(''),parts.join(''));assert.ok(frames.every(f=>Buffer.byteLength(JSON.stringify(f))<=1024));
+});
+test('normal large budgets avoid serializing every input chunk again',()=>{
+ const parts=['prime','\x00'.repeat(100),'x'.repeat(30000)];const {frames,follower,stringEncodes}=budgetCase(parts,{limit:1000000});
+ assert.equal(follower.failure,undefined);assert.equal(frames.map(f=>f.data).join(''),parts.join(''));assert.equal(stringEncodes,0);
+});
+test('transport budget accounts for sequence header digit growth',()=>{
+ const parts=['prime','x'.repeat(492),'y'.repeat(492)];const {frames,follower}=budgetCase(parts,{sequence:8});
+ assert.equal(follower.failure,undefined);assert.deepEqual(frames.map(f=>f.sequence),[9,10,11]);
+ assert.equal(frames.map(f=>f.data).join(''),parts.join(''));assert.ok(frames.every(f=>Buffer.byteLength(JSON.stringify(f))<=1024));
+});
+test('mixed chunk streams preserve order within native frame limits across budget thresholds',()=>{
+ let seed=19;const random=()=>{seed=(seed*1664525+1013904223)>>>0;return seed};const alphabet=['a','\x00','\x1b','"','\\\\','中','😀','\ud83d','\ude00'];
+ for(const limit of [1024,4096,393279,393280,1000000])for(const sequence of [8,998,1000000000000000]){
+  const parts=Array.from({length:160},()=>Array.from({length:20+random()%40},()=>alphabet[random()%alphabet.length]).join(''));
+  assert.ok(parts.every((data,i)=>Buffer.byteLength(JSON.stringify({type:'output',sequence:sequence+i+1,data}))<=limit));
+  const {frames,follower}=budgetCase(parts,{limit,sequence});assert.equal(follower.failure,undefined,`budget ${limit}`);
+  assert.equal(frames.map(f=>f.data).join(''),parts.join(''));assert.ok(frames.every(f=>Buffer.byteLength(JSON.stringify(f))<=limit));
+  assert.deepEqual(frames.map(f=>f.sequence),frames.map((_,i)=>sequence+i+1));
+ }
+});
+test('one originally oversized chunk retains native follower failure without splitting or dropping it',()=>{
+ for(const data of ['x'.repeat(2000),'\x00'.repeat(300)]){
+  const {frames,follower}=budgetCase([data]);assert.match(follower.failure.message,/exceeded its buffer/);
+  assert.equal(frames.length,1);assert.equal(frames[0].data,data);
+ }
+});
 test('idle echo is immediate; burst returns before timer and preserves UTF-8/ANSI byte order',async()=>{
     const h=setup();await h.terminal.output('a');assert.equal(h.frames()[0].data,'a');assert.equal(h.timers.size,0);
     const parts=['中','\x1b[31m','\r\n','😀'];for(const p of parts)await h.terminal.output(p);

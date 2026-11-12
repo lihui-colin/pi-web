@@ -95,10 +95,20 @@ function createTerminalRedraw(xterm, fit, node, model, current) {
       }
     }, 100);
   }
+  function resizeReadonly(state) {
+    if (!disposed && ready && state.phase === 'connected' && !state.writable && state.info) {
+      xterm.resize(state.info.cols, state.info.rows);
+    }
+  }
   return {
     prepare() { cancel(); ready = false; needsRedraw = true; return ++generation; },
-    parsed(token) { if (!disposed && token === generation) { ready = true; update(); } },
+    parsed(token) {
+      if (!disposed && token === generation) {
+        ready = true; update(); resizeReadonly(current().state);
+      }
+    },
     update,
+    resizeReadonly,
     dispose() {
       cancel(); disposed = true; generation++;
       for (const remove of listeners) remove();

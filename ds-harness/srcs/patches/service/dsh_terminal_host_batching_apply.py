@@ -10,6 +10,8 @@ from patches.common import plan_host_patch, patch_cli, undo_replacements
 
 HERE = Path(__file__).resolve().parent
 HELPER = (HERE / 'dsh_terminal_host_batching.js').read_text().strip() + '\n'
+HELPER_PREFIX = '// Host output uses Paseo\'s 5ms leading/trailing policy after headless parsing.\n'
+LEGACY_HELPER_SHA256 = '5210b05ee62412d25db33b6945a1d1489909b593dfb74a781f1e5f3d0fe8db4e'
 ANCHOR = '/** Process lifetime is independent of follower and component lifetimes. */'
 CLASS = 'var BrowserTerminal = class {'
 DIGEST = '9184e7b5484ae525f9cf36953600a6b72e9877f584890e082b3f5207128c15ee'
@@ -87,8 +89,15 @@ def patch(text):
     patched = 'createDshHostOutputBatcher' in text or 'hostOutputBatcher' in text
     original = text
     if patched:
-        if text.count(HELPER) != 1:
+        if text.count(HELPER_PREFIX) != 1 or text.count('function createDshHostOutputBatcher(') != 1:
             raise ValueError('Unknown or partial host batching helper')
+        start, end = text.index(HELPER_PREFIX), text.index(ANCHOR)
+        installed = text[start:end]
+        if installed != HELPER:
+            if hashlib.sha256(installed.encode()).hexdigest() != LEGACY_HELPER_SHA256:
+                raise ValueError('Unknown host batching helper revision')
+            text = text[:start] + HELPER + text[end:]
+        original = text
         text = undo_replacements(text.replace(HELPER, '', 1), REPLACEMENTS,
                                  error='Partial or mixed host batching patch')
         if 'hostOutputBatcher' in text or 'createDshHostOutputBatcher' in text:
