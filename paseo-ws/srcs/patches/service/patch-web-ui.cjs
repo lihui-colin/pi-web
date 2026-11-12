@@ -8,6 +8,20 @@ const zlib = require('node:zlib');
 const baseline = require('./patch-web-ui.baseline.json');
 const { serverRoot, checkCompatibility, replaceOnce: replaceText, patchModule } = require('../patch-utils.cjs');
 
+function patchMessageActions(source) {
+  // Wide iPad browsers use the desktop layout but cannot reliably hover.
+  // Subscribe so connecting a trackpad/mouse also updates existing messages.
+  const helper = 'const paseoMessageInputQuery="(hover: none), (pointer: coarse)";'
+    + 'function paseoTouchMessageInput(){return typeof window!=="undefined"&&typeof window.matchMedia==="function"&&window.matchMedia(paseoMessageInputQuery).matches}'
+    + 'function paseoSubscribeMessageInput(e){if(typeof window==="undefined"||typeof window.matchMedia!=="function")return()=>{};const t=window.matchMedia(paseoMessageInputQuery);if(typeof t.addEventListener==="function"){t.addEventListener("change",e);return()=>t.removeEventListener("change",e)}t.addListener(e);return()=>t.removeListener(e)}'
+    + 'function paseoMessageServerInput(){return!1}';
+  return patchModule(source, 'Object.defineProperty(_e,"UserMessage",', module => {
+    module = replaceText(module, 'const ke={messageText:"true"}', helper + 'const ke={messageText:"true"}', 'message input helpers');
+    return replaceText(module, 're=V.length>0,se=!N&&oe&&(X||L.isNative||$)',
+      're=V.length>0,paseoTouchActions=(0,z.useSyncExternalStore)(paseoSubscribeMessageInput,paseoTouchMessageInput,paseoMessageServerInput),se=!N&&oe&&(X||L.isNative||paseoTouchActions||$)', 'touch message actions');
+  });
+}
+
 function patchHoverCards(source) {
   const replacements = [
     ['const t=()=>{P(),v(!1)},n=t=>',
@@ -53,6 +67,17 @@ function main() {
   // Align the underlying client timeout (normally 15s) with the TLS probe's budget.
   replaceOnce('if("directTcp"===t.type)return{...b,url:(0,l.buildDaemonWebSocketUrl)(t.endpoint,{useTls:t.useTls??!1})}',
    'if("directTcp"===t.type)return{...b,...t.useTls?{connectTimeoutMs:s.timeoutMs??20000}:{},url:(0,l.buildDaemonWebSocketUrl)(t.endpoint,{useTls:t.useTls??!1})}');
+  // beta.2 only exposes native Browse on the local Electron host.
+  // Web Browse uses the selected host's existing file API.
+  replaceOnce('canBrowse:o&&(0,C.getIsElectronRuntime)()&&fe===t.serverId',
+    'canBrowse:o&&(!(0,C.getIsElectronRuntime)()||(0,C.getIsElectronRuntime)()&&fe===t.serverId)');
+  replaceOnce('if(xe&&Ie&&!Ae.current){Ae.current=!0;',
+    'if(xe&&(Ie||!(0,C.getIsElectronRuntime)())&&!Ae.current){Ae.current=!0;');
+  replaceOnce('const t=await(0,T.pickDirectory)();',
+    'const t=await(!(0,C.getIsElectronRuntime)()?globalThis.__paseoPickServerDirectory(Se,{initialPath:Pe[0],hostLabel:ke?.label}):(0,T.pickDirectory)());');
+  replaceOnce('},[xe,Ie,Ve]),Ne=', '},[xe,Ie,Ve,Se,Pe,ke]),Ne=');
+  replaceOnce('description:"Choose or create a directory in Finder"', 'description:`Choose a directory on ${t.label}`');
+  const picker = fs.readFileSync(path.join(__dirname, 'server-directory-picker.js'), 'utf8');
   // Only Electron owns a custom context menu; Web must allow the browser default.
   replaceOnce('oe=(0,n.useCallback)(n=>{n.preventDefault(),te()},[te])',
     'oe=(0,n.useCallback)(n=>{typeof window.paseoDesktop?.menu?.showContextMenu==="function"&&(n.preventDefault(),te())},[te])');
@@ -62,8 +87,9 @@ function main() {
   }
   const swipe = fs.readFileSync(path.join(__dirname, 'mobile-sidebar-swipe.js'), 'utf8');
   patched = patchHoverCards(patched);
+  patched = patchMessageActions(patched);
   // Keep the official binary diff stream and its connection ownership unchanged.
-  patched = swipe + '\n' + patched;
+  patched = picker + '\n' + swipe + '\n' + patched;
   // Validate syntax before publishing either the bundle or HTML.
   new (require('node:vm').Script)(patched);
   const hash = crypto.createHash('sha256').update(patched).digest('hex').slice(0, 32);
@@ -81,4 +107,4 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { checkCompatibility, patchHoverCards };
+module.exports = { checkCompatibility, patchHoverCards, patchMessageActions };

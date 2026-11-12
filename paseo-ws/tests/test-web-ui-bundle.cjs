@@ -9,6 +9,7 @@ const crypto = require('node:crypto');
 const zlib = require('node:zlib');
 const baseline = require('../srcs/patches/service/patch-web-ui.baseline.json');
 const { serverRoot } = require('../srcs/patches/patch-utils.cjs');
+const { patchMessageActions } = require('../srcs/patches/service/patch-web-ui.cjs');
 
 test('Web patch rebuilds from upstream, removes retired features and stays idempotent', t => {
   const installed = fs.existsSync(path.join(serverRoot, 'package.json')) && JSON.parse(fs.readFileSync(path.join(serverRoot, 'package.json'))).version === baseline.version;
@@ -20,7 +21,7 @@ test('Web patch rebuilds from upstream, removes retired features and stays idemp
     assert.ok(path.resolve(root).startsWith(path.join(os.tmpdir(), 'paseo-web-patch-')));
     fs.rmSync(root, { recursive: true, force: true });
   });
-  for (const file of ['patch-web-ui.cjs', 'patch-web-ui.baseline.json', 'patch-utils.cjs', 'mobile-sidebar-swipe.js']) fs.copyFileSync(sourceFile(file), fixtureFile(root, file));
+  for (const file of ['patch-web-ui.cjs', 'patch-web-ui.baseline.json', 'patch-utils.cjs', 'mobile-sidebar-swipe.js', 'server-directory-picker.js']) fs.copyFileSync(sourceFile(file), fixtureFile(root, file));
   const server = path.join(root, 'runtime/lib/node_modules/@getpaseo/cli/node_modules/@getpaseo/server');
   const web = path.join(server, 'dist/server/web-ui');
   fs.mkdirSync(path.dirname(path.join(web, baseline.webEntry)), { recursive: true });
@@ -39,7 +40,9 @@ test('Web patch rebuilds from upstream, removes retired features and stays idemp
   assert.equal(path.basename(output), `index-${crypto.createHash('sha256').update(bundle).digest('hex').slice(0, 32)}.js`);
   assert.equal(zlib.brotliDecompressSync(fs.readFileSync(output + '.br')).toString(), bundle);
   assert.equal(zlib.gunzipSync(fs.readFileSync(output + '.gz')).toString(), bundle);
-  for (const retired of ['__paseoPickServerDirectory', '__paseoMountTerminalClipboard', '__paseoGetBulkDiffTransport']) assert.equal(bundle.includes(retired), false);
+  for (const retired of ['__paseoMountTerminalClipboard', '__paseoGetBulkDiffTransport']) assert.equal(bundle.includes(retired), false);
+  assert.ok(bundle.includes('globalThis.__paseoPickServerDirectory(Se,{initialPath:Pe[0],hostLabel:ke?.label})'));
+  assert.ok(bundle.includes('canBrowse:o&&(!(0,C.getIsElectronRuntime)()'));
   assert.ok(bundle.includes('timeoutMs:20000'));
   assert.ok(bundle.includes('connectTimeoutMs:s.timeoutMs??20000'));
   assert.ok(bundle.includes('__paseoMobileSidebarSwipeCleanup'));
@@ -49,9 +52,11 @@ test('Web patch rebuilds from upstream, removes retired features and stays idemp
     assert.equal(at, text.lastIndexOf(marker), `Ambiguous upstream module marker: ${marker}`);
     return text.slice(text.lastIndexOf('\n__d(', at), text.indexOf('\n__d(', at));
   };
-  for (const marker of ['e.useOpenAgentListGesture=function', '_e.MobilePanelOverlay=function', 'observeDiff(e){return this.diffStreams.observe(e)}', '"Duplicate diff entry"', 'canBrowse:o&&(0,C.getIsElectronRuntime)()&&fe===t.serverId', 'Object.defineProperty(_e,"UserMessage",']) {
-    assert.equal(moduleContaining(bundle, marker), moduleContaining(source, marker), 'upstream gestures, diff, project picker and message actions remain unchanged');
+  for (const marker of ['e.useOpenAgentListGesture=function', '_e.MobilePanelOverlay=function', 'observeDiff(e){return this.diffStreams.observe(e)}', '"Duplicate diff entry"']) {
+    assert.equal(moduleContaining(bundle, marker), moduleContaining(source, marker), 'upstream gestures and diff remain unchanged');
   }
+  const messageMarker = 'Object.defineProperty(_e,"UserMessage",';
+  assert.equal(moduleContaining(bundle, messageMarker), moduleContaining(patchMessageActions(source), messageMarker));
   const handler = bundle.match(/oe=\(0,n\.useCallback\)\((n=>\{typeof window\.paseoDesktop\?\.menu\?\.showContextMenu==="function"&&\(n\.preventDefault\(\),te\(\)\)\}),\[te\]\)/)?.[1];
   assert.ok(handler);
   let prevented = 0, desktopMenus = 0;
