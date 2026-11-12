@@ -10,10 +10,7 @@ test('upstream hover cards ignore touch and pen, preserve mouse and keyboard, an
   const baseline = require('../srcs/patches/service/patch-web-ui.baseline.json');
   if (!fs.existsSync(path.join(serverRoot, 'package.json')) || JSON.parse(fs.readFileSync(path.join(serverRoot, 'package.json'))).version !== baseline.version) return t.skip(`Paseo ${baseline.version} bundle not installed`);
   const web = path.join(serverRoot, 'dist/server/web-ui');
-  const entry = fs.readFileSync(path.join(web, 'index.html'), 'utf8').match(/src="(\/_expo\/static\/js\/web\/index-[a-f0-9]+\.js)"/)?.[1];
-  assert.ok(entry);
-  const file = path.join(web, entry);
-  const original = fs.readFileSync(file, 'utf8');
+  const original = fs.readFileSync(path.join(web, baseline.webEntry), 'utf8');
   const patched = patchHoverCards(original);
   assert.equal(patchHoverCards(patched), patched);
   const start = patched.lastIndexOf('\n__d(', patched.indexOf('_e.HoverCard=function'));
@@ -39,10 +36,19 @@ test('upstream hover cards ignore touch and pen, preserve mouse and keyboard, an
   const close = vm.runInNewContext('(' + module.match(/const t=(\(\)=>\{P\(\),v\(!1\)\})/)[1] + ')', {
     P() {}, v(value) { assert.equal(value, false); closes++; },
   });
-  assert.ok(module.includes('document.addEventListener("pointerdown",t)'));
-  assert.ok(module.includes('document.removeEventListener("pointerdown",t)'));
-  close();
-  assert.equal(closes, 1);
+  assert.ok(module.includes('document.addEventListener("pointerdown",paseoPointerDown)'));
+  assert.ok(module.includes('document.removeEventListener("pointerdown",paseoPointerDown)'));
+  const press = vm.runInNewContext('(' + module.match(/paseoPointerDown=(e=>\{[^}]+\}),n=t=>/)[1] + ')', {
+    b: { current: { contains: target => target.inside } }, t: close,
+  });
+  press({ pointerType: 'mouse', target: { inside: true } });
+  assert.equal(closes, 0, 'internal mouse press preserves links until click');
+  press({ pointerType: 'mouse', target: { inside: false } });
+  assert.equal(closes, 1, 'outside mouse press closes the card');
+  for (const pointerType of ['touch', 'pen']) {
+    press({ pointerType, target: { inside: true } });
+  }
+  assert.equal(closes, 3, 'touch and pen dismiss lingering hover cards');
   assert.equal(patched.slice(0, start), original.slice(0, start));
   assert.throws(() => patchHoverCards(original.replace('onPointerLeave:s.scheduleClose', 'onPointerLeave:changed')), /structure changed/);
 });

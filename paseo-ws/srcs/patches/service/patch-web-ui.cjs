@@ -10,14 +10,16 @@ const { serverRoot, checkCompatibility, replaceOnce: replaceText, patchModule } 
 
 function patchHoverCards(source) {
   const replacements = [
+    ['const t=()=>{P(),v(!1)},n=t=>',
+      'const t=()=>{P(),v(!1)},paseoPointerDown=e=>{("mouse"===e.pointerType&&b.current?.contains(e.target))||t()},n=t=>'],
     ['onPointerEnter:s.openNow,onPointerLeave:s.scheduleClose',
       'onPointerEnter:e=>{"mouse"===e.pointerType&&s.openNow()},onPointerLeave:s.scheduleClose'],
     ['S.current=n.matches(":focus-visible"),e.contains(n)?T():b.current?.contains(n)&&P()',
       'S.current=n.matches(":focus-visible"),S.current&&(e.contains(n)?T():b.current?.contains(n)&&P())'],
     ['document.addEventListener("focusin",n),document.addEventListener("focusout",o)',
-      'document.addEventListener("pointerdown",t),document.addEventListener("focusin",n),document.addEventListener("focusout",o)'],
+      'document.addEventListener("pointerdown",paseoPointerDown),document.addEventListener("focusin",n),document.addEventListener("focusout",o)'],
     ['document.removeEventListener("focusin",n),document.removeEventListener("focusout",o)',
-      'document.removeEventListener("pointerdown",t),document.removeEventListener("focusin",n),document.removeEventListener("focusout",o)'],
+      'document.removeEventListener("pointerdown",paseoPointerDown),document.removeEventListener("focusin",n),document.removeEventListener("focusout",o)'],
   ];
   return patchModule(source, '_e.HoverCard=function', module =>
     replacements.reduce((text, [before, after]) => replaceText(text, before, after, 'HoverCard'), module));

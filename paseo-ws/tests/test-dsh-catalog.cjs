@@ -30,6 +30,11 @@ test('catalog waits for loader readiness before querying stored credentials', as
 test('readiness patch is idempotent and rejects unknown source structures', () => {
   assert.equal(patchSource(patchSource(original)), patchSource(original));
   assert.throws(() => patchSource('unsupported'), /Unsupported/);
+  for (const source of [original + original, patchSource(original) + original, patchSource(original).repeat(2)]) {
+    assert.throws(() => patchSource(source), /Unsupported/);
+    const embedded = '"lib/index.js": "' + Buffer.from(source).toString('base64') + '"';
+    assert.throws(() => patchAssets(embedded), /Unsupported/);
+  }
   const source = '"lib/index.js": "' + Buffer.from(original).toString('base64') + '"';
   const patched = patchAssets(source);
   assert.equal(patchAssets(patched), patched);

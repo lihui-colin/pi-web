@@ -5,8 +5,10 @@ const path = require('node:path');
 const before = "if (method === 'initialize') await ctx.get('loader')?.await();";
 const after = "if (method === 'initialize' || method === 'paseo/catalog') await ctx.get('loader')?.await();";
 function patchSource(source) {
+  const oldCount = source.split(before).length - 1;
+  const newCount = source.split(after).length - 1;
+  if (oldCount + newCount !== 1) throw new Error('Unsupported paseo-dsh bridge structure; refusing to patch');
   if (source.includes(after)) return source;
-  if (source.split(before).length !== 2) throw new Error('Unsupported paseo-dsh bridge structure; refusing to patch');
   return source.replace(before, after);
 }
 function patchAssets(source) {

@@ -15,8 +15,12 @@ function checkCompatibility(installed, warn = console.warn) {
 }
 
 function replaceOnce(source, before, after, label = 'implementation') {
-  const found = source.includes(after) ? after : before;
-  if (!source.includes(found) || source.indexOf(found) !== source.lastIndexOf(found)) {
+  // Prefer the containing form, including when a replacement removes text.
+  const candidates = [before, after].sort((a, b) => b.length - a.length);
+  const found = candidates.find(text => source.includes(text));
+  const at = found === undefined ? -1 : source.indexOf(found);
+  const rest = at < 0 ? '' : source.slice(0, at) + source.slice(at + found.length);
+  if (at < 0 || at !== source.lastIndexOf(found) || rest.includes(before) || rest.includes(after)) {
     throw new Error(`Upstream ${label} structure changed; review patch: ${before}`);
   }
   return found === after ? source : source.replace(before, after);
