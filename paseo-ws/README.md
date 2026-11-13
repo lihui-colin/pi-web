@@ -82,9 +82,13 @@ bash paseo-ws/paseo_web_run.sh stop
 
 ## Web UI 补丁
 
-`srcs/patches/service/patch-web-ui.cjs` 仅保留尚未被上游覆盖的修复：20 秒 TLS 探测预算、触摸信息卡片、宽屏触摸消息操作、触屏终端虚拟键、Web 终端原生右键菜单，以及移动侧栏开启边缘的浏览器仲裁。每次从基准记录的官方原始资源重新构建，生成新哈希及 Brotli/Gzip 副本，确保删除的本地补丁不会残留。安装时自动执行，也可运行 `node paseo-ws/srcs/patches/service/patch-web-ui.cjs` 后刷新网页，无需重启。
+`srcs/patches/service/patch-web-ui.cjs` 仅保留尚未被上游覆盖的修复：20 秒 TLS 探测预算、触摸信息卡片、宽屏触摸消息操作、触屏终端虚拟键、Web 终端原生右键菜单、移动侧栏开启边缘的浏览器仲裁，以及聊天公式渲染。每次从基准记录的官方原始资源重新构建，生成新哈希及 Brotli/Gzip 副本，确保删除的本地补丁不会残留。安装时自动执行，也可运行 `node paseo-ws/srcs/patches/service/patch-web-ui.cjs` 后刷新网页，无需重启。
 
 `srcs/patches/service/patch-workspace-git-startup.cjs` 让侧栏先收到本地 Git 状态，再立即通过上游刷新流程异步查询远端 Forge/PR 状态，包括冷启动时的自建 Forge 与 SSH 别名识别。后台查询不重复刷新本地 Git，并绕过首次本地刷新后的节流；工作区已不再被观察或没有成功加载快照时跳过。补丁可从旧版仅跳过 Forge 的实现升级，重复应用不改变结果。安装时自动执行；单独应用后需重启 Paseo 服务。
+
+聊天公式保留上游 KaTeX MathML 渲染，只打开 `latexMath` 并修正公式前景色。识别层使用 micromark/mdast 的 Markdown 语法及数学扩展，增加 `\(...\)`、`\[...\]` 规则，在普通 Markdown 转义前识别公式。公式通过临时文本槽传递给上游 md4c，再还原为 `LatexMathInline` / `LatexMathDisplay` 节点；公式正文不转换成美元符号、不修改消息原文。只有美元符号公式的消息保留原解析路径。代码块、行内代码、链接目标和 HTML 的边界由解析器处理，未闭合公式随流式输入等待闭合。显式分隔符即声明公式，无命令白名单或内容评分：`\(x\)`、`\(\alpha\)`、`\[E=mc^2\]` 均支持；需要原样展示分隔符或其中的路径时使用代码标记。KaTeX 的 `trust: false` 和错误显示行为保持上游实现。
+
+识别器源码及锁定依赖位于 `srcs/patches/service/math-parser/`，发布资源为同级 `math-parser.js`。修改源码后运行 `node paseo-ws/srcs/patches/service/math-parser/build.cjs` 重建；依赖只安装到 `data/math-parser-build/js/`，生成资源包含依赖许可，常规安装及补丁发布无需联网安装前端依赖。验证使用 `node --test paseo-ws/tests/test-math-parser.cjs paseo-ws/tests/test-web-ui-bundle.cjs`，测试实际加载官方 beta.2 的 md4c WASM 并对比 AST，同时核验 KaTeX 模块未变。
 
 修改面板使用 [官方 0.16 的 diff 协议](https://github.com/getpaseo/paseo/releases/tag/v0.16.0-beta.2)：先显示文件目录，正文分批传输、完成后提交，后续只传有变化的文件正文。旧的独立 diff 连接及 WebSocket 压缩补丁已移除。新版保留上游的大文件与总量限制，目录可先显示不代表所有文件正文都能展开。各本地补丁共用 `srcs/patches/patch-utils.cjs` 的版本检查、安装路径和源码校验。
 

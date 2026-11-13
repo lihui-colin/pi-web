@@ -2,7 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const groups = {
   patches: ['patch-utils.cjs'],
-  'patches/service': ['patch-workspace-git-startup.cjs', 'patch-web-ui.cjs', 'patch-web-ui.baseline.json', 'mobile-sidebar-swipe.js', 'server-directory-picker.js', 'explorer-sidebar-maximize.js'],
+  'patches/service': ['patch-workspace-git-startup.cjs', 'patch-web-ui.cjs', 'patch-web-ui.baseline.json', 'mobile-sidebar-swipe.js', 'server-directory-picker.js', 'explorer-sidebar-maximize.js', 'math-parser.js'],
   'patches/plugins/dsh': ['patch-dsh-catalog.cjs'],
 };
 const patches = Object.fromEntries(Object.entries(groups).flatMap(([dir, files]) => files.map(name => [name, path.join(dir, name)])));

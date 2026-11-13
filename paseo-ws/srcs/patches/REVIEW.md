@@ -7,7 +7,7 @@
 | 本地补丁 | 上游核查及处理 |
 | --- | --- |
 | TLS 连接等待预算 | `runtime/host-runtime.ts` 的初次连接探测及普通连接预算未覆盖本地 TLS 场景的 20 秒预算；保留现有三处限定替换，不改变普通非 TLS 连接。 |
-| 聊天公式 | 官方 beta.2 `MarkdownRenderer` 已接入 md4c `latexMath`、`loadKaTeX` 和 `KaTeXRenderer`（`output: 'mathml'`），但聊天标志写死 `latexMath: false`，所以 `$$...$$` 与 `$...$` 只显示源码。主题工厂 `createMarkdownStyles` 未设置 `math` / `inlineMath`，库默认色是浅色。只打开现有标志，并用前景色、透明底覆盖默认样式；不替换 KaTeX，不改代码块和流式拆分。 |
+| 聊天公式 | 核对官方 beta.2 原始 bundle：`MarkdownRenderer` 已接入 md4c、`loadKaTeX` 与 `KaTeXRenderer`（MathML），但 `latexMath` 关闭；真实 WASM 仅识别美元符号分隔符。保留 KaTeX 和普通 Markdown 解析，启用原标志及主题色。在 `parseMarkdownSync` 内接入锁定版本的 micromark/mdast 语法识别及反斜杠分隔符扩展，公式正文用不冲突的临时文本槽隔离，再还原成上游数学 AST 节点；不再改写消息或重用美元符号承载公式。显式分隔符内的内容直接交给 KaTeX，去掉命令白名单和代数猜测；未知命令按上游 `throwOnError: false` 显示。代码、链接、嵌套容器、相邻公式、已有数学区域、流式闭合及显示公式节点均使用真实 WASM 回归；测试同时确认 KaTeX 模块逐字不变。 |
 | 宽屏触摸消息操作 | `components/message.tsx` 的 `showActions` 仍仅判断紧凑布局、原生平台和悬停。iPad 宽屏 Web 未覆盖；复用现有操作行及复制逻辑，增加 `(hover: none), (pointer: coarse)` 媒体查询和输入能力变化订阅。待发送、无正文及桌面鼠标行为保持上游逻辑。 |
 | 项目菜单新建工作区 | 官方 beta.2 entry 的项目菜单 `Qe` 不含新建工作区，而项目行 `rr` 已有路由回调、`Ve` 已接收按钮回调。菜单复用这两个现有回调，覆盖 context 与 dropdown 两种菜单；缺少 worktree 目标时不显示，不改变悬停和长按行为。 |
 | 触摸信息卡片 | `components/ui/hover-card.tsx` 仍直接以 `openNow` 处理 pointer enter，focus enter 不以 `:focus-visible` 阻止普通点击产生的焦点。保留鼠标/键盘过滤及 pointer dismissal，卡片内部鼠标链接与按钮操作继续可用。上游的单卡片协调不替代这些触摸规则。 |

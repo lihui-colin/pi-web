@@ -21,7 +21,7 @@ test('Web patch rebuilds from upstream, removes retired features and stays idemp
     assert.ok(path.resolve(root).startsWith(path.join(os.tmpdir(), 'paseo-web-patch-')));
     fs.rmSync(root, { recursive: true, force: true });
   });
-  for (const file of ['patch-web-ui.cjs', 'patch-web-ui.baseline.json', 'patch-utils.cjs', 'mobile-sidebar-swipe.js', 'server-directory-picker.js', 'explorer-sidebar-maximize.js']) fs.copyFileSync(sourceFile(file), fixtureFile(root, file));
+  for (const file of ['patch-web-ui.cjs', 'patch-web-ui.baseline.json', 'patch-utils.cjs', 'mobile-sidebar-swipe.js', 'server-directory-picker.js', 'explorer-sidebar-maximize.js', 'math-parser.js']) fs.copyFileSync(sourceFile(file), fixtureFile(root, file));
   const server = path.join(root, 'runtime/lib/node_modules/@getpaseo/cli/node_modules/@getpaseo/server');
   const web = path.join(server, 'dist/server/web-ui');
   fs.mkdirSync(path.dirname(path.join(web, baseline.webEntry)), { recursive: true });
@@ -58,7 +58,10 @@ test('Web patch rebuilds from upstream, removes retired features and stays idemp
   assert.equal(bundle.includes('latexMath:!1'), false);
   assert.equal((bundle.match(/y=\{latexMath:!0,hardSoftBreaks:!0,admonitions:!0\}/g) || []).length, 1);
   assert.ok(bundle.includes('math:{color:t.colors.foreground,backgroundColor:"transparent"},inlineMath:{color:t.colors.foreground}'));
-  const mathMarker = 'e.Markdown=function';
+  assert.equal((bundle.match(/globalThis\.paseoParseMarkdownMath\(e,/g) || []).length, 1);
+  assert.equal(bundle.includes('paseoNormalizeLatexDelimiters'), false);
+  assert.equal(moduleContaining(bundle, 'e.KaTeXRenderer=function'), moduleContaining(source, 'e.KaTeXRenderer=function'));
+  const mathMarker = '_e.parseMarkdownSync=l';
   assert.equal(moduleContaining(bundle, mathMarker), moduleContaining(patchMarkdownMath(source), mathMarker));
   const messageMarker = 'Object.defineProperty(_e,"UserMessage",';
   assert.equal(moduleContaining(bundle, messageMarker), moduleContaining(patchMessageActions(source), messageMarker));

@@ -1,0 +1,13 @@
+{
+  "dependencies": {
+    "esbuild": "0.25.12",
+    "mdast-util-from-markdown": "2.0.3",
+    "mdast-util-gfm": "3.1.0",
+    "mdast-util-math": "3.0.0",
+    "micromark-extension-gfm": "3.0.0",
+    "micromark-extension-math": "3.1.0"
+  },
+  "name": "paseo-math-recognition",
+  "version": "1.0.0",
+  "private": true
+}

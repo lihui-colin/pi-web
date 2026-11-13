@@ -80,6 +80,12 @@ function patchMarkdownMath(source) {
   // Enable the existing parser flag without changing code blocks or streaming.
   source = replaceText(source, 'y={latexMath:!1,hardSoftBreaks:!0,admonitions:!0}',
     'y={latexMath:!0,hardSoftBreaks:!0,admonitions:!0}', 'markdown math');
+  // Recognize math inside Markdown's grammar and restore upstream AST nodes.
+  // Leave the chat text, streaming splitter and KaTeX renderer untouched.
+  source = patchModule(source, '_e.parseMarkdownSync=l', module => replaceText(module,
+    'const h=JSON.parse(b(e,n?1:0,t?1:0,s?1:0,o?1:0,l?1:0,c?1:0,p?1:0,f?1:0))',
+    'const h=globalThis.paseoParseMarkdownMath(e,paseoSource=>JSON.parse(b(paseoSource,n?1:0,t?1:0,s?1:0,o?1:0,l?1:0,c?1:0,p?1:0,f?1:0)),t)',
+    'markdown math AST recognition'));
   // Upstream theme styles cover text but not math, so MathML inherits a light
   // default color and disappears on the dark chat background.
   return replaceText(source, 'thematicBreak:{...f,color:t.colors.border,height:1}}}}',
@@ -168,6 +174,7 @@ function main() {
   }
   const swipe = fs.readFileSync(path.join(__dirname, 'mobile-sidebar-swipe.js'), 'utf8');
   const explorerMaximize = fs.readFileSync(path.join(__dirname, 'explorer-sidebar-maximize.js'), 'utf8');
+  const mathParser = fs.readFileSync(path.join(__dirname, 'math-parser.js'), 'utf8');
   patched = patchHoverCards(patched);
   patched = patchMarkdownMath(patched);
   patched = patchMessageActions(patched);
@@ -175,7 +182,7 @@ function main() {
   patched = patchExplorerSidebarMaximize(patched);
   patched = patchProjectWorkspaceMenu(patched);
   // Keep the official binary diff stream and its connection ownership unchanged.
-  patched = explorerMaximize + '\n' + picker + '\n' + swipe + '\n' + patched;
+  patched = explorerMaximize + '\n' + picker + '\n' + swipe + '\n' + mathParser + '\n' + patched;
   // Validate syntax before publishing either the bundle or HTML.
   new (require('node:vm').Script)(patched);
   const hash = crypto.createHash('sha256').update(patched).digest('hex').slice(0, 32);
