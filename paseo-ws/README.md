@@ -82,7 +82,7 @@ bash paseo-ws/paseo_web_run.sh stop
 
 ## Web UI 补丁
 
-`srcs/patches/service/patch-web-ui.cjs` 仅保留尚未被上游覆盖的修复：20 秒 TLS 探测预算、触摸信息卡片、宽屏触摸消息操作、Web 终端原生右键菜单，以及移动侧栏开启边缘的浏览器仲裁。每次从基准记录的官方原始资源重新构建，生成新哈希及 Brotli/Gzip 副本，确保删除的本地补丁不会残留。安装时自动执行，也可运行 `node paseo-ws/srcs/patches/service/patch-web-ui.cjs` 后刷新网页，无需重启。
+`srcs/patches/service/patch-web-ui.cjs` 仅保留尚未被上游覆盖的修复：20 秒 TLS 探测预算、触摸信息卡片、宽屏触摸消息操作、触屏终端虚拟键、Web 终端原生右键菜单，以及移动侧栏开启边缘的浏览器仲裁。每次从基准记录的官方原始资源重新构建，生成新哈希及 Brotli/Gzip 副本，确保删除的本地补丁不会残留。安装时自动执行，也可运行 `node paseo-ws/srcs/patches/service/patch-web-ui.cjs` 后刷新网页，无需重启。
 
 `srcs/patches/service/patch-workspace-git-startup.cjs` 让侧栏先收到本地 Git 状态，再立即通过上游刷新流程异步查询远端 Forge/PR 状态，包括冷启动时的自建 Forge 与 SSH 别名识别。后台查询不重复刷新本地 Git，并绕过首次本地刷新后的节流；工作区已不再被观察或没有成功加载快照时跳过。补丁可从旧版仅跳过 Forge 的实现升级，重复应用不改变结果。安装时自动执行；单独应用后需重启 Paseo 服务。
 
@@ -97,6 +97,10 @@ bash paseo-ws/paseo_web_run.sh stop
 `mobile-sidebar-swipe.js` 仅在紧凑布局的左边缘 32px 右滑时阻止浏览器抢占；动画与状态提交仍由官方手势负责。上游[根布局](https://github.com/getpaseo/paseo/blob/v0.16.0-beta.2/packages/app/src/app/_layout.tsx#L380) 开启手势仍使用 `touch-action: auto`，所以保留这一缺口修复；[侧栏关闭](https://github.com/getpaseo/paseo/blob/v0.16.0-beta.2/packages/app/src/mobile-panels/presentation.tsx#L91) 已使用 `pan-y`，本地关闭仲裁已删除。不会把整个聊天区域改成 `pan-y`，避免禁用正文中的横向滚动。
 
 添加项目时，Web **Browse** 使用 `server-directory-picker.js` 浏览所选主机的目录，支持双栏、面包屑、隐藏目录、路径编辑及新建目录；手机显示单栏。保留上游路径搜索，Electron 本机继续使用原生选择器。
+
+“文件／更改／＋”侧栏标签栏右端提供最大化／恢复按钮，旁边保留原有收起按钮，控制整块侧栏而不是某一个终端。仅在聊天区与右侧栏并排显示的 dock 布局中提供最大化；窄屏 overlay 模式不显示该按钮，进入该模式时会清除最大化状态。最大化使右侧栏覆盖中间聊天区及原右侧栏区域，左侧工作区导航保持不变，所有侧栏标签共用状态；中间聊天区保持挂载，但在最大化期间通过 inert、RetainedPanel 活动状态和原有窗格焦点标志暂停键盘/焦点交互，恢复时重新启用，避免操作被覆盖的聊天控件；恢复后聊天区重新露出、右侧栏回到此前宽度，收起或切换工作区会清除最大化状态。切换检测同时使用上游 RetainedPanel 活动上下文，在布局提交时复位，避免后台保留的 workspace 因焦点属性滞后而在切回后恢复异常宽度；内容组件保持挂载。复用上游窗格最大化按钮的图标、标签与样式，只覆盖 ExplorerFrame 的渲染几何，不修改持久宽度、不搬动或重挂载标签内容，不改变主窗格的原生最大化。`explorer-sidebar-maximize.js` 通过公共标签栏 action 插槽加入按钮。验证使用 `node --test paseo-ws/tests/test-explorer-sidebar-maximize.cjs paseo-ws/tests/test-web-ui-bundle.cjs`；设置 `PASEO_PLAYWRIGHT_MODULE=/path/to/playwright` 可运行 Chromium 触屏检查，复用官方 React/ReactDOM 以及实际补丁 Frame 与 React Native Web/Unistyles 渲染器验证三栏边界、跨标签状态、恢复宽度、收起、横竖屏和组件身份，不创建真实 PTY。
+
+所有触屏终端均显示上游 Esc、Tab、Ctrl、方向键等虚拟键，包括宽屏平板和带鼠标的触屏电脑。复用上游响应式 `usePointerCapabilities`、`hasTouchScreen`：按 `any-pointer: coarse` 或 `navigator.maxTouchPoints` 检测触屏能力，保留原生平台与紧凑布局的既有显示逻辑，普通宽屏非触屏电脑保持隐藏。键盘 padding 和终端 keyboardInset 同步沿用虚拟键显示条件，使宽屏触屏设备弹出软键盘时也能避让，指针能力变化会更新对应回调。上游 `terminal-virtual-keyboard.ts` 的显示判断仅覆盖原生平台和紧凑布局，因此补充触屏参数；按可用宽度排列按键、按键发送和剪贴板策略不变。验证使用 `node --test paseo-ws/tests/test-terminal-touch-keys.cjs paseo-ws/tests/test-web-ui-bundle.cjs`。
 
 Web 终端使用浏览器原生右键菜单：PC 右键、手机长按的菜单和复制粘贴选项由浏览器提供，不注入自定义菜单或常驻按钮。补丁移除 Web 终端对 `contextmenu` 的默认行为拦截，Electron 继续使用原生应用菜单。具体可用选项由浏览器、选区和当前焦点决定。重新发布从官方原始资源构建，刷新页面后生效。
 

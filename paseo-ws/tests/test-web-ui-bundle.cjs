@@ -9,7 +9,7 @@ const crypto = require('node:crypto');
 const zlib = require('node:zlib');
 const baseline = require('../srcs/patches/service/patch-web-ui.baseline.json');
 const { serverRoot } = require('../srcs/patches/patch-utils.cjs');
-const { patchMessageActions, patchProjectWorkspaceMenu } = require('../srcs/patches/service/patch-web-ui.cjs');
+const { patchMarkdownMath, patchMessageActions, patchProjectWorkspaceMenu, patchTerminalTouchKeys, patchExplorerSidebarMaximize } = require('../srcs/patches/service/patch-web-ui.cjs');
 
 test('Web patch rebuilds from upstream, removes retired features and stays idempotent', t => {
   const installed = fs.existsSync(path.join(serverRoot, 'package.json')) && JSON.parse(fs.readFileSync(path.join(serverRoot, 'package.json'))).version === baseline.version;
@@ -21,7 +21,7 @@ test('Web patch rebuilds from upstream, removes retired features and stays idemp
     assert.ok(path.resolve(root).startsWith(path.join(os.tmpdir(), 'paseo-web-patch-')));
     fs.rmSync(root, { recursive: true, force: true });
   });
-  for (const file of ['patch-web-ui.cjs', 'patch-web-ui.baseline.json', 'patch-utils.cjs', 'mobile-sidebar-swipe.js', 'server-directory-picker.js']) fs.copyFileSync(sourceFile(file), fixtureFile(root, file));
+  for (const file of ['patch-web-ui.cjs', 'patch-web-ui.baseline.json', 'patch-utils.cjs', 'mobile-sidebar-swipe.js', 'server-directory-picker.js', 'explorer-sidebar-maximize.js']) fs.copyFileSync(sourceFile(file), fixtureFile(root, file));
   const server = path.join(root, 'runtime/lib/node_modules/@getpaseo/cli/node_modules/@getpaseo/server');
   const web = path.join(server, 'dist/server/web-ui');
   fs.mkdirSync(path.dirname(path.join(web, baseline.webEntry)), { recursive: true });
@@ -55,10 +55,24 @@ test('Web patch rebuilds from upstream, removes retired features and stays idemp
   for (const marker of ['e.useOpenAgentListGesture=function', '_e.MobilePanelOverlay=function', 'observeDiff(e){return this.diffStreams.observe(e)}', '"Duplicate diff entry"']) {
     assert.equal(moduleContaining(bundle, marker), moduleContaining(source, marker), 'upstream gestures and diff remain unchanged');
   }
+  assert.equal(bundle.includes('latexMath:!1'), false);
+  assert.equal((bundle.match(/y=\{latexMath:!0,hardSoftBreaks:!0,admonitions:!0\}/g) || []).length, 1);
+  assert.ok(bundle.includes('math:{color:t.colors.foreground,backgroundColor:"transparent"},inlineMath:{color:t.colors.foreground}'));
+  const mathMarker = 'e.Markdown=function';
+  assert.equal(moduleContaining(bundle, mathMarker), moduleContaining(patchMarkdownMath(source), mathMarker));
   const messageMarker = 'Object.defineProperty(_e,"UserMessage",';
   assert.equal(moduleContaining(bundle, messageMarker), moduleContaining(patchMessageActions(source), messageMarker));
   const projectMarker = 'function rr({project:o,displayName:t';
   assert.equal(moduleContaining(bundle, projectMarker), moduleContaining(patchProjectWorkspaceMenu(source), projectMarker));
+  for (const marker of ['_e.TerminalPane=function', 'e.shouldShowTerminalVirtualKeyBar=function']) {
+    assert.equal(moduleContaining(bundle, marker), moduleContaining(patchTerminalTouchKeys(source), marker));
+  }
+  const splitMarker = '_e.SplitContainer=function';
+  assert.equal(moduleContaining(bundle, splitMarker), moduleContaining(patchExplorerSidebarMaximize(source), splitMarker));
+  for (const marker of ['_e.WorkspaceTabMeasurementScope=function', 'e.ExplorerSidebarDock=function', 'Object.defineProperty(e,"ExplorerFrame",']) {
+    assert.equal(moduleContaining(bundle, marker), moduleContaining(patchExplorerSidebarMaximize(source), marker));
+  }
+  assert.equal(bundle.includes('createPaseoTerminalFullscreen'), false);
   const handler = bundle.match(/oe=\(0,n\.useCallback\)\((n=>\{typeof window\.paseoDesktop\?\.menu\?\.showContextMenu==="function"&&\(n\.preventDefault\(\),te\(\)\)\}),\[te\]\)/)?.[1];
   assert.ok(handler);
   let prevented = 0, desktopMenus = 0;

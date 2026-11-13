@@ -7,9 +7,12 @@
 | 本地补丁 | 上游核查及处理 |
 | --- | --- |
 | TLS 连接等待预算 | `runtime/host-runtime.ts` 的初次连接探测及普通连接预算未覆盖本地 TLS 场景的 20 秒预算；保留现有三处限定替换，不改变普通非 TLS 连接。 |
+| 聊天公式 | 官方 beta.2 `MarkdownRenderer` 已接入 md4c `latexMath`、`loadKaTeX` 和 `KaTeXRenderer`（`output: 'mathml'`），但聊天标志写死 `latexMath: false`，所以 `$$...$$` 与 `$...$` 只显示源码。主题工厂 `createMarkdownStyles` 未设置 `math` / `inlineMath`，库默认色是浅色。只打开现有标志，并用前景色、透明底覆盖默认样式；不替换 KaTeX，不改代码块和流式拆分。 |
 | 宽屏触摸消息操作 | `components/message.tsx` 的 `showActions` 仍仅判断紧凑布局、原生平台和悬停。iPad 宽屏 Web 未覆盖；复用现有操作行及复制逻辑，增加 `(hover: none), (pointer: coarse)` 媒体查询和输入能力变化订阅。待发送、无正文及桌面鼠标行为保持上游逻辑。 |
 | 项目菜单新建工作区 | 官方 beta.2 entry 的项目菜单 `Qe` 不含新建工作区，而项目行 `rr` 已有路由回调、`Ve` 已接收按钮回调。菜单复用这两个现有回调，覆盖 context 与 dropdown 两种菜单；缺少 worktree 目标时不显示，不改变悬停和长按行为。 |
 | 触摸信息卡片 | `components/ui/hover-card.tsx` 仍直接以 `openNow` 处理 pointer enter，focus enter 不以 `:focus-visible` 阻止普通点击产生的焦点。保留鼠标/键盘过滤及 pointer dismissal，卡片内部鼠标链接与按钮操作继续可用。上游的单卡片协调不替代这些触摸规则。 |
+| 整块文件/更改侧栏最大化 | 官方 beta.2 `ExplorerSidebarDock` 已有标签栏右端 `headerAction`（收起），但未提供侧栏最大化；`ExplorerFrame` 的几何仅负责宽度与拖动。复用 `WorkspaceDesktopTabsRow` 中原有最大化/恢复 ToolbarButton，在该插槽与原收起控件并列；仅在 dock 并排布局显示该按钮，overlay 模式保持原收起控件且清除最大化状态。状态由侧栏 Frame 持有，订阅上游 `useRetainedPanelActive` 并在 layout effect 中清除失活 workspace 的最大化，覆盖保留页面的焦点属性延迟更新；渲染时扩展右侧栏到整个中间聊天区及原侧栏区域，保留左侧导航；最大化期间直接替换 frameStyle，避免原像素宽度内联样式压过百分比 CSS 类，恢复不改已保存宽度。保留 SplitContainer 内部逻辑、终端渲染及收起动作；仅包装主内容出口，在最大化时设置 inert 并通过上游 RetainedPanelActivity 与 isWorkspaceFocused 暂停被覆盖的聊天区交互，临时状态按 workspace 隔离、恢复/离开时清除。撤回仅针对终端的特殊处理。 |
+| 触屏终端虚拟键 | [beta.2 `terminal-virtual-keyboard.ts`](https://github.com/getpaseo/paseo/blob/v0.16.0-beta.2/packages/app/src/terminal/runtime/terminal-virtual-keyboard.ts#L92) 仅判断 `isNative || isCompact`。TerminalPane 复用上游响应式指针能力 hook 与 `hasTouchScreen`，补充所有触屏设备，包含宽屏和平板连接鼠标的情况；Metro 模块 ID 从当前官方资源解析，不固定编号。同时复用原有 useKeyboardShiftStyle 和键盘变化回调，以相同条件启用 padding 与 keyboardInset，避免宽屏触屏只显示按键而缺少避让。原有按键布局、发送及剪贴板策略保持原样。 |
 | Web 终端右键菜单 | `components/terminal-emulator.tsx` 仍先 `preventDefault()`，自定义菜单依赖 Electron。保留仅存在 Electron 菜单接口时拦截的补丁。beta.2 对共用 `context-menu.tsx` 的嵌套按钮调整不覆盖此缺口。 |
 | 移动侧栏开启边缘 | 保留左侧 32px 的浏览器手势仲裁；上游仍控制布局、动画和状态。关闭侧栏的原生手势及聊天正文不修改。 |
 | 首次工作区 Git 刷新 | `workspace-git-service.ts` 的初次刷新仍 `includeForge: true`。保留先本地、后 Forge 的异步刷新，调用上游 `refreshWorkspaceTarget`，保留活动观察/成功快照 guard，不重复刷新本地 worktree，后台续刷绕过首次刷新节流。 |

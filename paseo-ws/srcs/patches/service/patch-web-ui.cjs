@@ -22,6 +22,70 @@ function patchMessageActions(source) {
   });
 }
 
+function patchTerminalTouchKeys(source) {
+  // Reuse upstream's reactive any-pointer detection and maxTouchPoints fallback.
+  // Resolve its Metro ID from this bundle instead of fixing an ID across builds.
+  let pointerId;
+  patchModule(source, 'e.usePointerCapabilities=function', module => {
+    pointerId = module.trimEnd().match(/},(\d+),\[[\d,]+\]\);$/)?.[1];
+    if (!pointerId) throw new Error('Upstream pointer module structure changed; review patch.');
+    return module;
+  });
+  source = patchModule(source, '_e.TerminalPane=function', module => {
+    module = replaceText(module, 'var t=r(_d[0]),',
+      `var paseoTerminalPointerCapabilities=r(${pointerId}),t=r(_d[0]),`, 'terminal pointer import');
+    module = replaceText(module,
+      'we=(0,x.shouldShowTerminalVirtualKeyBar)({isNative:G.isNative,isCompact:Te})',
+      'paseoTerminalInput=(0,paseoTerminalPointerCapabilities.usePointerCapabilities)(),we=(0,x.shouldShowTerminalVirtualKeyBar)({isNative:G.isNative,isCompact:Te,isTouchScreen:paseoTerminalInput.touchScreen||paseoTerminalPointerCapabilities.hasTouchScreen()})', 'terminal touch keys');
+    module = replaceText(module,
+      'useKeyboardShiftStyle)({mode:"padding",enabled:G.isNative||Te})',
+      'useKeyboardShiftStyle)({mode:"padding",enabled:we})', 'touch terminal keyboard padding');
+    return replaceText(module,
+      'Ht=(0,d.useCallback)(e=>{ze(G.isNative||Te?e:0),Oe(e>0),Wt()},[Te,Wt])',
+      'Ht=(0,d.useCallback)(e=>{ze(we?e:0),Oe(e>0),Wt()},[we,Wt])', 'touch terminal keyboard inset');
+  });
+  return patchModule(source, 'e.shouldShowTerminalVirtualKeyBar=function', module =>
+    replaceText(module, 'e.shouldShowTerminalVirtualKeyBar=function(t){return t.isNative||t.isCompact}',
+      'e.shouldShowTerminalVirtualKeyBar=function(t){return t.isNative||t.isCompact||!!t.isTouchScreen}', 'terminal key visibility'));
+}
+
+function patchExplorerSidebarMaximize(source) {
+  // Reuse the existing toolbar's maximize/restore button in the dock header.
+  const append = (module, code) => {
+    const tail = module.trimEnd().match(/},\d+,\[[\d,]+\]\);$/)?.[0];
+    if (!tail) throw new Error('Upstream Explorer module structure changed; review maximize patch.');
+    return replaceText(module, tail, ';' + code + tail, 'Explorer maximize integration');
+  };
+  source = patchModule(source, '_e.WorkspaceTabMeasurementScope=function', module =>
+    append(module, '_e.PaseoExplorerMaximizeButton=Pe'));
+  source = patchModule(source, 'e.ExplorerSidebarDock=function', module =>
+    append(module, 'e.ExplorerSidebarDock=createPaseoExplorerDock(r(d[2]),e.ExplorerSidebarDock,u.PaseoExplorerMaximizeButton,o.View)'));
+  source = patchModule(source, '_e.SplitContainer=function', module =>
+    append(module, '_e.SplitContainer=createPaseoExplorerAwareMain(s,_e.SplitContainer,C.RetainedPanelActivity)'));
+  return patchModule(source, 'Object.defineProperty(e,"ExplorerFrame",', module => {
+    const replacements = [
+      ['get:function(){return x}});var t=r(d[0])', 'get:function(){return paseoExplorerFrame}});var t=r(d[0])'],
+      ['const B=(0,f.useExplorerGeometry)(q);',
+        'const paseoExplorerGeometry=(0,f.useExplorerGeometry)(q),B=n.paseoExplorerMaximized?{...paseoExplorerGeometry,frameStyle:b.maximizedFrame,resizeHandle:null}:paseoExplorerGeometry;'],
+      ['b=n.StyleSheet.create({content:{flex:1,minHeight:0}})',
+        'b=n.StyleSheet.create({content:{flex:1,minHeight:0},maximizedFrame:{position:"absolute",top:0,right:0,bottom:0,left:0,width:"100%",zIndex:20}})'],
+    ];
+    module = replacements.reduce((text, [before, after]) => replaceText(text, before, after, 'Explorer maximize frame'), module);
+    return append(module, 'const paseoExplorerFrame=createPaseoExplorerFrame(r(d[2]),x,u.useRetainedPanelActive)');
+  });
+}
+
+function patchMarkdownMath(source) {
+  // Chat markdown ships KaTeX and MathML renderers, then disables them.
+  // Enable the existing parser flag without changing code blocks or streaming.
+  source = replaceText(source, 'y={latexMath:!1,hardSoftBreaks:!0,admonitions:!0}',
+    'y={latexMath:!0,hardSoftBreaks:!0,admonitions:!0}', 'markdown math');
+  // Upstream theme styles cover text but not math, so MathML inherits a light
+  // default color and disappears on the dark chat background.
+  return replaceText(source, 'thematicBreak:{...f,color:t.colors.border,height:1}}}}',
+    'thematicBreak:{...f,color:t.colors.border,height:1},math:{color:t.colors.foreground,backgroundColor:"transparent"},inlineMath:{color:t.colors.foreground}}}}', 'markdown math color');
+}
+
 function patchProjectWorkspaceMenu(source) {
   return patchModule(source, 'function rr({project:o,displayName:t', module => {
     // Keep the compiled menu/actions unchanged. Context carries the existing
@@ -103,11 +167,15 @@ function main() {
     throw new Error('Upstream mobile sidebar structure changed; review swipe patch.');
   }
   const swipe = fs.readFileSync(path.join(__dirname, 'mobile-sidebar-swipe.js'), 'utf8');
+  const explorerMaximize = fs.readFileSync(path.join(__dirname, 'explorer-sidebar-maximize.js'), 'utf8');
   patched = patchHoverCards(patched);
+  patched = patchMarkdownMath(patched);
   patched = patchMessageActions(patched);
+  patched = patchTerminalTouchKeys(patched);
+  patched = patchExplorerSidebarMaximize(patched);
   patched = patchProjectWorkspaceMenu(patched);
   // Keep the official binary diff stream and its connection ownership unchanged.
-  patched = picker + '\n' + swipe + '\n' + patched;
+  patched = explorerMaximize + '\n' + picker + '\n' + swipe + '\n' + patched;
   // Validate syntax before publishing either the bundle or HTML.
   new (require('node:vm').Script)(patched);
   const hash = crypto.createHash('sha256').update(patched).digest('hex').slice(0, 32);
@@ -125,4 +193,4 @@ function main() {
 }
 
 if (require.main === module) main();
-module.exports = { checkCompatibility, patchHoverCards, patchMessageActions, patchProjectWorkspaceMenu };
+module.exports = { checkCompatibility, patchHoverCards, patchMarkdownMath, patchMessageActions, patchProjectWorkspaceMenu, patchTerminalTouchKeys, patchExplorerSidebarMaximize };
