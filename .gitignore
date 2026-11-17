@@ -17,5 +17,9 @@ node_modules/
 /paseo-ws/runtime/
 /paseo-ws/.npm-cache/
 
+# Orca local configuration, pairing credentials, binaries and runtime state.
+/ocra_ws/data/
+/ocra_ws/app-release.apk
+
 # Python helper bytecode is generated locally.
 /paseo-ws/**/__pycache__/
