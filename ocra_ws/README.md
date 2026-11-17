@@ -28,6 +28,10 @@ env -u ORCA_ENVIRONMENT -u ORCA_PAIRING_CODE data/orca-server/bin/orca-ide pair 
 
 将输出的链接粘贴到客户端的配对入口。配对链接用于一次性配对，含访问凭据，不保存到配置文件。已配对设备使用自己的凭据连接，无需每次启动重新配对。实际配置权限为 `600`，整个 `data/` 不提交 Git。旧配置中的 `pairingUrl` 字段可删除，脚本不再读取或更新它。
 
+安装会应用 `srcs/patches/service/001-default-chat.json`：主机加载 profile 时将 `agentDefaultSurface` 设为 `chat`，并将 `nativeChatProviders.codex` 设为 `true`，其他设置和其他 agent 的单独选择保持原值。这是对官方服务包的本地补丁，覆盖这两个字段原有的选择；不是 `ocra.conf` 配置项。手机未指定启动类型时将使用主机的 Chat 默认值，避免仅以聊天视图展示 CLI 会话。
+
+已安装最新版本时仍会检查并应用补丁；重复执行不会重复修改，遇到无法识别的上游代码会报错。补丁在服务下次启动时生效，安装不会自动重启，已有 CLI 会话不会转为原生 Chat。更新官方版本后安装流程会重新应用补丁。
+
 Orca 自身仍使用当前用户的官方默认配置目录（Linux 通常为 `~/.config/orca`），保留已有账号、项目、配对身份和会话。首次运行前需保证该 profile 未被其他 Orca 实例占用。同一 profile 只能运行一个服务。
 
 `ocra_web_run.sh stop` 会中断该服务的客户端连接，执行前请确认任务可以中断。停止仅依据 `data/server.json` 中的 PID 和进程启动时间发送 SIGTERM，不接管或停止其他来源启动的服务。端口被已有进程占用时，`ocra_web_run.sh start` 会报错；应在安排好维护窗口后，用原有方式停止旧服务，再使用本目录脚本启动。修改 IP 或端口后，也需要在允许中断时先停止、再启动。

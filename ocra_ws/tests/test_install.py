@@ -35,7 +35,15 @@ class InstallTests(unittest.TestCase):
         cli.parent.mkdir(parents=True)
         cli.write_text('#!/bin/sh\necho ' + version + '\n')
         cli.chmod(0o700)
+        self.server_bundle(cli.parents[1])
         (self.root / 'data/orca-server').symlink_to(cli.parents[1])
+
+    def server_bundle(self, release):
+        target = release / 'orcad/orcad-server.js'
+        target.parent.mkdir(parents=True)
+        target.write_text('function load(e){return {...e.settings,'
+                          'agentDefaultSurface:_Un(e.settings?.agentDefaultSurface)}}')
+        return target
 
     def run_install(self, answer=''):
         return subprocess.run(['bash', str(self.root / 'install.sh')], input=answer,
@@ -80,6 +88,38 @@ class InstallTests(unittest.TestCase):
         cli.parent.mkdir(parents=True)
         cli.write_text('#!/bin/sh\necho 1.4.261\n')
         cli.chmod(0o700)
+        self.server_bundle(cli.parents[1])
         result = self.run_install('yes\n')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.root / 'data/orca-server').resolve(), cli.parents[1])
+
+    def test_chat_patch_is_idempotent_and_keeps_other_settings(self):
+        self.installed('1.4.261')
+        target = self.root / 'data/orca-server/orcad/orcad-server.js'
+        first = self.run_install()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        source = target.read_text()
+        self.assertIn('...e.settings,', source)
+        self.assertIn('agentDefaultSurface:"chat"', source)
+        self.assertIn('...e.settings?.nativeChatProviders,codex:true', source)
+        if shutil.which('node'):
+            result = subprocess.run(['node', '-e', source + ';console.log(JSON.stringify(load('
+                '{settings:{agentDefaultSurface:"terminal",nativeChatProviders:'
+                '{codex:false,claude:false},custom:"keep"}})))'],
+                capture_output=True, text=True, check=True)
+            settings = json.loads(result.stdout)
+            self.assertEqual(settings['agentDefaultSurface'], 'chat')
+            self.assertEqual(settings['nativeChatProviders'], {'codex': True, 'claude': False})
+            self.assertEqual(settings['custom'], 'keep')
+        second = self.run_install()
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(target.read_text(), source)
+
+    def test_incompatible_patch_fails_without_changing_bundle(self):
+        self.installed('1.4.261')
+        target = self.root / 'data/orca-server/orcad/orcad-server.js'
+        target.write_text('unexpected upstream format')
+        result = self.run_install()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('不兼容', result.stderr)
+        self.assertEqual(target.read_text(), 'unexpected upstream format')
