@@ -24,7 +24,6 @@ CURRENT=""
 if [[ -x "$ROOT/data/orca-server/bin/orca-ide" ]]; then
   CURRENT="$("$ROOT/data/orca-server/bin/orca-ide" --version)"
   if [[ "$CURRENT" == "$VERSION" ]]; then
-    python3 "$ROOT/srcs/patches/apply.py" "$ROOT/data/orca-server"
     printf '已安装最新版本 %s，跳过安装。\n' "$CURRENT"
     exit 0
   fi
@@ -64,7 +63,6 @@ else
   mkdir -p "$ROOT/data/releases"
   mv -- "$PAYLOAD" "$DEST"
 fi
-python3 "$ROOT/srcs/patches/apply.py" "$DEST"
 if [[ -e "$ROOT/data/orca-server" && ! -L "$ROOT/data/orca-server" ]]; then
   echo 'data/orca-server 已存在且不是软链接，请先检查。' >&2
   exit 1

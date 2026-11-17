@@ -1,7 +1,0 @@
-{
-  "description": "加载主机 profile 时使用 Chat，并明确启用 Codex 原生 Chat。",
-  "file": "orcad/orcad-server.js",
-  "pattern": "agentDefaultSurface:[A-Za-z_$][\\w$]*\\((?P<state>[A-Za-z_$][\\w$]*)\\.settings\\?\\.agentDefaultSurface\\)",
-  "replacement": "agentDefaultSurface:\"chat\",nativeChatProviders:{...\\g<state>.settings?.nativeChatProviders,codex:true}",
-  "marker": "agentDefaultSurface:\"chat\",nativeChatProviders:"
-}
