@@ -16,12 +16,17 @@ bash ocra_ws/ocra_web_run.sh stop
 ```json
 {
   "ip": "10.30.0.25",
-  "port": 25225,
-  "pairingUrl": ""
+  "port": 25225
 }
 ```
 
-`ip` 是客户端可访问的主机地址；服务监听 `0.0.0.0`，端口来自 `port`，拒绝公网来源。容器环境需要宿主机将对应端口映射到容器。启动就绪后，脚本调用 `orca pair --address <ip>`，验证配对链接内的地址与配置相符，再将完整链接写入 `pairingUrl`；已启动时再次执行 `ocra_web_run.sh start` 可刷新/补写链接，不会重启。将链接粘贴到 Orca 桌面客户端 Settings → Remote Orca Servers → Add Server。配对链接含访问凭据，实际配置权限为 `600`，整个 `data/` 不提交 Git。
+`ip` 是客户端可访问的主机地址；服务监听 `0.0.0.0`，端口来自 `port`，拒绝公网来源。容器环境需要宿主机将对应端口映射到容器。启动只负责启动和就绪检查，不生成配对链接，也不写入配置。需要配对新设备时，按需执行（地址使用 `data/ocra.conf` 中的 `ip`）：
+
+```bash
+env -u ORCA_ENVIRONMENT -u ORCA_PAIRING_CODE data/orca-server/bin/orca-ide pair --address 10.30.0.25
+```
+
+将输出的链接粘贴到客户端的配对入口。配对链接用于一次性配对，含访问凭据，不保存到配置文件。已配对设备使用自己的凭据连接，无需每次启动重新配对。实际配置权限为 `600`，整个 `data/` 不提交 Git。旧配置中的 `pairingUrl` 字段可删除，脚本不再读取或更新它。
 
 Orca 自身仍使用当前用户的官方默认配置目录（Linux 通常为 `~/.config/orca`），保留已有账号、项目、配对身份和会话。首次运行前需保证该 profile 未被其他 Orca 实例占用。同一 profile 只能运行一个服务。
 

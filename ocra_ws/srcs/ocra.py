@@ -11,8 +11,6 @@ import subprocess
 import sys
 import tempfile
 import time
-from urllib.parse import parse_qs, urlsplit
-import base64
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
@@ -24,7 +22,7 @@ CLI = DATA / "orca-server/bin/orca-ide"
 
 def cli_env():
     # A terminal opened from a paired Orca can carry a remote target. Always
-    # manage this machine's runtime, including when querying readiness/pairing.
+    # manage this machine's runtime, including when querying readiness.
     env = os.environ.copy()
     for key in ("ORCA_ENVIRONMENT", "ORCA_PAIRING_CODE"):
         env.pop(key, None)
@@ -32,7 +30,7 @@ def cli_env():
 
 
 def write_json(path, value):
-    """Atomically replace a private file; never leave a partial pairing code."""
+    """Atomically replace a private runtime state file."""
     fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     try:
         with os.fdopen(fd, "w") as stream:
@@ -126,31 +124,6 @@ def runtime_ready(state):
     return False
 
 
-def save_pairing(config, state):
-    result = subprocess.run([state["cli"], "pair", "--address", config["ip"], "--json"],
-                            capture_output=True, text=True, timeout=15, env=cli_env())
-    if result.returncode:
-        raise RuntimeError("生成配对链接失败；服务仍在运行，可再次执行 ocra_web_run.sh start 重试。")
-    response = json.loads(result.stdout)
-    result = response.get("result", {})
-    expected = f"ws://{config['ip']}:{config['port']}"
-    url = result.get("pairingUrl", "")
-    if not response.get("ok") or not result.get("available") or result.get("endpoint") != expected:
-        raise RuntimeError("配对服务地址与配置不一致，未写入配对链接。")
-    try:
-        parsed = urlsplit(url)
-        code = parse_qs(parsed.query)["code"][0]
-        payload = json.loads(base64.urlsafe_b64decode(code + "=" * (-len(code) % 4)))
-        valid = parsed.scheme == "orca" and parsed.netloc == "pair" and payload["endpoint"] == expected
-    except (ValueError, KeyError, TypeError):
-        valid = False
-    if not valid:
-        raise RuntimeError("配对链接未包含配置中的主机地址，拒绝写入。")
-    config["pairingUrl"] = url
-    write_json(CONFIG, config)
-    print(f"配对链接已写入 {CONFIG} 的 pairingUrl 字段。")
-
-
 def start(config):
     state = managed_state()
     if state:
@@ -158,7 +131,6 @@ def start(config):
             raise RuntimeError("运行参数与配置不同；请在允许中断会话时先 stop，再 start。")
         if not runtime_ready(state):
             raise RuntimeError("托管进程仍存在但尚未就绪；请检查 data/server.log。")
-        save_pairing(config, state)
         print(f"Orca 已运行，PID {state['pid']}。")
         return
     if port_busy(config["port"]):
@@ -166,7 +138,7 @@ def start(config):
     if not CLI.is_file():
         raise RuntimeError("尚未安装，请先执行 bash ocra_ws/install.sh。")
     executable = CLI.resolve()
-    # No pairing credentials in logs: generate the offer through `pair --json` later.
+    # Pairing is requested explicitly with the CLI, never during service startup.
     with LOG.open("ab", buffering=0) as log:
         proc = subprocess.Popen([str(executable), "serve", "--bind", "0.0.0.0",
                                  "--port", str(config["port"]), "--pairing-address", config["ip"],
@@ -183,7 +155,6 @@ def start(config):
             raise RuntimeError("Orca 启动失败，请检查 data/server.log。")
         try:
             if runtime_ready(state):
-                save_pairing(config, state)
                 print(f"Orca 已就绪：{config['ip']}:{config['port']}，PID {proc.pid}。")
                 return
         except (subprocess.TimeoutExpired, json.JSONDecodeError):

@@ -1,4 +1,3 @@
-import base64
 import json
 import os
 from pathlib import Path
@@ -26,13 +25,13 @@ class LifecycleTests(unittest.TestCase):
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             self.port = sock.getsockname()[1]
-        self.config = {"ip": "10.30.0.25", "port": self.port, "pairingUrl": "", "custom": "preserved"}
+        self.config = {"ip": "10.30.0.25", "port": self.port, "custom": "preserved"}
         self.write_config()
         self.cli = self.data / "orca-server/bin/orca-ide"
         self.cli.parent.mkdir(parents=True)
         self.cli.write_text(textwrap.dedent('''\
             #!/usr/bin/env python3
-            import base64, json, os, pathlib, signal, socket, sys, time
+            import json, os, pathlib, signal, socket, sys, time
             root = pathlib.Path(__file__).resolve().parents[2]
             info = root / 'fake-runtime.json'
             args = sys.argv[1:]
@@ -51,11 +50,7 @@ class LifecycleTests(unittest.TestCase):
                 runtime = json.loads(info.read_text())
                 print(json.dumps({'ok': True, 'result': {'app': {'pid': runtime['pid']}, 'runtime': {'state': 'ready'}}}))
             elif args[0] == 'pair':
-                runtime = json.loads(info.read_text())
-                address = args[args.index('--address') + 1]
-                endpoint = 'ws://' + address + ':' + str(runtime['port'])
-                code = base64.urlsafe_b64encode(json.dumps({'endpoint': endpoint}).encode()).decode().rstrip('=')
-                print(json.dumps({'ok': True, 'result': {'available': True, 'endpoint': endpoint, 'pairingUrl': 'orca://pair?code=' + code}}))
+                raise RuntimeError('startup must not request pairing')
         '''))
         self.cli.chmod(0o700)
 
@@ -72,19 +67,16 @@ class LifecycleTests(unittest.TestCase):
         self.run_script("stop")
         self.tmp.cleanup()
 
-    def test_start_pair_status_repeat_stop(self):
+    def test_start_status_repeat_stop_preserves_config(self):
         result = self.run_script("start")
         self.assertEqual(result.returncode, 0, result.stderr)
         saved = json.loads((self.data / "ocra.conf").read_text())
-        code = saved["pairingUrl"].split("code=", 1)[1]
-        payload = json.loads(base64.urlsafe_b64decode(code + "=" * (-len(code) % 4)))
-        self.assertEqual(payload["endpoint"], f"ws://10.30.0.25:{self.port}")
-        self.assertEqual(saved["custom"], "preserved")
-        self.assertEqual((self.data / "ocra.conf").stat().st_mode & 0o777, 0o600)
+        self.assertEqual(saved, self.config)
         state = (self.data / "server.json").read_text()
         self.assertEqual(self.run_script("status").returncode, 0)
         self.assertEqual(self.run_script("start").returncode, 0)
         self.assertEqual((self.data / "server.json").read_text(), state)
+        self.assertEqual(json.loads((self.data / "ocra.conf").read_text()), self.config)
         self.assertNotIn("orca://pair", (self.data / "server.log").read_text())
         # stop reads recorded parameters even when the configuration is invalid.
         (self.data / "ocra.conf").write_text("invalid json")
@@ -115,18 +107,14 @@ class LifecycleTests(unittest.TestCase):
         result = self.run_script("start")
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_pairing_with_wrong_embedded_address_is_not_saved(self):
-        self.config["pairingUrl"] = "keep-existing-value"
+    def test_start_does_not_refresh_legacy_pairing_config(self):
+        self.config["pairingUrl"] = "legacy-value"
         self.write_config()
-        self.cli.write_text(self.cli.read_text().replace(
-            "json.dumps({'endpoint': endpoint}).encode()",
-            "json.dumps({'endpoint': 'ws://wrong-host:1'}).encode()"))
-        result = self.run_script("start")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("主机地址", result.stderr)
-        saved = json.loads((self.data / "ocra.conf").read_text())
-        self.assertEqual(saved["pairingUrl"], "keep-existing-value")
-        self.assertTrue((self.data / "server.json").exists())
+        before = (self.data / "ocra.conf").read_bytes()
+        for _ in range(2):
+            result = self.run_script("start")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((self.data / "ocra.conf").read_bytes(), before)
 
     def test_recycled_pid_is_not_signalled(self):
         (self.data / "server.json").write_text(json.dumps({"pid": os.getpid(), "startTime": "not-current"}))
