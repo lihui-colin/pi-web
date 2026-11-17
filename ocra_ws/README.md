@@ -1,6 +1,6 @@
 # Orca Server
 
-目录名沿用 `ocra_ws`。需要 Linux（x64/arm64、glibc）、Python 3、curl、tar、sha256sum 和 flock。安装官方 server-only 发布包，固定版本为 1.4.258，使用官方 SHA256 校验，无需系统 Node 或桌面环境。
+目录名沿用 `ocra_ws`。需要 Linux（x64/arm64、glibc）、Python 3、curl、tar、sha256sum 和 flock。安装官方 server-only 发布包，安装时查询官方最新稳定版本，使用官方发布元数据中的 SHA256 校验，无需系统 Node 或桌面环境。
 
 ```bash
 bash ocra_ws/install.sh
@@ -9,7 +9,7 @@ bash ocra_ws/ocra_web_run.sh status
 bash ocra_ws/ocra_web_run.sh stop
 ```
 
-脚本按自身位置定位目录，可以从任意工作目录执行。安装只准备程序和配置，不会启动或停止服务；重复安装复用相同版本，保留已有配置。程序、下载缓存、日志和进程记录均在本目录的 `data/` 下，不更改全局 Orca 安装。
+脚本按自身位置定位目录，可以从任意工作目录执行。安装只准备程序和配置，不会启动或停止服务；已安装最新版本时直接跳过；发现版本不同时提示是否更新，只有输入 y/yes 才更新，直接回车或无输入则跳过。保留已有配置，更新也不会自动重启运行中的服务。程序、下载缓存、日志和进程记录均在本目录的 `data/` 下，不更改全局 Orca 安装。
 
 首次运行会从 `ocra.conf.example` 创建 `data/ocra.conf`：
 

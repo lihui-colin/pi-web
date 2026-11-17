@@ -9,14 +9,31 @@ python3 "$ROOT/srcs/ocra.py" init
 exec 9>"$ROOT/data/manage.lock"
 flock -x 9
 
-# 固定版本与官方发布包的 SHA256；升级时同时更新版本和校验值。
-VERSION=1.4.258
 [[ $(uname -s) == Linux ]] || { echo '仅支持 Linux。' >&2; exit 1; }
 case "$(uname -m)" in
-  x86_64) ARCH=x64; SHA=fd7f23f5fb6fe43fb2982d17438d772fac7cc65c8208a212d0ffb224b504e311 ;;
-  aarch64|arm64) ARCH=arm64; SHA=a1279923700196e8ccd94952fea039f6d98f5d4f9485afca0295eddea8ccb033 ;;
+  x86_64) ARCH=x64 ;;
+  aarch64|arm64) ARCH=arm64 ;;
   *) echo '不支持的 CPU 架构。' >&2; exit 1 ;;
 esac
+# 每次查询官方最新稳定发布；查询失败时不把旧版本误报为最新。
+RELEASE_INFO="$(curl --fail --silent --show-error --location --retry 2 --connect-timeout 15 --max-time 60 \
+  https://api.github.com/repos/stablyai/orca/releases/latest |
+  python3 "$ROOT/srcs/release-info.py" "$ARCH")"
+read -r VERSION SHA <<< "$RELEASE_INFO"
+CURRENT=""
+if [[ -x "$ROOT/data/orca-server/bin/orca-ide" ]]; then
+  CURRENT="$("$ROOT/data/orca-server/bin/orca-ide" --version)"
+  if [[ "$CURRENT" == "$VERSION" ]]; then
+    printf '已安装最新版本 %s，跳过安装。\n' "$CURRENT"
+    exit 0
+  fi
+  printf '已安装版本：%s；官方最新版本：%s。是否更新？[y/N] ' "$CURRENT" "$VERSION"
+  answer=""
+  if ! read -r answer || [[ ! "$answer" =~ ^([yY]|[yY][eE][sS])$ ]]; then
+    echo '已跳过更新。'
+    exit 0
+  fi
+fi
 DEST="$ROOT/data/releases/$VERSION-linux-$ARCH"
 EXPECTED="$VERSION"
 if [[ -x "$DEST/bin/orca-ide" ]]; then
