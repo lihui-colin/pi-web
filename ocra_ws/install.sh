@@ -8,6 +8,7 @@ done
 python3 "$ROOT/srcs/ocra.py" init
 exec 9>"$ROOT/data/manage.lock"
 flock -x 9
+python3 "$ROOT/srcs/configure-profile.py" "$ROOT/data/profile-backups"
 
 [[ $(uname -s) == Linux ]] || { echo '仅支持 Linux。' >&2; exit 1; }
 case "$(uname -m)" in

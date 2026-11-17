@@ -23,7 +23,8 @@ class InstallTests(unittest.TestCase):
             {'name': f'orca-server-linux-{arch}.tar.gz', 'digest': 'sha256:' + 'a' * 64}
             for arch in ('x64', 'arm64')]}
         self.mock_release()
-        self.env = dict(os.environ, PATH=str(self.bin) + ':' + os.environ['PATH'])
+        self.env = dict(os.environ, PATH=str(self.bin) + ':' + os.environ['PATH'],
+                        XDG_CONFIG_HOME=str(self.root / 'config'))
 
     def mock_release(self):
         cli = self.bin / 'curl'
@@ -46,6 +47,9 @@ class InstallTests(unittest.TestCase):
         result = self.run_install()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('跳过安装', result.stdout)
+        profile = json.loads((self.root / 'config/orca/orca-data.json').read_text())
+        self.assertEqual(profile['settings']['agentDefaultSurface'], 'chat')
+        self.assertTrue(profile['settings']['nativeChatProviders']['codex'])
         self.assertEqual((self.root / 'data/ocra.conf').read_bytes(),
                          (self.root / 'ocra.conf.example').read_bytes())
 
